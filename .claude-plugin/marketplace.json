@@ -1,0 +1,14 @@
+{
+  "name": "paulomtts-plugins",
+  "owner": {
+    "name": "Paulo",
+    "email": "paulomtts@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "paulo-tools",
+      "source": "./plugins/paulo-tools",
+      "description": "Personal Claude Code skills: brief, containers, dispatch, explain, github-project-setup, layout, milestone, progress, smoke."
+    }
+  ]
+}

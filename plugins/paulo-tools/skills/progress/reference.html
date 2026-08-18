@@ -1,0 +1,431 @@
+<title>Analysis Results Rollout</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --surface-2: #eceef2;
+    --border: #d8dbe2;
+    --rule: #c3c8d2;
+    --text: #14171d;
+    --text-dim: #5b6270;
+    --text-faint: #8e95a3;
+    --accent: #4a49b8;
+    --accent-soft: #e2e1f6;
+    --done: #216e4e;
+    --done-soft: #d5e8de;
+    --active: #9a6212;
+    --active-soft: #f6e6c8;
+    --blocked: #a83228;
+    --blocked-soft: #f3d9d5;
+    --queued: #7b8291;
+    --queued-soft: #e6e8ed;
+    --shadow: 0 1px 2px rgba(20,23,29,0.05), 0 10px 28px -18px rgba(20,23,29,0.28);
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1014;
+      --surface: #171a20;
+      --surface-2: #1e222a;
+      --border: #2c313b;
+      --rule: #3a404c;
+      --text: #e6e9ef;
+      --text-dim: #9aa2b1;
+      --text-faint: #6b7382;
+      --accent: #9d9bf0;
+      --accent-soft: #262552;
+      --done: #62c493;
+      --done-soft: #16302a;
+      --active: #e0aa4e;
+      --active-soft: #3a2d13;
+      --blocked: #e0705f;
+      --blocked-soft: #3d211d;
+      --queued: #8b93a3;
+      --queued-soft: #242832;
+      --shadow: 0 1px 2px rgba(0,0,0,0.35), 0 14px 34px -20px rgba(0,0,0,0.7);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1014;
+    --surface: #171a20;
+    --surface-2: #1e222a;
+    --border: #2c313b;
+    --rule: #3a404c;
+    --text: #e6e9ef;
+    --text-dim: #9aa2b1;
+    --text-faint: #6b7382;
+    --accent: #9d9bf0;
+    --accent-soft: #262552;
+    --done: #62c493;
+    --done-soft: #16302a;
+    --active: #e0aa4e;
+    --active-soft: #3a2d13;
+    --blocked: #e0705f;
+    --blocked-soft: #3d211d;
+    --queued: #8b93a3;
+    --queued-soft: #242832;
+    --shadow: 0 1px 2px rgba(0,0,0,0.35), 0 14px 34px -20px rgba(0,0,0,0.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    padding: 44px 22px 72px;
+  }
+
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  .page { max-width: 1080px; margin: 0 auto; }
+
+  header { display: flex; flex-direction: column; gap: 8px; margin-bottom: 30px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-size: clamp(28px, 4.4vw, 38px);
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.012em;
+    text-wrap: balance;
+  }
+  .dek { color: var(--text-dim); max-width: 66ch; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 30px;
+    box-shadow: var(--shadow);
+  }
+  .stat { background: var(--surface); padding: 15px 17px; display: flex; flex-direction: column; gap: 3px; }
+  .stat .n {
+    font-family: var(--mono);
+    font-size: 27px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .stat.done .n { color: var(--done); }
+  .stat.active .n { color: var(--active); }
+  .stat.queued .n { color: var(--queued); }
+  .stat.blocked .n { color: var(--blocked); }
+  .stat .label {
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  figure {
+    margin: 0 0 30px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 18px 12px;
+    box-shadow: var(--shadow);
+  }
+  .figscroll { overflow-x: auto; }
+  figure svg { display: block; width: 100%; min-width: 720px; height: auto; }
+  figcaption {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    margin-top: 12px;
+    padding-top: 11px;
+    border-top: 1px dashed var(--rule);
+  }
+
+  .lvl { fill: var(--text-faint); font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; }
+  .nodebox { fill: var(--surface-2); stroke: var(--rule); stroke-width: 1.2; }
+  .nodebox.hot { stroke: var(--active); stroke-width: 2; }
+  .nid { fill: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 700; }
+  .nlabel { fill: var(--text-dim); font-size: 10.5px; }
+  .pip { fill: none; stroke: var(--queued); stroke-width: 1.6; }
+  .pip.run { stroke: var(--active); stroke-width: 2.2; }
+  .edge { fill: none; stroke: var(--rule); stroke-width: 1.4; }
+  .gridline { stroke: var(--rule); stroke-opacity: 0.5; }
+
+  h2 {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 0 0 12px;
+    font-weight: 600;
+  }
+
+  .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 32px; }
+  .note {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--active);
+    border-radius: 6px;
+    padding: 15px 17px;
+    box-shadow: var(--shadow);
+  }
+  .note.info { border-left-color: var(--accent); }
+  .note .head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+  .note .title { font-weight: 650; font-size: 14.5px; font-family: var(--serif); }
+  .note .scope {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--active);
+    background: var(--active-soft);
+    padding: 2px 7px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .note.info .scope { color: var(--accent); background: var(--accent-soft); }
+  .note p { margin: 0 0 8px; color: var(--text-dim); font-size: 13.5px; }
+  .note .fix { font-size: 13px; display: flex; gap: 6px; }
+  .note .fix b { color: var(--text); font-weight: 650; }
+
+  .wrap { overflow-x: auto; margin-bottom: 30px; }
+  table {
+    width: 100%;
+    min-width: 640px;
+    border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    font-size: 13.5px;
+  }
+  thead th {
+    text-align: left;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 600;
+    padding: 9px 13px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td { padding: 9px 13px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.lead td { border-top: 2px solid var(--rule); }
+  td.num { font-family: var(--mono); color: var(--text-dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.story { font-family: var(--mono); font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .pill::before { content: "\25CF"; font-size: 7px; }
+  .pill.run { color: var(--active); background: var(--active-soft); }
+  .pill.queued { color: var(--queued); background: var(--queued-soft); }
+  .pill.done { color: var(--done); background: var(--done-soft); }
+
+  footer {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: var(--text-faint);
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+  footer .mono { color: var(--text-dim); }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">Milestone 18 &middot; paulomtts/refactor-nori</div>
+    <h1>Workspace analysis results</h1>
+    <div class="dek">A read-only vertical slice: persist agent-produced query results and surface them as sub-tabs inside each Workspace file preview, reachable from a citation in the chat thread. Seeds are the only writer &mdash; no agent, no query execution.</div>
+  </header>
+
+  <div class="stats">
+    <div class="stat done">
+      <span class="n">0</span>
+      <span class="label">Merged</span>
+    </div>
+    <div class="stat active">
+      <span class="n">2</span>
+      <span class="label">Dispatching now</span>
+    </div>
+    <div class="stat queued">
+      <span class="n">18</span>
+      <span class="label">Queued behind deps</span>
+    </div>
+    <div class="stat blocked">
+      <span class="n">0</span>
+      <span class="label">Escalations</span>
+    </div>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+    <svg viewBox="0 0 1000 320" role="img" aria-label="Dependency graph of seven stories across five levels. Level 0 holds story 875 (analysis core, three subtasks) and story 877 (UI components, four subtasks), both starting immediately with no dependencies. Level 1 holds story 876 (SQL adapter, three subtasks) and story 880 (purge cascade, two subtasks), each waiting on 875. Level 2 holds story 878 (web wiring, three subtasks), waiting on 875, 876 and 877. Level 3 holds story 879 (citation deep-link, three subtasks), waiting on 877 and 878. Level 4 holds story 881 (seeds and end-to-end tests, two subtasks), waiting on 876, 878 and 879. The first subtask of each level-0 story is currently running; all other eighteen subtasks are queued.">
+      <g class="lvl">
+        <text x="90" y="14" text-anchor="middle">LEVEL 0</text>
+        <text x="290" y="14" text-anchor="middle">LEVEL 1</text>
+        <text x="490" y="14" text-anchor="middle">LEVEL 2</text>
+        <text x="690" y="14" text-anchor="middle">LEVEL 3</text>
+        <text x="890" y="14" text-anchor="middle">LEVEL 4</text>
+      </g>
+      <line class="gridline" x1="0" y1="22" x2="1000" y2="22"/>
+
+      <!-- edges: real blockedBy relations -->
+      <g class="edge">
+        <path d="M165,60 L215,60"/>
+        <path d="M165,60 C190,60 190,228 215,228"/>
+        <path d="M165,60 C280,60 300,144 415,144"/>
+        <path d="M165,228 C280,228 300,144 415,144"/>
+        <path d="M165,228 C380,252 480,240 615,162"/>
+        <path d="M365,60 C385,60 395,144 415,144"/>
+        <path d="M365,60 C560,30 700,40 815,130"/>
+        <path d="M565,144 L615,144"/>
+        <path d="M765,144 L815,144"/>
+        <path d="M565,144 C600,196 700,204 815,158"/>
+      </g>
+
+      <!-- L0: 875 -->
+      <g>
+        <rect class="nodebox hot" x="15" y="28" width="150" height="64" rx="5"/>
+        <text class="nid" x="27" y="48">#875</text>
+        <text class="nlabel" x="27" y="63">analysis core</text>
+        <circle class="pip run" cx="31" cy="79" r="4.5"/>
+        <circle class="pip" cx="46" cy="79" r="4.5"/>
+        <circle class="pip" cx="61" cy="79" r="4.5"/>
+      </g>
+      <!-- L0: 877 -->
+      <g>
+        <rect class="nodebox hot" x="15" y="196" width="150" height="64" rx="5"/>
+        <text class="nid" x="27" y="216">#877</text>
+        <text class="nlabel" x="27" y="231">UI components</text>
+        <circle class="pip run" cx="31" cy="247" r="4.5"/>
+        <circle class="pip" cx="46" cy="247" r="4.5"/>
+        <circle class="pip" cx="61" cy="247" r="4.5"/>
+        <circle class="pip" cx="76" cy="247" r="4.5"/>
+      </g>
+      <!-- L1: 876 -->
+      <g>
+        <rect class="nodebox" x="215" y="28" width="150" height="64" rx="5"/>
+        <text class="nid" x="227" y="48">#876</text>
+        <text class="nlabel" x="227" y="63">SQL adapter</text>
+        <circle class="pip" cx="231" cy="79" r="4.5"/>
+        <circle class="pip" cx="246" cy="79" r="4.5"/>
+        <circle class="pip" cx="261" cy="79" r="4.5"/>
+      </g>
+      <!-- L1: 880 -->
+      <g>
+        <rect class="nodebox" x="215" y="196" width="150" height="64" rx="5"/>
+        <text class="nid" x="227" y="216">#880</text>
+        <text class="nlabel" x="227" y="231">purge cascade</text>
+        <circle class="pip" cx="231" cy="247" r="4.5"/>
+        <circle class="pip" cx="246" cy="247" r="4.5"/>
+      </g>
+      <!-- L2: 878 -->
+      <g>
+        <rect class="nodebox" x="415" y="112" width="150" height="64" rx="5"/>
+        <text class="nid" x="427" y="132">#878</text>
+        <text class="nlabel" x="427" y="147">web wiring</text>
+        <circle class="pip" cx="431" cy="163" r="4.5"/>
+        <circle class="pip" cx="446" cy="163" r="4.5"/>
+        <circle class="pip" cx="461" cy="163" r="4.5"/>
+      </g>
+      <!-- L3: 879 -->
+      <g>
+        <rect class="nodebox" x="615" y="112" width="150" height="64" rx="5"/>
+        <text class="nid" x="627" y="132">#879</text>
+        <text class="nlabel" x="627" y="147">citation deep-link</text>
+        <circle class="pip" cx="631" cy="163" r="4.5"/>
+        <circle class="pip" cx="646" cy="163" r="4.5"/>
+        <circle class="pip" cx="661" cy="163" r="4.5"/>
+      </g>
+      <!-- L4: 881 -->
+      <g>
+        <rect class="nodebox" x="815" y="112" width="150" height="64" rx="5"/>
+        <text class="nid" x="827" y="132">#881</text>
+        <text class="nlabel" x="827" y="147">seeds + e2e</text>
+        <circle class="pip" cx="831" cy="163" r="4.5"/>
+        <circle class="pip" cx="846" cy="163" r="4.5"/>
+      </g>
+
+      <g class="lvl">
+        <text x="15" y="300">Each pip is one subtask &mdash; hollow queued, ringed running. Edges are real GitHub blockedBy relations.</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>Two lanes open the run: <span class="mono">#875</span> builds the <span class="mono">analysis</span> domain and application, while <span class="mono">#877</span> builds the sub-tab components against plain props with no backend dependency at all. They converge only at <span class="mono">#878</span>, which is therefore the schedule's single point of risk &mdash; everything upstream of it is two independent lanes, everything downstream is a straight line. Within each story, subtasks run strictly one at a time: worktree &rarr; branch &rarr; PR &rarr; full suite &rarr; merge, all through one lock, before the next subtask starts.</figcaption>
+  </figure>
+
+  <h2>Known gaps in the automated gate</h2>
+  <div class="notes">
+    <div class="note">
+      <div class="head">
+        <span class="title">e2e never runs at the merge gate</span>
+        <span class="scope">affects #901</span>
+      </div>
+      <p>The detected full suite is three invocations &mdash; <span class="mono">unit&nbsp;+&nbsp;integration</span>, <span class="mono">conformance</span>, <span class="mono">frontend</span>. <span class="mono">tests/e2e</span> is deliberately excluded from CI and runs in its own invocation, so subtask #901 &mdash; whose entire job is writing two end-to-end journeys &mdash; can merge green without its own tests ever executing.</p>
+      <div class="fix"><b>Fix:</b><span>Run <span class="mono">uv run pytest tests/e2e</span> by hand after #901 lands, before merging the branch to main.</span></div>
+    </div>
+    <div class="note info">
+      <div class="head">
+        <span class="title">Nothing reaches main</span>
+        <span class="scope">by design</span>
+      </div>
+      <p>All twenty PRs target <span class="mono">analysis-milestone-dev</span>, forked from <span class="mono">origin/main</span>. The full suite must pass on that branch after every single merge, so a break surfaces at the subtask that caused it rather than at the end.</p>
+      <div class="fix"><b>Next:</b><span>Review the integration branch as one diff, then merge to main yourself.</span></div>
+    </div>
+  </div>
+
+  <h2>All 20 subtasks</h2>
+  <div class="wrap">
+  <table>
+    <thead>
+      <tr><th>#</th><th>Lvl</th><th>Story</th><th>Subtask</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      <tr class="lead"><td class="num">882</td><td class="num">0</td><td class="story">#875 core</td><td>AnalysisResult aggregate, ResultColumn / AnalysisTarget, errors</td><td><span class="pill run">running</span></td></tr>
+      <tr><td class="num">883</td><td class="num">0</td><td class="story">#875 core</td><td>Ports, AnalysisResults service, AnalysisController</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">884</td><td class="num">0</td><td class="story">#875 core</td><td>Fake repo, unit invariants, integration tenancy scoping</td><td><span class="pill queued">queued</span></td></tr>
+      <tr class="lead"><td class="num">888</td><td class="num">0</td><td class="story">#877 UI</td><td>ResultTabGroup &mdash; nested PJXTabGroup, base + N results</td><td><span class="pill run">running</span></td></tr>
+      <tr><td class="num">889</td><td class="num">0</td><td class="story">#877 UI</td><td>AnalysisResultPanel &mdash; meta row and view switcher</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">890</td><td class="num">0</td><td class="story">#877 UI</td><td>ResultTableView, ResultChartView, ResultSqlView</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">891</td><td class="num">0</td><td class="story">#877 UI</td><td>Five frontend tests, incl. three-level nesting isolation</td><td><span class="pill queued">queued</span></td></tr>
+      <tr class="lead"><td class="num">885</td><td class="num">1</td><td class="story">#876 SQL</td><td>DbAnalysisResult mapping and SQL repo</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">886</td><td class="num">1</td><td class="story">#876 SQL</td><td>Alembic revision for analysis_results</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">887</td><td class="num">1</td><td class="story">#876 SQL</td><td>Conformance contract suite + persistence.md</td><td><span class="pill queued">queued</span></td></tr>
+      <tr class="lead"><td class="num">898</td><td class="num">1</td><td class="story">#880 purge</td><td>ConversationArtifactPort declared and called</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">899</td><td class="num">1</td><td class="story">#880 purge</td><td>Composition-root adapter over AnalysisController</td><td><span class="pill queued">queued</span></td></tr>
+      <tr class="lead"><td class="num">892</td><td class="num">2</td><td class="story">#878 web</td><td>Analysis factory and ViewContext accessor</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">893</td><td class="num">2</td><td class="story">#878 web</td><td>GET /analysis/{result_id}/preview route</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">894</td><td class="num">2</td><td class="story">#878 web</td><td>Mount ResultTabGroup in files.py + web.md</td><td><span class="pill queued">queued</span></td></tr>
+      <tr class="lead"><td class="num">895</td><td class="num">3</td><td class="story">#879 link</td><td>MessageCitation.result_id and its persistence</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">896</td><td class="num">3</td><td class="story">#879 link</td><td>MessageSources split into sources / results</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">897</td><td class="num">3</td><td class="story">#879 link</td><td>message_thread.js branch for data-open-result</td><td><span class="pill queued">queued</span></td></tr>
+      <tr class="lead"><td class="num">900</td><td class="num">4</td><td class="story">#881 seeds</td><td>seed/analysis.py + registration</td><td><span class="pill queued">queued</span></td></tr>
+      <tr><td class="num">901</td><td class="num">4</td><td class="story">#881 seeds</td><td>Two end-to-end journeys</td><td><span class="pill queued">queued</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <footer>Snapshot taken 2026-08-13 at the start of orchestrator run <span class="mono">wf_ab978d64-52b</span>, targeting <span class="mono">analysis-milestone-dev</span>. Specs live locally only &mdash; <span class="mono">docs/superpowers/</span> is gitignored, and every subtask cites them by section and line range.</footer>
+
+</div>
