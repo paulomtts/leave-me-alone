@@ -6,9 +6,9 @@
   },
   "plugins": [
     {
-      "name": "paulo-tools",
-      "source": "./plugins/paulo-tools",
-      "description": "Personal Claude Code skills: brief, containers, dispatch, explain, github-project-setup, layout, milestone, progress, smoke."
+      "name": "leave-me-alone",
+      "source": "./plugins/leave-me-alone",
+      "description": "Personal Claude Code skills: brief, containers, dispatch, explain, github-project-setup, layout, milestone, progress, smoke. Includes a hook that auto-allows routine Bash patterns so the auto-mode classifier stops asking every session."
     }
   ]
 }
