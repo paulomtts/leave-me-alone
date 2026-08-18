@@ -1,5 +1,5 @@
 ---
-name: github-project-setup
+name: setup-project
 description: Use when preparing a repo's GitHub Projects v2 board so the global orchestrator/task workflows can drive it — "set up the board for this repo", "is my project ready for the orchestrator", "the workflow says my Status field is missing", "create the story/subtask labels and Status column". Covers the board, field, labels, milestone and sub-issue preconditions, plus a pre-flight verification checklist.
 ---
 
@@ -10,8 +10,8 @@ description: Use when preparing a repo's GitHub Projects v2 board so the global 
 board id **by name at runtime**. Nothing is hardcoded — but the names have to exist.
 
 This skill is about the **board**. Creating the issues themselves (story + subtask shape, bodies,
-sub-issue attachment) is `creating-stories-and-subtasks` / `milestone` — cross-reference it, don't
-duplicate it. Do that one first, this one second.
+sub-issue attachment) is `setup-milestone` — cross-reference it, don't duplicate it. Do that one
+first, this one second.
 
 Replace `OWNER`/`REPO` throughout. `gh auth status` must show the `project` scope
 (`gh auth refresh -s project,read:project` if not).

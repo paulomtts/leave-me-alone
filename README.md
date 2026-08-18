@@ -20,13 +20,12 @@ Push changes to this repo, then in Claude Code:
 ## Contents (leave-me-alone)
 
 - `brief` — /brief, fast recap of conversation/task state
-- `containers` — rebuild worktree containers, dodging port conflicts
-- `dispatch` — /dispatch, launch a subagent pinned to a specific model
+- `build-containers` — rebuild worktree containers, dodging port conflicts
+- `dispatch-subagent` — /dispatch-subagent, launch a subagent pinned to a specific model
 - `explain` — /explain, plain-language explanation + ASCII architecture diagram
-- `github-project-setup` — preps a repo's GitHub Projects v2 board for the orchestrator/task workflows
-- `layout` — maps a UI surface's component/layout tree
-- `milestone` — sets up a GitHub milestone with story issues + sub-issue subtasks
-- `progress` — renders an in-flight-work progress dashboard as an Artifact
+- `setup-project` — preps a repo's GitHub Projects v2 board for the orchestrator/task workflows
+- `setup-milestone` — sets up a GitHub milestone with story issues + sub-issue subtasks
+- `setup-report` — renders an in-flight-work progress dashboard as an Artifact
 - `smoke` — /smoke, rebuild + drive the app in Chrome to smoke-test recent work
 
 ## Auto-allow hook
@@ -42,7 +41,7 @@ or invoking the classifier:
 - **Read-only / lifecycle**: `git status|log|diff|show|branch|rev-parse|remote|fetch|stash list|blame|describe`,
   `gh auth status|refresh`, `gh issue/pr list|view`, `gh pr checks`, `gh project list|view|item-list`,
   `gh label list`, `gh repo view`, `docker compose build|up|down|ps|logs`, `docker ps`, `ss -ltn`, `lsof -iTCP`.
-- **GitHub writes** used by `milestone` / `github-project-setup`: `gh issue create`, `gh label create`,
+- **GitHub writes** used by `setup-milestone` / `setup-project`: `gh issue create`, `gh label create`,
   `gh project create`, `gh project item-add|item-edit`, `gh api graphql`, `gh api ... -X POST|PATCH|PUT`.
 - **git merge/push/rebase and `gh pr merge`** — allowed *only* when the target branch is not `main`/`master`.
   For `git merge|push|rebase` this is a text check on the command; for `gh pr merge` (which often doesn't

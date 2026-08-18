@@ -1,9 +1,9 @@
 ---
-name: progress
-description: Use when the user asks to see or generate a progress diagram/dashboard/snapshot of in-flight work — "/progress", "show me where things stand", "visualize progress on the milestone", "update the progress board" — or asks to refresh an artifact a prior /progress call already made this session.
+name: setup-report
+description: Use when the user asks to see or generate a progress diagram/dashboard/snapshot of in-flight work — "/setup-report", "show me where things stand", "visualize progress on the milestone", "update the progress board" — or asks to refresh an artifact a prior /setup-report call already made this session.
 ---
 
-# Progress
+# setup-report
 
 Renders the current state of in-flight work as a published Artifact: a stat strip, a
 diagram, blocker or caveat call-outs, and a detail table. The *shape* of the diagram is
@@ -16,7 +16,7 @@ to avoid.
 Don't ask first — look. In priority order, the first source that has live data wins:
 
 1. **An active orchestrator/milestone run** (GitHub Projects v2 board with story/subtask
-   issues, per this session's `orchestrator`/`task`/`milestone` skills) — pull real state with
+   issues, per this session's `orchestrator`/`task`/`setup-milestone` skills) — pull real state with
    `gh`: issue/sub-issue status, PR state, CI check conclusions (`gh pr checks`), board Status
    field.
 2. **A ledger board** (`.claude/ledger/BOARD.md`, if the repo has one — see the `ledger`

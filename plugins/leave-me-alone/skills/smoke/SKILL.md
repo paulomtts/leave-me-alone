@@ -18,7 +18,7 @@ Verify recently delivered work actually works, live, in the browser — not just
    - When your smoke pass finishes (report delivered, or you're aborting), release it: either delete the file or overwrite with `status=released`. Don't leave it dangling — a stale "active" lock blocks the next session for no reason.
    - This is advisory, not enforced — it only works if every smoke run checks it. If you discover another session mid-run despite the lock (e.g. the user tells you), stop driving the browser and hand off/serialize rather than racing further requests.
 
-3. **Rebuild containers.** Invoke the `rebuild` skill (or run its steps directly: bump host ports +100 in `docker-compose.yml`, `docker compose build`, `docker compose up -d`) to dodge port conflicts with any stack already running. Report the resulting host ports.
+3. **Rebuild containers.** Invoke the `build-containers` skill (or run its steps directly: bump host ports +100 in `docker-compose.yml`, `docker compose build`, `docker compose up -d`) to dodge port conflicts with any stack already running. Report the resulting host ports.
    - If `docker compose up` fails because a shifted port is still taken, report the conflict — don't keep guessing offsets.
    - Watch container logs for startup errors before treating the stack as ready:
      ```

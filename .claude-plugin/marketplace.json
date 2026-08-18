@@ -8,7 +8,7 @@
     {
       "name": "leave-me-alone",
       "source": "./plugins/leave-me-alone",
-      "description": "Personal Claude Code skills: brief, containers, dispatch, explain, github-project-setup, layout, milestone, progress, smoke. Includes a hook that auto-allows routine Bash patterns so the auto-mode classifier stops asking every session."
+      "description": "Personal Claude Code skills: brief, build-containers, dispatch-subagent, explain, setup-project, setup-milestone, setup-report, smoke. Includes a hook that auto-allows routine Bash patterns so the auto-mode classifier stops asking every session."
     }
   ]
 }

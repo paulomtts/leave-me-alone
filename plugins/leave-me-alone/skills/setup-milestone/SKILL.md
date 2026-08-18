@@ -1,5 +1,5 @@
 ---
-name: milestone
+name: setup-milestone
 description: Use when setting up a GitHub milestone and breaking its work into story issues with granular subtask cards — "create a milestone", "set up a milestone for X", "break this milestone/step into stories and subtasks", "add subtasks to the board" — on repos using a story/subtask Projects-v2 board (e.g. paulomtts/pyjinhx, project 12).
 ---
 
