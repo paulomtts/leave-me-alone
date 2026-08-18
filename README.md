@@ -26,7 +26,7 @@ Push changes to this repo, then in Claude Code:
 - `setup-project` — preps a repo's GitHub Projects v2 board for the orchestrator/task workflows
 - `setup-milestone` — sets up a GitHub milestone with story issues + sub-issue subtasks
 - `setup-report` — renders an in-flight-work progress dashboard as an Artifact
-- `smoke` — /smoke, rebuild + drive the app in Chrome to smoke-test recent work
+- `smoke-test` — /smoke-test, rebuild + drive the app in Chrome to smoke-test recent work
 
 ## Auto-allow hook
 

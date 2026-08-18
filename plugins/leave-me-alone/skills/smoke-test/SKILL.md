@@ -1,9 +1,9 @@
 ---
-name: smoke
-description: Smoke test features just delivered — rebuild containers (dodging port conflicts), drive the app through Claude's Chrome extension, and produce a fix-ready report. Use when the user says "/smoke" or asks to smoke test, verify in-browser, or sanity-check something just shipped.
+name: smoke-test
+description: Smoke test features just delivered — rebuild containers (dodging port conflicts), drive the app through Claude's Chrome extension, and produce a fix-ready report. Use when the user says "/smoke-test" or asks to smoke test, verify in-browser, or sanity-check something just shipped.
 ---
 
-# smoke
+# smoke-test
 
 Verify recently delivered work actually works, live, in the browser — not just tests passing.
 
