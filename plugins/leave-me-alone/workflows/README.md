@@ -22,6 +22,13 @@ SessionStart hook copies `workflows/*.js` and the runtime helpers into `~/.claud
 
 The plugin is the source of truth and the hook OVERWRITES — edit the plugin, not the copy.
 
+**Updates reach the workflows one session late.** Skills and agent types are plugin components and
+switch over the moment you update; the workflow scripts are copied by a hook that has *already run*
+by then. So between updating and restarting you are running new skills and new agent types against
+the old scripts, and an old `orchestrator.js` has no idea it is old. The hook stamps
+`~/.claude/workflows/.synced-version` and says so when the version moves, but it cannot close the
+gap — a hook cannot run before the update it reacts to. **Update, restart, then run a milestone.**
+
 `bun` and `gh` on PATH. A GitHub Projects v2 board — there is no boardless mode. Board setup and the
 milestone conventions are the `setup-project` and `setup-milestone` skills.
 

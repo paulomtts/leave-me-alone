@@ -46,6 +46,34 @@ for f in "${src}"/scripts/*.mjs; do
   copy "$f" "${dest}/scripts/$(basename "$f")"
 done
 
+# Stamp what was synced, and say so when it moved.
+#
+# Skills and agents are plugin components: an update switches them over at once.
+# Workflows are not — they are copied by THIS hook, which has already run by the
+# time an update lands. So for the rest of that session you are running new
+# skills and new agent types against the OLD workflow scripts, and an old
+# orchestrator.js has no idea it is old.
+#
+# The stamp cannot close that gap: a hook cannot run before the update it reacts
+# to. What it does is make the gap visible, so "restart before running a
+# milestone" is something you are told rather than something you must remember.
+version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "${src}/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
+stamp="${dest}/.synced-version"
+previous="$(cat "${stamp}" 2>/dev/null || true)"
+
+if [ -n "${version}" ]; then
+  printf '%s\n' "${version}" > "${stamp}"
+fi
+
 if [ "${changed}" -gt 0 ]; then
-  echo "leave-me-alone: synced ${changed} workflow file(s) to ${dest}"
+  echo "leave-me-alone: synced ${changed} workflow file(s) to ${dest} (v${version:-unknown})"
+  if [ -n "${previous}" ] && [ "${previous}" != "${version}" ]; then
+    echo "leave-me-alone: workflows moved v${previous} -> v${version:-unknown}. If you updated the"
+    echo "  plugin during the PREVIOUS session, anything you ran then used the older scripts."
+  fi
+elif [ -n "${previous}" ] && [ "${previous}" != "${version}" ]; then
+  # Files identical but the version moved: the plugin changed in ways that did
+  # not touch workflows/. Worth one line, because it confirms the sync is live.
+  echo "leave-me-alone: plugin v${previous} -> v${version:-unknown}; workflow scripts unchanged"
 fi
