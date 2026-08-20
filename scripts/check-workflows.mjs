@@ -13,13 +13,24 @@ export function wrapSource(source) {
   return `async function __wrap(){\n${source.replace(EXPORT_META_RE, '$1')}\n}`
 }
 
+export function validateMeta(source) {
+  if (!EXPORT_META_RE.test(source)) return ['missing top-level "export const meta"']
+  return []
+}
+
 export async function checkFile(file) {
   const source = await readFile(file, 'utf8')
   try {
     new vm.Script(wrapSource(source), { filename: file })
-    return { file, ok: true, error: null }
   } catch (err) {
-    return { file, ok: false, error: err.message }
+    return { file, ok: false, error: err.message, errors: [err.message] }
+  }
+  const errors = validateMeta(source)
+  return {
+    file,
+    ok: errors.length === 0,
+    error: errors.length === 0 ? null : errors.join('; '),
+    errors,
   }
 }
 
@@ -36,7 +47,7 @@ export async function checkWorkflows(targets, report = (line) => console.error(l
   for (const file of targets) {
     const result = await checkFile(file)
     results.push(result)
-    if (!result.ok) report(`FAIL ${file}: ${result.error}`)
+    for (const message of result.errors) report(`FAIL ${file}: ${message}`)
   }
   return results
 }

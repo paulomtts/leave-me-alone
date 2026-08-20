@@ -86,3 +86,40 @@ test('a broken file does not stop later files from being checked', async () => {
   assert.notEqual(result.code, 0, 'expected a non-zero exit code')
   assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
 })
+
+const NO_META_WORKFLOW = `const value = 1
+
+return { ok: value === 1 }
+`
+
+test('script with no meta export fails and says meta is missing', async () => {
+  const file = await fixture('no-meta.js', NO_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  const output = result.stdout + result.stderr
+  assert.ok(output.includes(file), `expected output to name ${file}\n${output}`)
+  assert.match(output, /missing top-level "export const meta"/)
+})
+
+const INDENTED_META_WORKFLOW = `// usage:
+//   export const meta = { name: 'x', description: 'y' }
+
+return { ok: true }
+`
+
+test('an indented (non top-level) export const meta does not count as meta', async () => {
+  const file = await fixture('indented-meta.js', INDENTED_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, /missing top-level "export const meta"/)
+})
+
+test('a syntax error short-circuits meta validation', async () => {
+  const file = await fixture('broken.js', BROKEN_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  const output = result.stdout + result.stderr
+  assert.match(output, /Unexpected token/)
+  assert.doesNotMatch(output, /meta\./)
+  assert.doesNotMatch(output, /missing top-level/)
+})
