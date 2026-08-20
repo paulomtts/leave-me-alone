@@ -82,6 +82,11 @@ test('script with a real syntax error fails and names the file', async () => {
   const output = result.stdout + result.stderr
   assert.ok(output.includes(file), `expected output to name ${file}\n${output}`)
   assert.match(output, /Unexpected token/)
+  assert.ok(
+    result.stderr.includes(`FAIL ${file}`),
+    `default mode must still write a FAIL line naming the file\n${result.stderr}`,
+  )
+  assert.match(result.stdout, /checked 1 workflow script\(s\); 1 failed/)
 })
 
 test('a broken file does not stop later files from being checked', async () => {
