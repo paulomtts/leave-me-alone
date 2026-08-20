@@ -31,3 +31,22 @@ test('newlines and whitespace are preserved, not collapsed', () => {
   const text = '  first\n\nsecond  '
   assert.equal(truncate(text, 100), text)
 })
+
+test('text one character over the limit is cut and marked', () => {
+  const got = truncate('abcdef', 5)
+  assert.equal(got, 'abcde…')
+  assert.ok(got.startsWith('abcde'))
+  assert.ok(got.endsWith('…'))
+})
+
+test('the ellipsis is one character, not three dots', () => {
+  const got = truncate('abcdefghij', 4)
+  assert.equal(got, 'abcd…')
+  assert.equal(got.length, 5) // max + 1, so U+2026 rather than "..."
+  assert.equal(got.slice(-1), '…')
+})
+
+test('a non-string is coerced with String(...)', () => {
+  assert.equal(truncate(12345, 10), '12345')
+  assert.equal(truncate(12345, 3), '123…')
+})

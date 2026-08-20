@@ -63,10 +63,11 @@ export function parseNdjson(text) {
 }
 
 // Bounded text for log lines and PR bodies. Pure: no trimming, no word
-// boundaries — just the first `max` code units.
+// boundaries — just the first `max` code units plus a single U+2026.
 export function truncate(text, max) {
   if (text === null || text === undefined) return ''
-  return String(text)
+  const raw = String(text)
+  return raw.length <= max ? raw : `${raw.slice(0, max)}…`
 }
 
 export async function withRetries(label, attempt, tries = 3) {
