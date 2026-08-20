@@ -220,7 +220,7 @@ Workflow({ name: "orchestrator" }, args: {
   nonce: "<current timestamp>", dryRun: true,
   taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
   detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
-  projectScript: "/abs/path/to/leave-me-alone/scripts/resolve-project.mjs",
+  projectScript: "/abs/path/to/leave-me-alone/scripts/resolve.mjs",
   project: { number: PROJ }
 })
 ```
@@ -241,7 +241,7 @@ either decides anything. Both are **triggers**: each runs one command and hands 
 
 ```jsonc
 "detectScript":  "/abs/path/to/leave-me-alone/scripts/detect.mjs",
-"projectScript": "/abs/path/to/leave-me-alone/scripts/resolve-project.mjs"
+"projectScript": "/abs/path/to/leave-me-alone/scripts/resolve.mjs"
 ```
 
 `detectScript` is **required**, like `taskScript`, and for the same reason: this repo can be checked
@@ -268,7 +268,7 @@ To inspect a board by hand — or to debug a run that came back wrong — the sa
 
 ```bash
 bun scripts/detect.mjs --repo OWNER/REPO --milestone 12          # human-readable
-bun scripts/resolve-project.mjs --owner OWNER --number 13        # ids, ready to paste
+bun scripts/resolve.mjs --owner OWNER --number 13        # ids, ready to paste
 ```
 
 ## Skipping the id lookup

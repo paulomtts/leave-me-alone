@@ -5,7 +5,7 @@
 // the URL — it needs opaque node ids. This runs the two queries that translate
 // one into the other and prints what they returned, VERBATIM.
 //
-//   bun scripts/resolve-project.mjs --owner you --number 13 --compact
+//   bun scripts/resolve.mjs --owner you --number 13 --compact
 //
 // It deliberately does NOT decide which field or which options are the right
 // ones. That matching is exact string equality against names the caller
@@ -24,10 +24,10 @@ export function parseArgs(argv) {
     compact: flags['--compact'] === true,
   }
   if (typeof out.owner !== 'string' || out.owner.length === 0 || /\s/.test(out.owner)) {
-    throw new Error('resolve-project needs --owner <login>')
+    throw new Error('resolve needs --owner <login>')
   }
   if (!Number.isInteger(out.number) || out.number <= 0) {
-    throw new Error('resolve-project needs --number <the small integer from the project URL>')
+    throw new Error('resolve needs --number <the small integer from the project URL>')
   }
   return out
 }

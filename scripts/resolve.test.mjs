@@ -3,7 +3,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, query, resolveProject } from './resolve-project.mjs'
+import { parseArgs, query, resolveProject } from './resolve.mjs'
 
 const STATUS = {
   id: 'F_1', name: 'Status',

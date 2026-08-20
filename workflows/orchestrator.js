@@ -717,7 +717,7 @@ if (hasResolvedBoardIds(projectArg)) {
 } else if (projectArg && Number.isInteger(Number(projectArg.number)) && !projectScript) {
   log('board DISABLED for this run: `project` was given as a number but args.projectScript is missing, '
     + 'so there is no deterministic way to resolve its ids (there is no agent fallback). Pass '
-    + 'projectScript as an absolute path to scripts/resolve-project.mjs, or pass the resolved '
+    + 'projectScript as an absolute path to scripts/resolve.mjs, or pass the resolved '
     + '{id, fieldId, optionIds} block instead.')
 } else if (projectArg && Number.isInteger(Number(projectArg.number))) {
   // Softly, because "the board is best-effort" was only half true: a RETURNED
