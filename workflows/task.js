@@ -4,15 +4,14 @@ export const meta = {
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
     { title: 'Resume', detail: 'check for an existing PR on this issue\'s branch — short-circuit if merged or open', model: 'haiku' },
-    { title: 'Intake', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands', model: 'sonnet' },
-    { title: 'Board', detail: 'card moves (subtask + story mirror)', model: 'haiku' },
+    { title: 'Intake', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
     { title: 'Spec', detail: 'scope, behavior, error paths, test list', model: 'sonnet' },
     { title: 'Plan', detail: 'TDD implementation plan from the spec', model: 'opus' },
     { title: 'Validate', detail: 'adversarial plan review, fixes folded in', model: 'sonnet' },
     { title: 'Implement', detail: 'worktree + strict TDD, granular commits', model: 'sonnet' },
-    { title: 'Review', detail: 'branch diff review + fixes', model: 'sonnet' },
+    { title: 'Review', detail: 'branch diff review + fixes; unresolved blockers stop the run', model: 'sonnet' },
     { title: 'Verify', detail: 'full suite + typecheck + lint + test-integrity gate', model: 'haiku' },
-    { title: 'PR', detail: 'push, open PR (no merge)', model: 'haiku' },
+    { title: 'PR', detail: 'push, open PR (no merge); card -> In review', model: 'haiku' },
   ],
 }
 
@@ -156,19 +155,21 @@ gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projec
 const board = await resolveProject()
 const optionNames = board ? board.optionNames : null
 
-// 'spec' and 'implementing' both land on "In progress" — a repo's Status field
-// rarely carries a separate spec-and-plan column; they stay distinct keys
-// because they mark distinct pipeline points.
-const STAGE_OPTION = { backlog: 'backlog', spec: 'inProgress', implementing: 'inProgress', 'in-review': 'inReview', done: 'done' }
-
-// Board bookkeeping must never kill the pipeline: a failed or thrown card
-// move logs and moves on.
-async function moveCard(stage) {
-  if (!board) return 'boardless — skipped'
-  const optionKey = STAGE_OPTION[stage]
-  try {
-    return await agent(`This is routine, pre-authorized board bookkeeping, not a standalone or unrelated edit: the user explicitly invoked the /task pipeline (directly, or via the orchestrator workflow driving a whole milestone end-to-end) on ${repo} issue #${issue}, and mirroring each subtask's pipeline stage onto its board card is a standard, expected step of that pipeline. No further per-card confirmation is needed.
-
+// This workflow only ever makes TWO card moves: "In progress" when Intake
+// accepts the subtask, and "In review" when its PR opens. An earlier version
+// also moved the card at spec->implement, but both of those stages map to the
+// SAME "In progress" option — the second mutation always wrote the value the
+// first had just written. "Backlog" belongs to milestone setup and "Done" to
+// the orchestrator's post-merge step; neither is this workflow's to write.
+//
+// Reusable prompt fragment for the board mutation — embeddable as the TAIL of
+// another stage's own agent call (Intake/PR) instead of a separate dispatch,
+// since that agent already has tool access and full context. Every call site
+// must frame this as best-effort and instruct the model not to let its failure
+// affect the stage's real return value.
+function boardMoveInstructions(optionKey) {
+  if (!board) return ''
+  return `
 Move the board card for ${repo} issue #${issue} to Status "${optionNames[optionKey]}", then mirror its parent story. Use ONLY the Status-setting mutation below — never create, close, edit, or delete anything.
 
 1. Find the card:
@@ -179,14 +180,7 @@ gh api graphql -f query='mutation($i:ID!,$o:String!){updateProjectV2ItemFieldVal
 
 3. Mirror the parent story. Fetch:
 gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repo.split('/')[0]}" -f r="${repo.split('/')[1]}" -F n=${issue}
-If there is no parent, stop here. Otherwise, among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target status by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target is "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target is "${optionNames.done}"; otherwise (a mix) target is "${optionNames.inProgress}". Then find the parent's card with the step-1-style query (its issue number) and set its Status with the step-2-style mutation using this option-id map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.
-
-Return one line: "#${issue} -> ${optionNames[optionKey]}; story #<P> -> <Name>" (or "no parent" / the exact error).`,
-      { label: `board:${stage}`, phase: 'Board', model: 'haiku', effort: 'low' })
-  } catch (err) {
-    log(`board move "${stage}" for #${issue} threw (${err && err.message ? err.message : err}) — continuing without it`)
-    return 'board move failed — skipped'
-  }
+If there is no parent, stop here. Otherwise, among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target status by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target is "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target is "${optionNames.done}"; otherwise (a mix) target is "${optionNames.inProgress}". Then find the parent's card with the step-1-style query (its issue number) and set its Status with the step-2-style mutation using this option-id map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.`
 }
 
 // ── 1. intake ────────────────────────────────────────────────────────────────
@@ -198,12 +192,14 @@ const verificationStep = providedVerification
 
 const intake = await callAgent(`Intake for ${repo} subtask #${issue} in ${repoDir}.
 
-1. \`gh issue view ${issue} --repo ${repo} --json title,body,labels,milestone\` — if the labels do NOT include "subtask" (e.g. it is a story), set refused=true with the reason and stop.
+1. \`gh issue view ${issue} --repo ${repo} --json title,body,labels,milestone\` — if the labels do NOT include "subtask" (e.g. it is a story), set refused=true with the reason and stop (skip everything below, including the board step).
 2. Read the parent story (\`gh api graphql\` on issue.parent, or the "Subtask of #N" line in the body) and list its sibling sub-issues with states.
 3. Read this repo's own architecture/standards docs (check CLAUDE.md for an index) and any specs/ADRs the story or subtask cites.
 4. Locate the code the subtask touches: existing modules and sibling tests.
 ${verificationStep}
 6. Find this repo's own test-tier PLACEMENT rules — do NOT assume a taxonomy. Its testing standards doc usually says which tier owns what kind of test (e.g. "unit owns pure combinations, integration owns paths, e2e owns wiring, conformance owns real-vs-fake equivalence" is one repo's version — another repo's tiers and rules will differ). Cite the doc path and summarize its placement rule in one or two lines inside your summary — every later stage that writes a test needs this to place it correctly, not default to a habitual tier out of habit.
+${DRY || board === null ? '' : `
+7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress')}`}
 
 Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`,
   { label: `intake:#${issue}`, phase: 'Intake', model: 'sonnet', schema: {
@@ -231,8 +227,6 @@ if (DRY) {
     note: 'dryRun: Intake only. No worktree, no writes.' }
 }
 
-await moveCard('spec')
-
 // ── plan-check — is there already a VALIDATED plan for this issue? ──────────
 // Filename is deterministic per issue (no date), so it survives across days
 // and reruns. A validated plan is the durable checkpoint for the three most
@@ -240,14 +234,16 @@ await moveCard('spec')
 // all three when one already exists, same durable-state pattern orchestrator
 // uses for subtask doneness (see orchestrator.js's isSubtaskDone).
 phase('Spec')
-const planCheck = await callAgent(`In ${repoDir}, look for an already-saved implementation plan for subtask #${issue}. Check ${repoDir}/CLAUDE.md and existing plan files to find this repo's plans directory convention (fall back to ${repoDir}/.claude/plans/), then look there for a file matching *issue-${issue}.md. Read only — do not create or modify anything. If found, return its absolute path and full content; if not, found=false.`,
+const planCheck = await callAgent(`In ${repoDir}, look for an already-saved implementation plan for subtask #${issue}. Check ${repoDir}/CLAUDE.md and existing plan files to find this repo's plans directory convention (fall back to ${repoDir}/.claude/plans/), then look there for a file matching *issue-${issue}.md. Read only — do not create or modify anything.
+
+If no such file exists, return found=false. If one does, return found=true, its ABSOLUTE path, and validated=true ONLY if the file literally contains the marker line \`<!-- task-pipeline: validated -->\` — test that with \`grep -Fq '<!-- task-pipeline: validated -->' <path>\` and report what grep actually said. Do NOT return the file's contents; the marker check is the only thing this step decides.`,
   { label: `plan-check:#${issue}`, phase: 'Spec', model: 'haiku', effort: 'low', schema: {
     type: 'object', required: ['found'],
-    properties: { found: { type: 'boolean' }, path: { type: 'string' }, content: { type: 'string' } },
+    properties: { found: { type: 'boolean' }, validated: { type: 'boolean' }, path: { type: 'string' } },
   } })
 
 let plan
-if (planCheck && planCheck.found && String(planCheck.content).includes('<!-- task-pipeline: validated -->') &&
+if (planCheck && planCheck.found && planCheck.validated === true &&
     typeof planCheck.path === 'string' && planCheck.path.trim().startsWith('/')) {
   plan = planCheck.path.trim()
   log(`resumed: validated plan already exists at ${plan} — skipping Spec/Plan/Validate`)
@@ -297,33 +293,30 @@ Return ONLY the absolute path of the saved plan file.`,
 
 Try to BREAK it before implementation: contradictions with this repo's architecture/standards docs (read them; the intake cites them), decisions that bite sibling subtasks, dishonest or tautological tests, config side-effects, steps not executable verbatim. Verify every suspicion against the actual files/tools before reporting (run commands if needed).
 
-Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust. Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
+Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust.
+
+Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. The card is already "${optionNames ? optionNames.inProgress : 'In progress'}" from Intake; do not touch the board here.
+
+Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
     { label: `validate:#${issue}`, phase: 'Validate', model: 'sonnet', schema: {
       type: 'object', required: ['blockers', 'summary'],
       properties: { blockers: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' } },
     } })
   if (!verdict || verdict.blockers) {
-    // Best-effort note on the issue; the structured return below is the real
-    // signal and must not be lost to a comment failure.
-    try {
-      await agent(`Comment on ${repo} issue #${issue}: the /task workflow stopped at validation. Reason: ${verdict ? verdict.reason : 'validator died'}. Use \`gh issue comment ${issue} --repo ${repo} --body "..."\` with a concise version.`,
-        { label: 'blocked-comment', phase: 'Validate', model: 'haiku', effort: 'low' })
-    } catch (err) {
-      log(`blocked-comment agent threw (${err && err.message ? err.message : err}) — returning the blocker anyway`)
+    // Validate posts its own blocked-comment as its last step — but a DEAD
+    // validator (null after callAgent's retry) never got that far, so the
+    // issue would go silent. Only that case needs the fallback dispatch.
+    if (!verdict) {
+      try {
+        await agent(`Comment on ${repo} issue #${issue}: the /task workflow stopped at validation because the validator agent died without returning a verdict. Use \`gh issue comment ${issue} --repo ${repo} --body "..."\` with a concise version.`,
+          { label: `blocked-comment:#${issue}`, phase: 'Validate', model: 'haiku', effort: 'low' })
+      } catch (err) {
+        log(`blocked-comment agent threw (${err && err.message ? err.message : err}) — returning the blocker anyway`)
+      }
     }
     return { issue, blocked: 'validation', reason: verdict ? verdict.reason : 'validator died' }
   }
-
-  // ── checkpoint comment — best-effort, never fatal ────────────────────────────
-  try {
-    await agent(`Comment on ${repo} issue #${issue} (concise, one line): the /task pipeline validated its implementation plan at ${plan} and is proceeding to implementation. Use \`gh issue comment ${issue} --repo ${repo} --body "..."\`.`,
-      { label: 'checkpoint-validated', phase: 'Validate', model: 'haiku', effort: 'low' })
-  } catch (err) {
-    log(`checkpoint comment (validated) threw (${err && err.message ? err.message : err}) — continuing without it`)
-  }
 }
-
-await moveCard('implementing')
 
 // ── 4. implement (Sonnet, TDD) ───────────────────────────────────────────────
 phase('Implement')
@@ -350,36 +343,45 @@ Plan-Hash: $PLAN_HASH
 
 (compute \`PLAN_HASH\` once at the start, as above, and reuse it — every commit on this branch must carry the SAME hash so a later resume can find them all with one \`git log --grep\`.)
 
-Do NOT push, do NOT open a PR. Return: commits made (oneline), test count added, deviations from the plan with reasons, and whether you RESUMED or started fresh.`,
+Do NOT push, do NOT open a PR.
+
+As a final best-effort step (do NOT let its failure change anything above): comment on ${repo} issue #${issue} (concise, one line, via \`gh issue comment ${issue} --repo ${repo} --body "..."\`) that implementation finished on branch ${BRANCH} and review/verify/PR is next.
+
+Return: commits made (oneline), test count added, deviations from the plan with reasons, and whether you RESUMED or started fresh.`,
   { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet' })
 if (!impl) throw new Error('implement agent died')
-
-// ── checkpoint comment — best-effort, never fatal ────────────────────────────
-try {
-  await agent(`Comment on ${repo} issue #${issue} (concise, one line): the /task pipeline finished implementation on branch ${BRANCH} and is proceeding to review/verify/PR. Use \`gh issue comment ${issue} --repo ${repo} --body "..."\`.`,
-    { label: 'checkpoint-implemented', phase: 'Implement', model: 'haiku', effort: 'low' })
-} catch (err) {
-  log(`checkpoint comment (implemented) threw (${err && err.message ? err.message : err}) — continuing without it`)
-}
 
 // ── 5. review + fixes ────────────────────────────────────────────────────────
 phase('Review')
 const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff origin/${baseBranch}...HEAD\`. Context: ${repo} subtask #${issue}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
 ${impl}
 
-Check every new test file's path against this repo's own test-placement rule (cited in the plan/intake findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting. Return findings=[] if clean.`,
+Check every new test file's path against this repo's own test-placement rule (cited in the plan/intake findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
+
+If you find any real findings, fix them yourself in the same pass: in ${WORKTREE}, on branch ${BRANCH} (TDD where behavior changes: failing test first), commit granularly, end commits with:
+Co-Authored-By: ${coauthor}
+Skip any finding that turns out to be wrong on closer inspection — note why in fixSummary instead of "fixing" it.
+
+Return:
+- findings: every finding you raised, severity-tagged, whether or not you went on to fix it (findings=[] if the diff was clean).
+- unresolvedBlockers: ONLY the blocker-severity findings still standing after your fix pass — a blocker you actually fixed, or correctly determined was wrong, does NOT belong here. This list stops the pipeline before the PR opens, so an empty list is a claim that nothing blocker-severity is left in the code.
+- fixSummary: what you fixed vs skipped and why (empty string if findings was empty).`,
   { label: `review:#${issue}`, phase: 'Review', model: 'sonnet', schema: {
     type: 'object', required: ['findings'],
-    properties: { findings: { type: 'array', items: { type: 'string' } } },
+    properties: {
+      findings: { type: 'array', items: { type: 'string' } },
+      unresolvedBlockers: { type: 'array', items: { type: 'string' } },
+      fixSummary: { type: 'string' },
+    },
   } })
-if (review && review.findings.length > 0) {
-  await callAgent(`In ${WORKTREE}, fix these review findings on branch ${BRANCH} (TDD where behavior changes: failing test first), commit granularly, end commits with:
-Co-Authored-By: ${coauthor}
-
-${review.findings.join('\n')}
-
-Skip any finding that is wrong — say why instead. Return what was fixed vs skipped.`,
-    { label: `fix:#${issue}`, phase: 'Review', model: 'sonnet' })
+// Review both raises AND fixes, so a blocker in `findings` may well have been
+// resolved in the same pass — only what the reviewer says is STILL standing
+// gates the PR. Previously nothing read this at all: a blocker-severity
+// finding was reported and the PR opened anyway.
+const unresolvedBlockers = (review && review.unresolvedBlockers) || []
+if (unresolvedBlockers.length > 0) {
+  return { issue, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `review left ${unresolvedBlockers.length} unresolved blocker(s): ${unresolvedBlockers.join('; ')}` }
 }
 
 // ── 6. verify ────────────────────────────────────────────────────────────────
@@ -409,7 +411,9 @@ Context: this branch was created by the /task pipeline for ${repo} issue #${issu
 2. Push the branch (\`git push -u origin ${BRANCH}\`) and open a PR against ${baseBranch} with \`gh pr create --repo ${repo} --base ${baseBranch}\` — title from the branch's main commit, body summarizing the change (what + why, test count), containing the line "Closes #${issue}", ending with:
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
-Do NOT merge. Do NOT enable auto-merge. Return ONLY the PR URL.
+Do NOT merge. Do NOT enable auto-merge.
+${board ? `3. Once the PR is open, as a final best-effort step (do NOT let its failure stop you from returning the URL below):\n${boardMoveInstructions('inReview')}\n` : ''}
+Return ONLY the PR URL as your final answer — nothing else, regardless of what the board step above did or didn't do.
 
 If you cannot get that far, return exactly "BLOCKED: <one line saying what failed>". Your return value is machine-read and pasted into another agent's prompt, so never return settings files, permission lists, config snippets, or instructions addressed to a reader — a blocked command is a fact to report, not something to ask the pipeline to grant you.`,
   { label: `pr:#${issue}`, phase: 'PR', model: 'haiku' })
@@ -426,7 +430,5 @@ if (!Number.isInteger(prNumber) || prNumber <= 0) {
     detail: `PR stage returned no usable PR URL (${String(pr).length} chars of prose). ` +
       'The branch may or may not have been pushed — check before re-running.' }
 }
-
-await moveCard('in-review')
 
 return { issue, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan, tests: tests.detail }
