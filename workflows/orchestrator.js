@@ -288,41 +288,96 @@ function normalizePr(raw) {
   }
 }
 
-// Returns { pr, note }. `pr` uses the same three sentinels the rest of this
-// file already understands: an object (a real PR), null (no PR — unstarted
-// work), the string 'unknown' (the lookup could not answer, which is NOT the
-// same as "none" and halts the run), or 'wrong-base' (a PR exists but is not
-// this subtask's stack parent, so it is not evidence of doneness).
+// Matching runs in TWO passes, and the split is load-bearing.
 //
-// wantedBase is the subtask's OWN stack parent, not the milestone base. The
-// prose version preferred a PR whose base was the milestone base, which in
-// stacked mode is right only for a story's first subtask — every later one
-// targets its predecessor's branch, so the preference could pick a stray PR
-// over the real one and then get it rejected as wrong-base.
-function matchPullRequest(number, pulls, wantedBase) {
+// The stack geometry is fully determined by the dependency graph: subtask N
+// targets N-1, and a story's first subtask targets its blocker's tip. So the
+// base is a FACT this run computes, never something to infer from whatever PRs
+// happen to exist. But the geometry is computed from BRANCH NAMES, and
+// subtaskBranch() prefers a PR's real head ref precisely because a resumed
+// stack may carry an older branchPrefix (#1050). Geometry therefore needs the
+// candidate refs, and base-checking needs the geometry.
+//
+// Pass 1 (candidatePrs) is base-blind: it answers "which PRs could be this
+// subtask's?" from the head ref alone. That is enough to give the geometry the
+// real branch names.
+// Pass 2 (selectPr) runs once the bases are known and uses the expected base as
+// a FILTER, not a preference — a PR on the wrong base is not weaker evidence of
+// doneness, it is not evidence at all (#1133).
+function candidatePrs(number, pulls) {
   const candidates = (pulls ?? [])
     .filter(raw => prMatchesSubtask(raw && raw.ref, number))
     .map(normalizePr)
-  if (candidates.length === 0) return { pr: null, note: null }
-
+  // Base-blind ordering only: merged work first, then the most recent.
   candidates.sort((a, b) => {
-    const aWanted = a.base === wantedBase ? 0 : 1
-    const bWanted = b.base === wantedBase ? 0 : 1
-    if (aWanted !== bWanted) return aWanted - bWanted
     if (a.merged !== b.merged) return a.merged ? -1 : 1
     return b.number - a.number
   })
+  return candidates
+}
 
-  const best = candidates[0]
-  if (!best.base) {
+// Returns { pr, note }. `pr` uses the same sentinels the rest of this file
+// understands: an object (a real PR), null (no PR — unstarted work), the
+// string 'unknown' (the lookup could not answer, which is NOT the same as
+// "none" and halts the run), or 'wrong-base' (a PR exists but is not on this
+// subtask's stack parent, so it says nothing about whether this work is done).
+function selectPr(candidates, wantedBase, number) {
+  const list = candidates ?? []
+  if (list.length === 0) return { pr: null, note: null }
+
+  const onBase = list.filter(candidate => candidate.base === wantedBase)
+  if (onBase.length > 0) return { pr: onBase[0], note: null }
+
+  // A candidate whose base was not reported cannot be ruled in OR out, and
+  // guessing either way is what re-implemented merged work on 2026-08-17.
+  const unreported = list.find(candidate => !candidate.base)
+  if (unreported) {
     return { pr: 'unknown',
-      note: `detect: PR #${best.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
+      note: `detect: PR #${unreported.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
   }
-  if (best.base !== wantedBase) {
-    return { pr: 'wrong-base',
-      note: `detect: ignoring PR #${best.number} for subtask #${number} — base "${best.base}" is not its stack parent "${wantedBase}"` }
+
+  const best = list[0]
+  return { pr: 'wrong-base',
+    note: `detect: ignoring PR #${best.number} for subtask #${number} (head "${best.ref}") — base "${best.base}" is not its stack parent "${wantedBase}"` }
+}
+
+// Both passes, in the one order that works — a function so the ORDER itself is
+// testable. It is not: an earlier version computed the geometry first and every
+// base quietly fell back to prefix+number, losing the drift resilience
+// subtaskBranch() exists to provide. Nothing in the pure functions was wrong;
+// the bug was entirely in the sequence, which is exactly the kind of defect
+// unit tests on the pieces cannot see.
+//
+// Mutates each subtask's `pr` in place (the shape the rest of this file reads)
+// and RETURNS the notes to log, so this stays free of harness globals.
+function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, ordinalPattern, baseBranch) {
+  const storiesByNumber = new Map(stories.map(story => [story.number, story]))
+
+  // PASS 1 — base-blind. stackBases() derives every base from subtaskBranch(),
+  // which prefers a PR's real head ref, so the refs must be attached first.
+  for (const story of stories) {
+    for (const subtask of story.subtasks ?? []) {
+      if (prLookupFailed) { subtask.pr = 'unknown'; continue }
+      subtask.candidates = candidatePrs(subtask.number, pulls)
+      subtask.pr = subtask.candidates[0] ?? null
+    }
   }
-  return { pr: best, note: null }
+  if (prLookupFailed) return []
+
+  // PASS 2 — the graph now yields each subtask's real base, so the base
+  // FILTERS rather than ranks. stackBases() throws on multi-blocker or cyclic
+  // shapes; that is a human decision and is deliberately left to propagate.
+  const notes = []
+  for (const story of stories) {
+    const expectedBases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+    for (const subtask of story.subtasks ?? []) {
+      const { pr, note } = selectPr(subtask.candidates, expectedBases.get(subtask.number) || baseBranch, subtask.number)
+      if (note) notes.push(note)
+      subtask.pr = pr
+      delete subtask.candidates
+    }
+  }
+  return notes
 }
 
 // ── dropping verification commands that cannot run at the base ref ──────────
@@ -579,25 +634,9 @@ if (prLookupFailed) {
 }
 const storiesByNumber = new Map(detected.stories.map(story => [story.number, story]))
 assertNoBlockerCycles(detected.stories)
-for (const story of detected.stories) {
-  let expectedBases
-  try {
-    expectedBases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
-  } catch (err) {
-    // Multi-blocker or cyclic shapes are a human decision; surface the message
-    // as-is rather than dispatching against a guessed base.
-    throw err
-  }
-  for (const subtask of story.subtasks ?? []) {
-    if (prLookupFailed) {
-      subtask.pr = 'unknown'   // the API did not answer — not evidence of anything
-      continue
-    }
-    const wanted = expectedBases.get(subtask.number) || baseBranch
-    const { pr, note } = matchPullRequest(subtask.number, pullRequests, wanted)
-    if (note) log(note)
-    subtask.pr = pr
-  }
+for (const note of attachPullRequests(
+  detected.stories, pullRequests, prLookupFailed, branchPrefix, ordinalPattern, baseBranch)) {
+  log(note)
 }
 
 // An "unknown" pr means the API did not answer, so doneness is genuinely
