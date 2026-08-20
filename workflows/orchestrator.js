@@ -583,78 +583,28 @@ async function callAgent(prompt, agentOpts) {
   }
 }
 
-// ── 1. Configure — board ids BY NAME ────────────────────────────────────────
-phase('Configure')
-let board = null
-const makeBoard = (id, fieldId, optionIds) =>
-  ({ id, fieldId, optionIds, optionNames, statusField, number: projectArg && projectArg.number })
-
-if (hasResolvedBoardIds(projectArg)) {
-  // Nothing to look up. Ids are stable for the life of a board, so a caller
-  // that has them (from a previous run's log, or the setup-project skill)
-  // skips this dispatch entirely.
-  board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
-  log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
-} else if (projectArg && Number.isInteger(Number(projectArg.number))) {
-  const resolved = await callAgent(`Read the GitHub Projects v2 configuration for project number ${projectArg.number} owned by "${owner}" (repo ${repo}). Read only — do NOT create, edit, or delete anything, and do NOT create a missing field or option.
-
-Try the user-owned query first; if its data is null, try the org-owned one:
-gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
-gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
-
-Report what the query returned and NOTHING else. Do not decide which field or which options are the right ones, do not correct or normalize any name, and do not omit a field because it looks irrelevant — the script matches names itself, exactly, and a name you tidied up on the way through would resolve to a real id for the wrong column.
-
-- found: true if either query returned a project.
-- id: the project's node id ("PVT_..."). title: its title.
-- fields: EVERY single-select field the query listed, verbatim — each with its id, its name exactly as returned, and all of its options' ids and names exactly as returned.
-
-If neither query returned a project, set found=false and say which errors you saw.
-
-[cache-buster, ignore: ${nonce}]`,
-    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', schema: {
-      type: 'object', required: ['found'],
-      properties: {
-        found: { type: 'boolean' }, missing: { type: 'string' }, title: { type: 'string' },
-        id: { type: 'string' },
-        fields: { type: 'array', items: {
-          type: 'object', required: ['id', 'name'],
-          properties: {
-            id: { type: 'string' }, name: { type: 'string' },
-            options: { type: 'array', items: {
-              type: 'object', required: ['id', 'name'],
-              properties: { id: { type: 'string' }, name: { type: 'string' } } } },
-          } } },
-      },
-    } })
-
-  // Board bookkeeping is not worth failing a milestone over, but a silent
-  // downgrade is worse than a loud one.
-  if (!resolved || !resolved.found || !resolved.id) {
-    log(`board DISABLED for this run: ${resolved && resolved.missing ? resolved.missing : 'the project resolver returned no project'} (see the setup-project skill)`)
-  } else {
-    const ids = resolveBoardIds(resolved.fields, statusField, optionNames)
-    if (!ids.ok) {
-      log(`board DISABLED for this run: ${ids.missing} (see the setup-project skill)`)
-    } else {
-      board = makeBoard(resolved.id, ids.fieldId, ids.optionIds)
-      log(`board resolved: project ${projectArg.number} "${resolved.title || ''}" → ${resolved.id}`)
-      log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
-    }
+// Same retry behaviour as callAgent, but a final failure returns null instead
+// of throwing — for work whose failure should degrade the run, not end it.
+async function callAgentSoftly(prompt, agentOpts) {
+  try {
+    return await callAgent(prompt, agentOpts)
+  } catch (err) {
+    log(`agent ${agentOpts.label} failed: ${err && err.message ? err.message : String(err)}`)
+    return null
   }
-} else if (projectArg) {
-  // Reachable when `project` is present but is neither a resolvable number nor
-  // a complete id block. Previously this fell through to the boardless branch
-  // and logged "boardless: true" at someone who never asked for it.
-  log('board DISABLED for this run: `project` was passed without a usable `number` and without a complete '
-    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other, '
-    + 'or pass boardless: true to run without a board on purpose.')
-} else {
-  log('boardless: true — running issues and PRs only, no card moves')
 }
 
+// ── 1. Configure — board ids BY NAME ────────────────────────────────────────
 // ── 2. Detect — raw GitHub state + verification commands; no judgement ──────
-phase('Detect')
-const detected = await callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+// Started BEFORE the board lookup and awaited after it. The two share no data —
+// nothing in this prompt refers to the board — so running them in sequence just
+// added the shorter call's latency to the longer one's. They stay separate
+// dispatches on purpose: a board failure must not be able to stop a milestone,
+// and merging them would put every board hiccup on the critical path.
+//
+// Each call passes its phase explicitly, so the progress grouping does not
+// depend on which one happens to be running when phase() was last called.
+const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
 
 1. Resolve the milestone title: \`gh api repos/${repo}/milestones/${milestoneNumber} --jq .title\`. Then list its story issues:
    \`gh issue list --repo ${repo} --milestone "<title>" --label ${labels.story} --state all --json number,title,state\`
@@ -716,7 +666,92 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
         } },
     },
   } })
+  // Settled, never raw: this promise is created here but awaited far below, and
+  // an un-awaited rejection in between is an unhandled rejection. Wrapping it
+  // keeps the real error intact for the await site.
+  .then(value => ({ value }), error => ({ error }))
+
+phase('Configure')
+
+let board = null
+const makeBoard = (id, fieldId, optionIds) =>
+  ({ id, fieldId, optionIds, optionNames, statusField, number: projectArg && projectArg.number })
+
+if (hasResolvedBoardIds(projectArg)) {
+  // Nothing to look up. Ids are stable for the life of a board, so a caller
+  // that has them (from a previous run's log, or the setup-project skill)
+  // skips this dispatch entirely.
+  board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
+  log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
+} else if (projectArg && Number.isInteger(Number(projectArg.number))) {
+  // Softly, because "the board is best-effort" was only half true: a RETURNED
+  // failure was logged and the run survived, but a THROWN one (callAgent gives
+  // up after one retry) propagated and killed the milestone. Card bookkeeping
+  // must never be able to do that.
+  const resolved = await callAgentSoftly(`Read the GitHub Projects v2 configuration for project number ${projectArg.number} owned by "${owner}" (repo ${repo}). Read only — do NOT create, edit, or delete anything, and do NOT create a missing field or option.
+
+Try the user-owned query first; if its data is null, try the org-owned one:
+gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
+gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
+
+Report what the query returned and NOTHING else. Do not decide which field or which options are the right ones, do not correct or normalize any name, and do not omit a field because it looks irrelevant — the script matches names itself, exactly, and a name you tidied up on the way through would resolve to a real id for the wrong column.
+
+- found: true if either query returned a project.
+- id: the project's node id ("PVT_..."). title: its title.
+- fields: EVERY single-select field the query listed, verbatim — each with its id, its name exactly as returned, and all of its options' ids and names exactly as returned.
+
+If neither query returned a project, set found=false and say which errors you saw.
+
+[cache-buster, ignore: ${nonce}]`,
+    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', schema: {
+      type: 'object', required: ['found'],
+      properties: {
+        found: { type: 'boolean' }, missing: { type: 'string' }, title: { type: 'string' },
+        id: { type: 'string' },
+        fields: { type: 'array', items: {
+          type: 'object', required: ['id', 'name'],
+          properties: {
+            id: { type: 'string' }, name: { type: 'string' },
+            options: { type: 'array', items: {
+              type: 'object', required: ['id', 'name'],
+              properties: { id: { type: 'string' }, name: { type: 'string' } } } },
+          } } },
+      },
+    } })
+
+  // Board bookkeeping is not worth failing a milestone over, but a silent
+  // downgrade is worse than a loud one.
+  if (!resolved || !resolved.found || !resolved.id) {
+    log(`board DISABLED for this run: ${resolved && resolved.missing ? resolved.missing : 'the project resolver returned no project'} (see the setup-project skill)`)
+  } else {
+    const ids = resolveBoardIds(resolved.fields, statusField, optionNames)
+    if (!ids.ok) {
+      log(`board DISABLED for this run: ${ids.missing} (see the setup-project skill)`)
+    } else {
+      board = makeBoard(resolved.id, ids.fieldId, ids.optionIds)
+      log(`board resolved: project ${projectArg.number} "${resolved.title || ''}" → ${resolved.id}`)
+      log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
+    }
+  }
+} else if (projectArg) {
+  // Reachable when `project` is present but is neither a resolvable number nor
+  // a complete id block. Previously this fell through to the boardless branch
+  // and logged "boardless: true" at someone who never asked for it.
+  log('board DISABLED for this run: `project` was passed without a usable `number` and without a complete '
+    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other, '
+    + 'or pass boardless: true to run without a board on purpose.')
+} else {
+  log('boardless: true — running issues and PRs only, no card moves')
+}
+
+// Detect was started before the board lookup; collect it now. A rejection is
+// rethrown with its original error — unlike the board, a failed census means
+// nothing can be dispatched safely.
+const detectOutcome = await detectPromise
+if (detectOutcome.error) throw detectOutcome.error
+const detected = detectOutcome.value
 if (!detected) throw new Error('detect agent died')
+
 
 // Suffix matching is base-blind: a PR opened by mistake against another branch
 // still matches by head ref, and treating it as this subtask's own work is the
