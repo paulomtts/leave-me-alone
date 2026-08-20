@@ -191,9 +191,15 @@ const invokedDirectly =
 if (invokedDirectly) {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
   const args = process.argv.slice(2)
-  const targets = args.length ? args : await listWorkflowScripts(path.join(repoRoot, 'workflows'))
-  const results = await checkWorkflows(targets)
+  const json = args.includes('--json')
+  const paths = args.filter((arg) => arg !== '--json')
+  const targets = paths.length ? paths : await listWorkflowScripts(path.join(repoRoot, 'workflows'))
+  const results = await checkWorkflows(targets, json ? () => {} : undefined)
   const failed = results.filter((r) => !r.ok)
-  console.log(`checked ${results.length} workflow script(s); ${failed.length} failed`)
+  if (json) {
+    console.log(JSON.stringify(toJsonReport(results), null, 2))
+  } else {
+    console.log(`checked ${results.length} workflow script(s); ${failed.length} failed`)
+  }
   process.exit(failed.length > 0 ? 1 : 0)
 }

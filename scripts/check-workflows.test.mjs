@@ -421,3 +421,72 @@ test('toJsonReport preserves multiple violations on one entry instead of collaps
 test('toJsonReport on an empty result list is ok with no results', () => {
   assert.deepEqual(toJsonReport([]), { ok: true, results: [] })
 })
+
+test('--json on an all-passing run prints a JSON document and exits 0', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker(['--json', file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  const doc = JSON.parse(result.stdout)
+  assert.equal(doc.ok, true)
+  assert.equal(doc.results.length, 1)
+  assert.equal(doc.results[0].path, file)
+  assert.equal(doc.results[0].ok, true)
+  assert.deepEqual(doc.results[0].violations, [])
+})
+
+test('--json on a failing run still prints JSON and exits non-zero', async () => {
+  const file = await fixture('broken.js', BROKEN_WORKFLOW)
+  const result = await runChecker(['--json', file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  const doc = JSON.parse(result.stdout)
+  assert.equal(doc.ok, false)
+  assert.equal(doc.results[0].ok, false)
+  assert.equal(doc.results[0].violations.length, 1)
+  assert.match(doc.results[0].violations[0], /Unexpected token/)
+})
+
+test('--json preserves argv order across a mixed run', async () => {
+  const broken = await fixture('broken.js', BROKEN_WORKFLOW)
+  const valid = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker(['--json', broken, valid])
+  assert.equal(result.code, 1, `expected exit 1, got ${result.code}\n${result.stderr}`)
+  const doc = JSON.parse(result.stdout)
+  assert.equal(doc.ok, false)
+  assert.equal(doc.results.length, 2)
+  assert.equal(doc.results[0].path, broken)
+  assert.equal(doc.results[0].ok, false)
+  assert.equal(doc.results[0].violations.length, 1)
+  assert.equal(doc.results[1].path, valid)
+  assert.equal(doc.results[1].ok, true)
+  assert.deepEqual(doc.results[1].violations, [])
+})
+
+test('--json emits no human-readable lines on stdout or stderr', async () => {
+  const valid = await fixture('valid.js', VALID_WORKFLOW)
+  const passing = await runChecker(['--json', valid])
+  assert.ok(!passing.stdout.includes('checked '), `unexpected summary line:\n${passing.stdout}`)
+  assert.ok(!passing.stderr.includes('FAIL '), `unexpected FAIL line:\n${passing.stderr}`)
+
+  const broken = await fixture('broken.js', BROKEN_WORKFLOW)
+  const failing = await runChecker(['--json', broken])
+  assert.ok(!failing.stdout.includes('checked '), `unexpected summary line:\n${failing.stdout}`)
+  assert.ok(!failing.stderr.includes('FAIL '), `unexpected FAIL line:\n${failing.stderr}`)
+})
+
+test('--json is consumed as a flag, never treated as a target path', async () => {
+  const result = await runChecker(['--json'])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  const doc = JSON.parse(result.stdout)
+  assert.equal(doc.results.length, 2)
+  for (const entry of doc.results) {
+    assert.ok(!entry.path.includes('--json'), `unexpected target: ${entry.path}`)
+  }
+})
+
+test('--json works after the target path as well as before it', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const before = await runChecker(['--json', file])
+  const after = await runChecker([file, '--json'])
+  assert.equal(after.code, 0, `expected exit 0, got ${after.code}\n${after.stderr}`)
+  assert.deepEqual(JSON.parse(after.stdout), JSON.parse(before.stdout))
+})
