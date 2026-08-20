@@ -545,3 +545,32 @@ test('repeated --quiet is harmless', async () => {
   assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
   assert.match(result.stdout, /checked 1 workflow script\(s\); 0 failed/)
 })
+
+test('--json --quiet emits the JSON document, byte-identical to --json alone', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const jsonOnly = await runChecker(['--json', file])
+  const both = await runChecker(['--json', '--quiet', file])
+  const reversed = await runChecker(['--quiet', '--json', file])
+
+  assert.equal(both.code, jsonOnly.code)
+  assert.equal(both.stdout, jsonOnly.stdout)
+  assert.equal(reversed.stdout, jsonOnly.stdout)
+
+  const doc = JSON.parse(both.stdout)
+  assert.equal(doc.ok, true)
+  assert.equal(doc.results.length, 1)
+  assert.equal(doc.results[0].path, file)
+  assert.deepEqual(doc.results[0].violations, [])
+})
+
+test('--json --quiet on a failing run keeps the JSON and prints no human lines', async () => {
+  const file = await fixture('broken.js', BROKEN_WORKFLOW)
+  const result = await runChecker(['--json', '--quiet', file])
+  assert.equal(result.code, 1, `expected exit 1, got ${result.code}\n${result.stderr}`)
+  assert.ok(!result.stdout.includes('checked '), `unexpected summary line:\n${result.stdout}`)
+  assert.ok(!result.stderr.includes('FAIL '), `unexpected FAIL line:\n${result.stderr}`)
+  const doc = JSON.parse(result.stdout)
+  assert.equal(doc.ok, false)
+  assert.equal(doc.results[0].violations.length, 1)
+  assert.match(doc.results[0].violations[0], /Unexpected token/)
+})
