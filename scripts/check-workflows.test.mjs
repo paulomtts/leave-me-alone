@@ -87,6 +87,28 @@ test('a broken file does not stop later files from being checked', async () => {
   assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
 })
 
+const SUMMARY_RE = /checked \d+ workflow script\(s\)/
+
+test('--quiet alone suppresses the summary and still checks workflows/', async () => {
+  const result = await runChecker(['--quiet'])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.doesNotMatch(result.stdout, SUMMARY_RE)
+})
+
+test('--quiet before an explicit passing target suppresses the summary', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker(['--quiet', file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.doesNotMatch(result.stdout, SUMMARY_RE)
+})
+
+test('--quiet after an explicit passing target suppresses the summary', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker([file, '--quiet'])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.doesNotMatch(result.stdout, SUMMARY_RE)
+})
+
 // ── smokeInit ────────────────────────────────────────────────────────────────
 // Compiling is not enough: a `const` referenced above its own declaration
 // compiles fine and throws only when the script RUNS. That shipped once and
