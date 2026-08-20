@@ -253,6 +253,19 @@ and no lookup happens at all. Without either, the board is disabled and the run 
 
 `bun` must be on PATH.
 
+Both trigger agents are still handed the default subagent context — measured at 16KB per call: 5.8KB
+listing every deferred tool and 10.7KB describing every skill, none of it relevant to running one
+command. (Project `CLAUDE.md` is *not* injected into workflow subagents; that was measured too.) To
+strip it, create an agent definition with `tools: Bash` and a one-line body, restart the session so
+the registry picks it up, then pass its name:
+
+```jsonc
+"triggerAgentType": "command-runner"
+```
+
+The registry is read at session start, so a definition added mid-session is not found — and a missing
+one is a hard error, not a fallback. Omit the argument to use the default subagent.
+
 The census is also always taken **fresh**. There is deliberately no way to hand over one you took
 earlier: a census is a snapshot of what is merged, and a stale one re-dispatches work that has since
 landed.

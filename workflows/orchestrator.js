@@ -571,6 +571,20 @@ const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.
       + 'repo can be checked out anywhere, and no fallback: the census is deterministic or it does '
       + 'not happen. It is run with `bun`.') })()
 
+// Both setup agents run one command and read nothing else, but they are still
+// handed the default subagent's context: 5.8KB listing every deferred tool and
+// 10.7KB describing every skill, measured — 16KB of catalogue for a 451-char
+// prompt about `bun`. A custom agent type with `tools: Bash` and a one-line
+// body should carry neither.
+//
+// Opt-in, because the agent registry is read when a session starts: a
+// definition added mid-session is not found, and a missing one is a hard error
+// rather than a fallback. Create ~/.claude/agents/<name>.md, restart, then pass
+// the name here.
+const triggerAgent = typeof opts.triggerAgentType === 'string' && opts.triggerAgentType.length > 0
+  ? { agentType: opts.triggerAgentType }
+  : {}
+
 // Only needed when the board is given as a NUMBER — resolved ids skip the
 // lookup entirely, and unlike a census those are stable config, not a snapshot.
 const projectScript = typeof opts.projectScript === 'string' && opts.projectScript.startsWith('/')
@@ -662,33 +676,43 @@ const detectVerificationStep = index => `${index}. Discover this repo's OWN veri
 // One command, returned byte for byte. Everything the long version guards
 // against — substituting a tool, dropping a result, tidying a branch name in
 // transit — stops being possible when there is nothing to do but run it.
-const DETECT_TRIGGER_STEP = `1. Run EXACTLY this command and capture its stdout:
-   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --compact${labels.story === 'story' ? '' : ` --story-label ${labels.story}`}${labels.subtask === 'subtask' ? '' : ` --subtask-label ${labels.subtask}`}
+// One command. Everything the long census prompt guarded against — choosing a
+// tool, looping over results, filtering, transcribing many values — stops being
+// possible when there is nothing to do but run it, so the guards went with it.
+// What remains is the one instruction a model still needs against its own
+// reflexes: hand the bytes back untouched rather than tidying them.
+const DETECT_TRIGGER_STEP = `Run this command and return its stdout EXACTLY as printed:
+   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --compact
 
-   Do NOT modify the command, add flags, substitute a different tool, or run anything else to
-   "check" its answer. Do NOT summarize, reformat, pretty-print, truncate or fix the output: it is
-   a single line of JSON that the pipeline parses itself, and any edit you make to it is a bug you
-   are introducing into a deterministic step.
-   - ok: true if the command exited zero.
-   - stdout: its stdout EXACTLY as printed, as one string. Empty if the command failed.
-   - error: its stderr, only when ok=false.`
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — report it, do not retry or work around it.`
 
 const detectSteps = [DETECT_TRIGGER_STEP]
 if (!providedVerification) detectSteps.push(detectVerificationStep(2))
 
-const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+// The generic header ("read state only, do NOT create…") is inherited from the
+// census prompt and says nothing to an agent whose entire job is one read-only
+// command. It comes back only when the verification step does.
+const detectPrompt = detectSteps.length === 1
+  ? `${DETECT_TRIGGER_STEP}
+
+[cache-buster, ignore: ${nonce}]`
+  : `Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
 
 ${detectSteps.join('\n\n')}
 
-Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`,
-  { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', schema: {
+Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`
+
+const detectPromise = callAgent(detectPrompt,
+  { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', ...triggerAgent, schema: {
     type: 'object',
     required: ['ok', 'stdout', ...(providedVerification ? [] : ['verification'])],
     properties: {
       // The census is a string here on purpose: it is parsed by this script, so
       // a mangled or truncated transcription fails at the boundary instead of
       // arriving as a plausible-looking half-census.
-      ok: { type: 'boolean' }, stdout: { type: 'string' }, error: { type: 'string' },
+      ok: { type: 'boolean', description: 'true if the command exited zero' },
+      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
       verification: {
         type: 'object', required: ['fullSuite'],
         properties: {
@@ -724,17 +748,18 @@ if (hasResolvedBoardIds(projectArg)) {
   // failure was logged and the run survived, but a THROWN one (callAgent gives
   // up after one retry) propagated and killed the milestone. Card bookkeeping
   // must never be able to do that.
-  const resolved = await callAgentSoftly(`Run EXACTLY this command and capture its stdout:
+  const resolved = await callAgentSoftly(`Run this command and return its stdout EXACTLY as printed:
    bun ${projectScript} --owner ${owner} --number ${projectArg.number} --compact
 
-Do NOT modify the command, add flags, substitute a different tool, or run anything else. Do NOT summarize, reformat, pretty-print, truncate or fix the output: it is a single line of JSON that the pipeline parses itself, and any edit you make to it is a bug you are introducing into a deterministic step. The command exits non-zero when it finds no project; that is a normal answer, not a reason to retry or improvise.
-- stdout: its stdout EXACTLY as printed, as one string.
-- error: its stderr, if any.
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. It exits non-zero when it finds no project — that is a normal answer, not a reason to retry or improvise.
 
 [cache-buster, ignore: ${nonce}]`,
-    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', schema: {
+    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
       type: 'object', required: ['stdout'],
-      properties: { stdout: { type: 'string' }, error: { type: 'string' } },
+      properties: {
+        stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+        error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+      },
     } })
 
   // Board bookkeeping is not worth failing a milestone over, but a silent
