@@ -56,22 +56,34 @@ const DRY = opts.dryRun === true
 // Sonnet-tier exploration just to rediscover work that already happened.
 phase('Resume')
 const resumeCheck = await callAgent(`Find any pull request on ${repo} (any state) whose head ref ends with a non-digit followed by "${issue}" — so branches like "${BRANCH}" and "wip/${issue}" match, but one ending in a longer number (e.g. "${issue}0") must NOT. Use the REST endpoint, not gh pr list or search:
-gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, state, merged: (.merged_at != null), ref: .head.ref}'
-Read only — do NOT create, edit, merge, or comment on anything. If the command errors or times out, retry up to 3 times with a short pause; if it still fails, return found=false, unknown=true (an API failure is not evidence there is no PR — never guess). Otherwise return found=true with the PR's number/state/merged, preferring a merged match, then the most recently opened one, if several qualify.`,
+gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, state, merged: (.merged_at != null), ref: .head.ref, base: .base.ref}'
+Read only — do NOT create, edit, merge, or comment on anything. If the command errors or times out, retry up to 3 times with a short pause; if it still fails, return found=false, unknown=true (an API failure is not evidence there is no PR — never guess). Otherwise return found=true with the PR's number/state/merged/base, preferring a merged match, then the most recently opened one, if several qualify. Always report base VERBATIM (never blank, never guessed).`,
   { label: `resume-check:#${issue}`, phase: 'Resume', model: 'haiku', effort: 'low', schema: {
     type: 'object', required: ['found'],
     properties: {
       found: { type: 'boolean' }, unknown: { type: 'boolean' },
-      number: { type: 'integer' }, state: { type: 'string' }, merged: { type: 'boolean' },
+      number: { type: 'integer' }, state: { type: 'string' }, merged: { type: 'boolean' }, base: { type: 'string' },
     },
   } })
 if (resumeCheck && resumeCheck.unknown) {
   throw new Error(`task workflow: PR lookup for #${issue} failed after retries — cannot safely determine resume state`)
 }
-if (resumeCheck && resumeCheck.found && resumeCheck.merged) {
+// A PR matched by branch-suffix is only this pipeline's own prior attempt if
+// it also targets THIS run's baseBranch — a PR opened by mistake against the
+// wrong branch is foreign work as far as this run is concerned, merged or not
+// (this is what silently "resumed" #1133's dead-end merge into main
+// repeatedly on paulomtts/refactor-nori: PR #1150, head task-1133, base
+// main, kept getting rediscovered as done). Fall through to a fresh dispatch
+// instead of trusting it.
+const resumeBase = resumeCheck && typeof resumeCheck.base === 'string' ? resumeCheck.base : ''
+const resumeBaseMismatch = resumeCheck && resumeCheck.found && resumeBase && resumeBase !== baseBranch
+if (resumeBaseMismatch) {
+  log(`resume-check: ignoring PR #${resumeCheck.number} for #${issue} — base "${resumeBase}" is not "${baseBranch}"`)
+}
+if (resumeCheck && resumeCheck.found && resumeCheck.merged && !resumeBaseMismatch) {
   return { issue, pr: resumeCheck.number, branch: BRANCH, worktree: WORKTREE, note: 'resumed: PR already merged' }
 }
-if (resumeCheck && resumeCheck.found && String(resumeCheck.state).toUpperCase() === 'OPEN') {
+if (resumeCheck && resumeCheck.found && String(resumeCheck.state).toUpperCase() === 'OPEN' && !resumeBaseMismatch) {
   return { issue, pr: resumeCheck.number, branch: BRANCH, worktree: WORKTREE, note: 'resumed: PR already open from a prior run' }
 }
 
