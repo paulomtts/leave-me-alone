@@ -46,6 +46,31 @@ for f in "${src}"/scripts/*.mjs; do
   copy "$f" "${dest}/scripts/$(basename "$f")"
 done
 
+# Warn if the hard dependencies are missing.
+#
+# Claude Code has no plugin dependency mechanism -- no `dependencies` key exists
+# in any plugin.json or marketplace.json, including Anthropic's own -- so this
+# is the earliest honest place to notice.
+#
+# It is a WARNING, never a failure: this hook runs at session start and has no
+# business stopping a session over something the user may not be about to do.
+# The real guarantee lives where it can be exact -- Plan reports whether it
+# actually invoked writing-plans, and task.js stops the run if it did not.
+#
+# The superpowers check is a proxy: a cache directory is not proof the skill
+# resolves. It can produce a false "all clear" if the plugin is installed but
+# broken, so it is phrased as a pointer, not a guarantee.
+if ! command -v bun >/dev/null 2>&1; then
+  echo "leave-me-alone: bun is not on PATH — every helper script runs as \`bun <script>.mjs\`,"
+  echo "  so orchestrator/task will stop at their first step. https://bun.sh"
+fi
+
+if ! compgen -G "${HOME}/.claude/plugins/cache/*/superpowers/*/skills/writing-plans" >/dev/null 2>&1; then
+  echo "leave-me-alone: the superpowers skill 'writing-plans' was not found."
+  echo "  task.js REFUSES a plan written without it, so a milestone will stop at Plan."
+  echo "  /plugin install superpowers@claude-plugins-official"
+fi
+
 # Stamp what was synced, and say so when it moved.
 #
 # Skills and agents are plugin components: an update switches them over at once.

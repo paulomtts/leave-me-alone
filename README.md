@@ -11,6 +11,12 @@ Personal Claude Code plugin marketplace.
 | **gh**, authenticated | issues, sub-issues, PRs, and Projects v2 board mutations | resolution fails at launch |
 | **git** | worktrees, branches, stacked bases | — |
 
+Claude Code has no plugin dependency mechanism — no `dependencies` key exists in any `plugin.json`
+or `marketplace.json`, including Anthropic's own — so the plugin cannot pull superpowers in for you.
+Instead its SessionStart hook **warns** when `bun` or the `writing-plans` skill is missing, with the
+command to fix it. That is a pointer, not a guarantee: the exact check is Plan reporting whether it
+actually invoked the skill, which stops the run when it did not.
+
 `gh auth status` must show the **`project`** scope — there is no boardless mode, so a run without
 board access stops rather than silently skipping card moves:
 
