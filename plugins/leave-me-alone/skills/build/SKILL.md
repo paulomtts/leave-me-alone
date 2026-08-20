@@ -1,9 +1,9 @@
 ---
-name: build-containers
-description: Rebuild containers from the current worktree, watching out for port conflicts with other running stacks. Use when the user says "/build-containers" or asks to rebuild/restart containers for the worktree they're currently in.
+name: build
+description: Rebuild containers from the current worktree, watching out for port conflicts with other running stacks. Use when the user says "/build" or asks to rebuild/restart containers for the worktree they're currently in.
 ---
 
-# build-containers
+# build
 
 Rebuild the current worktree's container stack without colliding with ports other worktrees/stacks already hold.
 

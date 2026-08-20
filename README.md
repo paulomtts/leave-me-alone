@@ -20,13 +20,13 @@ Push changes to this repo, then in Claude Code:
 ## Contents (leave-me-alone)
 
 - `brief` — /brief, fast recap of conversation/task state
-- `build-containers` — rebuild worktree containers, dodging port conflicts
-- `dispatch-subagent` — /dispatch-subagent, launch a subagent pinned to a specific model
+- `build` — rebuild worktree containers, dodging port conflicts
+- `dispatch` — /dispatch, launch a subagent pinned to a specific model
 - `explain` — /explain, plain-language explanation + ASCII architecture diagram
 - `setup-project` — preps a repo's GitHub Projects v2 board for the orchestrator/task workflows
 - `setup-milestone` — sets up a GitHub milestone with story issues + sub-issue subtasks
 - `setup-report` — renders an in-flight-work progress dashboard as an Artifact
-- `smoke-test` — /smoke-test, rebuild + drive the app in Chrome to smoke-test recent work
+- `smoke` — /smoke, rebuild + drive the app in Chrome to smoke-test recent work
 
 ## Auto-allow hook
 

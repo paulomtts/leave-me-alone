@@ -1,9 +1,9 @@
 ---
-name: dispatch-subagent
-description: Dispatch a subagent with a specific model and a set of instructions passed as arguments. Use when the user says "/dispatch-subagent", or asks to "dispatch a subagent with model X to do Y" / "spin up an agent on <model>" with an explicit model name and task description.
+name: dispatch
+description: Dispatch a subagent with a specific model and a set of instructions passed as arguments. Use when the user says "/dispatch", or asks to "dispatch a subagent with model X to do Y" / "spin up an agent on <model>" with an explicit model name and task description.
 ---
 
-# dispatch-subagent
+# dispatch
 
 Launch a single subagent pinned to a specific model, running a task described in plain language.
 
