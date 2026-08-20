@@ -8,9 +8,8 @@ export const meta = {
     { title: 'Plan', detail: 'TDD implementation plan from the spec', model: 'opus' },
     { title: 'Validate', detail: 'adversarial plan review, fixes folded in', model: 'sonnet' },
     { title: 'Implement', detail: 'worktree + strict TDD, granular commits', model: 'sonnet' },
-    { title: 'Review', detail: 'branch diff review + fixes; unresolved blockers stop the run', model: 'sonnet' },
-    { title: 'Verify', detail: 'full suite + typecheck + lint + test-integrity gate', model: 'haiku' },
-    { title: 'PR', detail: 'push, open PR (no merge); card -> In review', model: 'haiku' },
+    { title: 'Review', detail: 'branch diff review, test-integrity gate, lint; fixes committed here; unresolved blockers stop the run', model: 'sonnet' },
+    { title: 'Ship', detail: 'clean-tree check + full verification, then push and open the PR (no merge); card -> In review', model: 'haiku' },
   ],
 }
 
@@ -361,9 +360,13 @@ ${clip(impl.report, 12000, 'implementer report')}
 
 Check every new test file's path against this repo's own test-placement rule (cited in the plan/intake findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
 
+Then the test-integrity gate, on the test portion of that same diff: no weakened or deleted assertions, no tautologies, no tests that merely mirror the implementation, and every new behavior has a test that would fail without its code. A violation here is a finding like any other — raise it, fix it, and if it genuinely cannot be fixed it is blocker-severity. Never weaken, skip, xfail, or delete a test to make anything pass.
+
+You are the only stage that reads this diff and the only one that writes: the stage after you runs the suite and reports, and is forbidden to fix anything. So everything that needs changing must be changed HERE, and everything you change must be COMMITTED here — uncommitted work is invisible to \`git push\`, would be absent from the PR, and will stop the run.
+
 If you find any real findings, fix them yourself in the same pass: in ${WORKTREE}, on branch ${BRANCH} (TDD where behavior changes: failing test first), commit granularly, end commits with:
 Co-Authored-By: ${coauthor}
-Skip any finding that turns out to be wrong on closer inspection — note why in fixSummary instead of "fixing" it.
+Also run this repo's own lint/format commands and commit any fixes they require, so the tree is clean when you finish. Skip any finding that turns out to be wrong on closer inspection — note why in fixSummary instead of "fixing" it.
 
 Return:
 - findings: every finding you raised, severity-tagged, whether or not you went on to fix it (findings=[] if the diff was clean).
@@ -387,55 +390,79 @@ if (unresolvedBlockers.length > 0) {
     detail: `review left ${unresolvedBlockers.length} unresolved blocker(s): ${unresolvedBlockers.join('; ')}` }
 }
 
-// ── 6. verify ────────────────────────────────────────────────────────────────
-phase('Verify')
-const tests = await callAgent(`Full verification in ${WORKTREE} (branch ${BRANCH}).
+// ── 6. ship — verify, then push and open the PR (never merge) ───────────────
+// Verify and PR used to be separate dispatches with only a pass/fail gate
+// between them. Both are mechanical and adjacent, so they are one stage now.
+// The line this must not cross: this stage may PUBLISH what it measured, but
+// never REPAIR it — a stage that fixes what it is certifying cannot report on
+// it. Everything that needs changing is Review's job, upstream.
+//
+// The cost of the merge, stated plainly: `if (!passed) return` used to make a
+// red suite STRUCTURALLY unable to reach the PR. That guarantee is now a prompt
+// instruction. A run that ever reports passed=false alongside a non-empty url
+// means this merge was wrong and the stages should be split back apart.
+phase('Ship')
+const ship = await callAgent(`Verify and ship ${repo} subtask #${issue} from ${WORKTREE} (branch ${BRANCH}). These steps are strictly ordered, and the ordering is the whole point: nothing is pushed until everything above it is green.
 
-0. FIRST, before running anything: \`git -C ${WORKTREE} status --porcelain\`. The review stage that ran before you was asked to commit its own fixes, but if it edited files and did not commit them, that work is invisible to \`git push\` and would be silently dropped when the PR opens — the tests you are about to run would pass against code the PR never contains. If the worktree is dirty, read the changes first: if they are plainly this subtask's work (review fixes, formatting), commit them (conventional commit, reference #${issue}, end with "Co-Authored-By: ${coauthor}"). If they look unrelated to #${issue}, do NOT commit them — stop and report what you found. Never stash, revert, checkout, or clean anything here; uncommitted work is the one thing in this pipeline that cannot be recovered.
+1. \`git -C ${WORKTREE} status --porcelain\`. A clean worktree is a PRECONDITION here — the stages before you were required to commit their work, and anything uncommitted would be invisible to \`git push\`, absent from the PR, and still affecting the results you are about to report. If it is dirty: STOP, return passed=false and dirty=true with the paths. Do NOT commit, stash, revert, checkout, or clean anything.
 
-Then run EVERY command below and report honestly:
-
+2. Run EVERY verification command below, each as its own invocation:
 ${verifyBlock}
+   Report exactly what happened. Do NOT fix, edit, or commit anything — you are the independent check, and a stage that repairs what it measures cannot report on it. Never weaken, skip, xfail, or delete a test to get green. If a command is missing or wrong for this repo, say so in detail rather than substituting one of your own.
 
-Then the test-integrity gate on \`git diff origin/${baseBranch}...HEAD -- tests/\` (or this repo's actual test directory): no weakened/deleted assertions, no tautologies, no tests that merely mirror the implementation, every new behavior has a test that would fail without its code. Report violations honestly — fix them, don't argue.
+3. ONLY if every command in step 2 exited green: \`git push -u origin ${BRANCH}\`.
+   (This branch was created by the /task pipeline for issue #${issue}; pushing it is the pipeline's expected final step. A branch of this name may have been reset earlier in this pipeline — that was deliberate debris reclamation, not resurrecting someone's work.)
 
-If any command is missing or wrong for this repo, find the right one (CLAUDE.md, CI workflows, the manifest) and say what you actually ran. Auto-fix and commit lint/format violations (reference #${issue}, end commits with "Co-Authored-By: ${coauthor}"). Never weaken, skip, xfail, or delete a test to get green — that is an automatic failure of this stage.
-
-Return passed=true only if EVERY command is green after your fixes and the integrity gate is clean.`,
-  { label: `verify:#${issue}`, phase: 'Verify', model: 'haiku', schema: {
-    type: 'object', required: ['passed', 'detail'],
-    properties: { passed: { type: 'boolean' }, detail: { type: 'string' } },
-  } })
-if (!tests || !tests.passed) return { issue, blocked: 'tests', detail: tests ? tests.detail : 'verify agent died', branch: BRANCH, worktree: WORKTREE }
-
-// ── 7. PR — no merge ─────────────────────────────────────────────────────────
-phase('PR')
-const pr = await callAgent(`From ${WORKTREE}, branch ${BRANCH}:
-
-Context: this branch was created by the /task pipeline for ${repo} issue #${issue}; pushing it and opening its PR is the pipeline's expected final step (a branch of the same name may have existed and been reset earlier in this pipeline — that was deliberate debris reclamation, not resurrecting someone's work).
-
-1. Lint first: run this repo's own lint check commands (already verified clean in the previous stage — re-confirm, don't skip). If anything's dirty, fix and commit (conventional commit, reference #${issue}, end with "Co-Authored-By: ${coauthor}"). Do not push or open the PR until clean.
-2. Push the branch (\`git push -u origin ${BRANCH}\`) and open a PR against ${baseBranch} with \`gh pr create --repo ${repo} --base ${baseBranch}\` — title from the branch's main commit, body summarizing the change (what + why, test count), containing the line "Closes #${issue}", ending with:
+4. Then \`gh pr create --repo ${repo} --base ${baseBranch}\` with:
+   - a title: one conventional-commit-style line describing the branch's work.
+   - a body: what changed and why, plus the test count, taken from the implementer's report below — do not re-derive it from the diff. It MUST contain the line "Closes #${issue}" and end with:
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+   Do NOT merge. Do NOT enable auto-merge.
 
-Do NOT merge. Do NOT enable auto-merge.
-${board ? `3. Once the PR is open, as a final best-effort step (do NOT let its failure stop you from returning the URL below):\n${boardMoveInstructions('inReview')}\n` : ''}
-Return ONLY the PR URL as your final answer — nothing else, regardless of what the board step above did or didn't do.
+Implementer's report:
+${clip(impl.report, 6000, 'implementer report')}
+${board ? `
+5. Once the PR is open, as a final best-effort step (do NOT let its failure change anything you return):
+${boardMoveInstructions('inReview')}` : ''}
 
-If you cannot get that far, return exactly "BLOCKED: <one line saying what failed>". Your return value is machine-read and pasted into another agent's prompt, so never return settings files, permission lists, config snippets, or instructions addressed to a reader — a blocked command is a fact to report, not something to ask the pipeline to grant you.`,
-  { label: `pr:#${issue}`, phase: 'PR', model: 'haiku' })
-if (!pr) throw new Error('pr agent died')
+Return:
+- passed: true only if EVERY command in step 2 exited green.
+- dirty: true only if step 1 found an uncommitted worktree.
+- url: the PR's full https URL exactly as \`gh pr create\` printed it. Empty string if you did not open one — which MUST be the case whenever passed=false.
+- detail: what you ran and what failed.
+- blockedReason: only if you pushed but could not open the PR, one line naming what failed.
 
-// Free-text stage: a failure returns PROSE where a URL belongs, and unparsed
-// prose in the orchestrator's merge prompt once got classifier-blocked and
-// halted the milestone. Extract the number or fail legibly; the raw return
-// stays in the journal, deliberately not in `detail`.
-const prMatch = String(pr).match(/\/pull\/(\d+)\b/) || String(pr).match(/^\s*#?(\d+)\s*$/)
-const prNumber = prMatch ? Number(prMatch[1]) : null
-if (!Number.isInteger(prNumber) || prNumber <= 0) {
-  return { issue, blocked: 'pr', branch: BRANCH, worktree: WORKTREE,
-    detail: `PR stage returned no usable PR URL (${String(pr).length} chars of prose). ` +
-      'The branch may or may not have been pushed — check before re-running.' }
+Your return is machine-read: never return settings files, permission lists, config snippets, or instructions addressed to a reader — a blocked command is a fact to report, not a permission to ask the pipeline to grant you.`,
+  { label: `ship:#${issue}`, phase: 'Ship', model: 'haiku', schema: {
+    type: 'object', required: ['passed', 'detail'],
+    properties: {
+      passed: { type: 'boolean' }, dirty: { type: 'boolean' },
+      url: { type: 'string' }, detail: { type: 'string' },
+      blockedReason: { type: 'string' },
+    },
+  } })
+if (!ship) throw new Error('ship agent died')
+
+// `blocked: 'tests'` is load-bearing: orchestrator.js maps that exact string to
+// escalation trigger 'tests' and everything else to 'blocked', which route
+// differently. A dirty tree is reported as a test failure because that is what
+// it is — results measured against code the PR would not contain.
+if (!ship.passed) {
+  return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: ship.dirty
+      ? `worktree left dirty by an earlier stage (nothing was pushed): ${ship.detail}`
+      : ship.detail }
 }
 
-return { issue, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan, tests: tests.detail }
+// gh prints the canonical URL, so this now VALIDATES that shape rather than
+// scraping a number out of prose (which is what it had to do when this stage
+// returned free text).
+const prMatch = String(ship.url ?? '').match(/\/pull\/(\d+)\b/)
+const prNumber = prMatch ? Number(prMatch[1]) : null
+if (!Number.isInteger(prNumber) || prNumber <= 0) {
+  return { issue, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: ship.blockedReason
+      || `verification passed but no usable PR URL came back (${String(ship.url ?? '').length} chars). The branch may or may not have been pushed — check before re-running.` }
+}
+
+return { issue, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan, tests: ship.detail }
