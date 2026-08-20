@@ -123,3 +123,69 @@ test('a syntax error short-circuits meta validation', async () => {
   assert.doesNotMatch(output, /meta\./)
   assert.doesNotMatch(output, /missing top-level/)
 })
+
+const IMPURE_MESSAGE = /meta must be a plain object literal with no variables, calls, spreads, or interpolation/
+
+const VARIABLE_META_WORKFLOW = `const NAME = 'impure'
+
+export const meta = {
+  name: NAME,
+  description: 'built from a variable',
+}
+
+return { ok: true }
+`
+
+test('meta built from a variable is rejected as impure', async () => {
+  const file = await fixture('variable-meta.js', VARIABLE_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, IMPURE_MESSAGE)
+})
+
+const SPREAD_META_WORKFLOW = `const base = { description: 'from a spread' }
+
+export const meta = {
+  ...base,
+  name: 'spread',
+}
+
+return { ok: true }
+`
+
+test('meta built with a spread is rejected as impure', async () => {
+  const file = await fixture('spread-meta.js', SPREAD_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, IMPURE_MESSAGE)
+})
+
+const CALL_META_WORKFLOW = `export const meta = {
+  name: String('called'),
+  description: 'built with a call',
+}
+
+return { ok: true }
+`
+
+test('meta built with a function call is rejected as impure', async () => {
+  const file = await fixture('call-meta.js', CALL_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, IMPURE_MESSAGE)
+})
+
+const SIDE_EFFECT_WORKFLOW = `export const meta = {
+  name: 'side-effect',
+  description: 'a body that would explode if it ran',
+}
+
+throw new Error('should not run')
+`
+
+test('the checker never executes the module body', async () => {
+  const file = await fixture('side-effect.js', SIDE_EFFECT_WORKFLOW)
+  const result = await runChecker([file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.doesNotMatch(result.stdout + result.stderr, /should not run/)
+})

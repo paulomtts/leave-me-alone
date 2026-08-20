@@ -13,8 +13,107 @@ export function wrapSource(source) {
   return `async function __wrap(){\n${source.replace(EXPORT_META_RE, '$1')}\n}`
 }
 
+const IMPURE_META =
+  'meta must be a plain object literal with no variables, calls, spreads, or interpolation'
+
+function skipQuoted(source, start) {
+  const quote = source[start]
+  for (let i = start + 1; i < source.length; i += 1) {
+    if (source[i] === '\\') {
+      i += 1
+      continue
+    }
+    if (source[i] === quote) return i
+  }
+  return source.length
+}
+
+// Slices the `{ ... }` that follows a top-level `export const meta =`, balancing
+// braces while stepping over strings, template literals and comments.
+export function extractMetaLiteral(source) {
+  const match = EXPORT_META_RE.exec(source)
+  if (!match) return null
+  const eq = source.indexOf('=', match.index + match[0].length)
+  if (eq === -1) return null
+  const start = source.indexOf('{', eq)
+  if (start === -1) return null
+  let depth = 0
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      i = skipQuoted(source, i)
+      continue
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      const nl = source.indexOf('\n', i)
+      if (nl === -1) return null
+      i = nl
+      continue
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2)
+      if (end === -1) return null
+      i = end + 1
+      continue
+    }
+    if (ch === '{') depth += 1
+    else if (ch === '}') {
+      depth -= 1
+      if (depth === 0) return source.slice(start, i + 1)
+    }
+  }
+  return null
+}
+
+// Runs the literal alone, in a context with no sandbox globals: a pure object
+// literal resolves, a reference to an undefined free identifier throws. This
+// alone does not catch calls to language built-ins (String, Math, JSON, ...) —
+// a fresh vm context always carries those, they are intrinsic to any JS realm
+// and cannot be stripped — so callers must run `hasImpureSyntax` first.
+export function resolveMetaLiteral(literal) {
+  const script = new vm.Script(`(${literal})`)
+  return script.runInContext(vm.createContext(Object.create(null)), { timeout: 1000 })
+}
+
+// Beyond free-identifier references (caught by resolveMetaLiteral throwing), a
+// pure object literal never legitimately needs `(` or `...`: reject both
+// syntactically, since a call to a built-in (String(), Math.max(), ...) would
+// otherwise resolve silently in the empty vm context instead of throwing.
+export function hasImpureSyntax(literal) {
+  for (let i = 0; i < literal.length; i += 1) {
+    const ch = literal[i]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      i = skipQuoted(literal, i)
+      continue
+    }
+    if (ch === '/' && literal[i + 1] === '/') {
+      const nl = literal.indexOf('\n', i)
+      i = nl === -1 ? literal.length : nl
+      continue
+    }
+    if (ch === '/' && literal[i + 1] === '*') {
+      const end = literal.indexOf('*/', i + 2)
+      i = end === -1 ? literal.length : end + 1
+      continue
+    }
+    if (ch === '(' || (ch === '.' && literal[i + 1] === '.' && literal[i + 2] === '.')) {
+      return true
+    }
+  }
+  return false
+}
+
 export function validateMeta(source) {
   if (!EXPORT_META_RE.test(source)) return ['missing top-level "export const meta"']
+  const literal = extractMetaLiteral(source)
+  if (literal === null || hasImpureSyntax(literal)) return [IMPURE_META]
+  let meta
+  try {
+    meta = resolveMetaLiteral(literal)
+  } catch {
+    return [IMPURE_META]
+  }
+  if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return [IMPURE_META]
   return []
 }
 
