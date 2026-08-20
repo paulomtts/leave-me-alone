@@ -142,9 +142,16 @@ carry an ordinal prefix like `L2.3.1 …` / `1.2 …`, which the workflows detec
 with plain descriptive titles needs no configuration; a repo with a different convention passes
 `ordinalPattern` (a JS regex string whose **first capture group** is the ordinal).
 
-**Dependencies between stories** are optional. If you use them, they must be GitHub's native
-`blockedBy` relation (Development → "blocked by"), which the orchestrator reads via GraphQL to build
-its dependency levels. No `blockedBy` edges = one flat level = every story dispatched in parallel.
+**Dependencies between stories** must be GitHub's native `blockedBy` relation (Development →
+"blocked by"), which the orchestrator reads via GraphQL. They do two jobs: they order the dispatch
+levels, and they decide what branch each story's stack **roots on** — a blocked story starts from its
+blocker's tip branch, not from `baseBranch`. Since nothing is merged during a run, that rooting is
+the only way a story ever sees the code it depends on.
+
+No `blockedBy` edges = one flat level = every story dispatched in parallel, each rooted at
+`baseBranch` and blind to the others. **At most one blocker per story** — a stack can only root on
+one parent, and a story with two blockers stops the run rather than guessing which. Chain them
+(A ← B ← C) instead.
 
 ```bash
 gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){blockedBy(first:50){nodes{number}}}}}' \
@@ -200,8 +207,13 @@ Workflow({ name: "orchestrator" }, args: {
 ```
 
 It returns the resolved board ids, the discovered test/lint commands, the dependency levels, and the
-ordered subtask list per story. If the levels or the subtask order look wrong, fix the board — not
-the workflow.
+ordered subtask list per story — each with a `prTargets` field naming the branch that subtask's PR
+will target. **Read that column.** Each subtask should target the previous one's branch, and each
+story's first subtask should target its blocker's tip (or `baseBranch` if it has none). A story
+rooted at `baseBranch` when it has a blocker means the edge is missing, and the story will be built
+against a base that has never seen the code it depends on.
+
+If the levels, the subtask order, or the targets look wrong, fix the board — not the workflow.
 
 ## Gotchas
 
@@ -212,5 +224,6 @@ the workflow.
 | `In Progress` vs `In progress` | Matched exactly. Mismatch → the workflow disables the board and logs why. |
 | Body checklists instead of sub-issues | `sub_issues` returns empty → `task` refuses the story as having nothing to sequence. |
 | Adding cards to the board later | Cards missing at resolve time are reported, never auto-added. |
-| Expecting a card per PR | One PR per **story**, not per subtask. Subtask cards go "In review" together when it opens. |
+| Expecting a card per PR | One PR per **subtask**. Each subtask's card goes "In review" when its own PR opens. |
+| Expecting cards to reach "Done" | The run never merges, so nothing closes. Cards stop at "In review" and issues stay open until a human merges the stack. "Done" is still required to exist — the board resolver checks all four option names. |
 | No `project` arg at all | Legal: the run is boardless and only touches issues and PRs. |
