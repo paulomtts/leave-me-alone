@@ -37,18 +37,55 @@ Also check project memory / repo docs for naming schemes. pyjinhx: titles `L<lay
 Each subtask becomes one worktree, one branch, one PR, and one Review pass that must gate the whole diff. Size to that.
 
 **A subtask is right-sized when:**
-- its behavior change fits in one sentence with no "and"
-- you can list its tests *before* any code exists — if you cannot, it is too big or too vague
+- its deliverable fits in one sentence with no "and"
 - it touches few files, in one layer
-- **the full suite is green with it alone.** This is the hard rule in stacked mode: every subtask's PR is verified on its own, so "half a feature that breaks tests until the next card lands" cannot exist. If a split leaves the tree red, it is the wrong split.
+- **the full suite is green with it alone.** This is the hard rule: every subtask's PR is verified on its own, so "half a feature that breaks tests until the next card lands" cannot exist. If a split leaves the tree red, do not split there — either move the boundary, or make the two halves one subtask.
+
+For a **behavior-changing** subtask, add: you can list its tests *before* any code exists. If you cannot, it is too big or too vague.
 
 **Too big** — the title needs "and"; it spans layers (schema + route + UI); its plan would run past ~10 steps; you cannot name its tests without designing first.
 
-**Too small** — it has no test of its own; it is a rename or a move; its PR would be pure noise. Fold it into the subtask whose behavior it serves.
+**Too small** — it is a rename or a move, or its diff would be pure noise. Fold it into the subtask whose deliverable it serves.
+
+### Subtasks that ship no behavior
+
+Docs, config, scaffolding and pure-refactor cards are legitimate and must NOT be judged by "has its own tests" — they often have none, and that is correct. Judge them on their own terms:
+
+- **Docs** — earns its own card when it describes something that must already exist (so it belongs *after* that work in the stack, or in a story blocked by it). Its "test" is that the thing it documents is real: it must read the actual implementation, not the spec's promise of it. Say so in the body.
+- **Config / scaffolding** — earns a card when later subtasks depend on it and it can land green on its own (a CI file, a fixture, a new module skeleton with one real export). If nothing depends on it yet, fold it into the first thing that does.
+- **Pure refactor** — earns a card when the existing suite covers it, so "green alone" means the refactor is behavior-preserving. If nothing covers it, the honest first card is the missing tests.
+
+The common failure is a docs card written from the spec instead of the code, describing an interface that got built differently. Its body should name the files to read.
 
 **Order is stack order.** Subtask N+1 branches off N, so the sequence you create them in (or tag with ordinals) is the order they build in. Put the thing others rest on first. Reordering after the fact is expensive.
 
 **Keep stories in the same level file-disjoint.** Stories with no dependency between them run in parallel, as separate stacks off the same base. If two of them edit the same files, nothing fails during the run — the conflict lands on whoever merges the stacks. Either give them disjoint footprints, or make one `blockedBy` the other so they stack instead.
+
+Estimating footprint before implementing is guesswork; you do not need precision, only overlap. Name the two or three files each story clearly owns. If two stories name the same file, treat them as overlapping and chain them.
+
+### Worked example
+
+Spec slice: *"the workflow checker should be consumable by other tooling, and its flags documented."*
+
+A tempting single card — "add `--json` and `--quiet` and document them" — fails three ways: the title needs "and" twice, it spans code and docs, and it produces one fat diff for one Review pass to gate. Cut it:
+
+```
+story #11  Machine-readable output for check-workflows        root: main
+  #13  11.1 feat: --json output          → main        one flag, tests nameable up front, green alone
+  #14  11.2 feat: --quiet flag           → task-13     second flag; stacks because both edit arg parsing
+
+story #12  Document the checker's flags                        root: task-14   (blockedBy #11)
+  #15  12.1 docs: document the flags     → task-14     no tests of its own — correct for docs
+```
+
+Why it cuts this way:
+
+- **#13 before #14** — both touch the same argument parsing. Stacking means #14 builds on #13's parser instead of racing it. Two parallel stories here would conflict at merge time.
+- **#13 and #14 are separate**, not one "add both flags" card, because each is independently green and independently reviewable. The split costs one extra PR and buys two tight diffs.
+- **#15 is its own story, not a third subtask of #11**, because it is a different kind of work with a different footprint (`README`, not `scripts/`). As a story blocked by #11 it roots on `task-14`, so its worktree contains both finished flags — it can document what was actually built.
+- **#15 has no tests, and that is right.** Judged by the behavior-subtask rule it would look "too small" and get folded in; judged as docs, it is correctly sized.
+
+What would make this breakdown wrong: putting #15 in level 0 (it would root at `main` and document flags its worktree cannot see), or giving #12 a second blocker (the run refuses to root a stack on two parents).
 
 ## Sequence
 
@@ -104,6 +141,8 @@ Each subtask becomes one worktree, one branch, one PR, and one Review pass that 
 | Assuming sub-issue links imply an execution order | They don't. Sub-issues are parent→child; the orchestrator orders *stories* by `blockedBy` only. Trees can render perfectly while the DAG is empty. |
 | Treating empty `blockedBy` as harmless | The orchestrator cannot tell "no deps recorded" from "genuinely independent" — both are `[]`. It places every story at level 0 and dispatches them all at once, against a base none of them has built on. |
 | Giving a story two blockers | Stops the run: a stack can only root on one parent branch. Chain them instead. |
-| A subtask that leaves the suite red until the next one lands | Every subtask's PR is verified alone. That split is invalid — recut it. |
+| A subtask that leaves the suite red until the next one lands | Every subtask's PR is verified alone. That split is invalid — move the boundary or merge the two halves. |
+| Folding in a docs/config/refactor card because "it has no tests" | That rule is for behavior-changing subtasks only. Judge these on their own terms — see "Subtasks that ship no behavior". |
+| A docs card written from the spec | It must read the actual implementation, which means it has to sit *after* that work in the stack. Name the files to read in its body. |
 | Expecting the run to merge anything | It does not. Each story becomes a stack of open PRs; a human merges bottom-up. Subtask issues stay open and cards sit at "In review" until then. |
 | Fixing the edges, then resuming the orchestrator run | Detect's result is cached on its prompt; a resume replays the stale empty snapshot. Relaunch as a NEW run with a fresh `nonce`. |
