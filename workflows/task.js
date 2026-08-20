@@ -146,6 +146,24 @@ if (typeof baseBranch !== 'string' || baseBranch.length === 0) {
   throw new Error('task workflow needs args.baseBranch (the branch this subtask\'s PR will target)')
 }
 
+// Where the deterministic helpers live. Same wiring as the orchestrator's
+// detectScript: an absolute path, no default, because this repo can be checked
+// out anywhere. The orchestrator forwards it.
+const scriptsDir = typeof opts.scriptsDir === 'string' && opts.scriptsDir.startsWith('/')
+  ? opts.scriptsDir.replace(/\/+$/, '')
+  : (() => { throw new Error(
+      'task workflow needs args.scriptsDir as an absolute path to this checkout\'s scripts/ '
+      + '(e.g. "<repo>/scripts") — plan-check and ship are run from there with `bun`.') })()
+
+// The stages that only run a command get a lean agent type: tools: Bash and a
+// one-line body, which drops ~16KB of tool and skill catalogue per dispatch.
+// Measured on the orchestrator's triggers: 35,097 tokens -> 11,702 for the same
+// work, byte-identical output. Pass '' to use the default subagent.
+const triggerAgentType = typeof opts.triggerAgentType === 'string'
+  ? opts.triggerAgentType
+  : 'command-runner'
+const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
+
 const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
 const BRANCH = `${branchPrefix}${issue}`
 const WORKTREE = `${repoDir}/.claude/worktrees/${BRANCH}`
@@ -369,13 +387,32 @@ if (DRY) {
 // all three when one already exists, same durable-state pattern orchestrator
 // uses for subtask doneness (see orchestrator.js's isSubtaskDone).
 phase('Spec')
-const planCheck = await callAgent(`In ${repoDir}, look for an already-saved implementation plan for subtask #${issue}. Check ${repoDir}/CLAUDE.md and existing plan files to find this repo's plans directory convention (fall back to ${repoDir}/.claude/plans/), then look there for a file matching *issue-${issue}.md. Read only — do not create or modify anything.
+const planCheck = await (async () => {
+  // Find `*issue-<n>.md` and grep it for one marker: `ls` and `grep`, no
+  // judgement. It cost a dispatch every run only because a Workflow script
+  // cannot touch a disk, so the agent is now a trigger and the rules live in
+  // scripts/plan-check.mjs, where they are tested.
+  const out = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/plan-check.mjs --repo-dir ${repoDir} --issue ${issue} --compact
 
-If no such file exists, return found=false. If one does, return found=true, its ABSOLUTE path, and validated=true ONLY if the file literally contains the marker line \`<!-- task-pipeline: validated -->\` — test that with \`grep -Fq '<!-- task-pipeline: validated -->' <path>\` and report what grep actually said. Do NOT return the file's contents; the marker check is the only thing this step decides.`,
-  { label: `plan-check:#${issue}`, phase: 'Spec', model: 'haiku', effort: 'low', schema: {
-    type: 'object', required: ['found'],
-    properties: { found: { type: 'boolean' }, validated: { type: 'boolean' }, path: { type: 'string' } },
-  } })
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
+    { label: `plan-check:#${issue}`, phase: 'Spec', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+      type: 'object', required: ['stdout'],
+      properties: {
+        stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+        error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+      },
+    } })
+  if (!out) return null
+  try {
+    return JSON.parse(String(out.stdout ?? ''))
+  } catch (err) {
+    // Not fatal: an unreadable answer means "no reusable plan", which costs a
+    // re-plan rather than the run.
+    log(`plan-check returned output that is not JSON (${err.message}) — treating as no saved plan`)
+    return { found: false }
+  }
+})()
 
 let plan
 if (planCheck && planCheck.found && planCheck.validated === true &&
@@ -443,8 +480,11 @@ Return blockers=true only if something unresolvable remains (spec contradiction 
     // issue would go silent. Only that case needs the fallback dispatch.
     if (!verdict) {
       try {
-        await agent(`Comment on ${repo} issue #${issue}: the /task workflow stopped at validation because the validator agent died without returning a verdict. Use \`gh issue comment ${issue} --repo ${repo} --body "..."\` with a concise version.`,
-          { label: `blocked-comment:#${issue}`, phase: 'Validate', model: 'haiku', effort: 'low' })
+        // Fully formed here rather than described: there is nothing for the
+        // agent to compose, so there is nothing for it to get wrong.
+        await agent(`Run this command exactly as written and report nothing else:
+gh issue comment ${issue} --repo ${repo} --body ${JSON.stringify('The /task workflow stopped at validation: the validator agent died without returning a verdict. No plan was accepted and nothing was implemented. Re-run the task to retry.')}`,
+          { label: `blocked-comment:#${issue}`, phase: 'Validate', model: 'haiku', effort: 'low', ...triggerAgent })
       } catch (err) {
         log(`blocked-comment agent threw (${err && err.message ? err.message : err}) — returning the blocker anyway`)
       }
@@ -609,44 +649,46 @@ if (gate && gate.blocked) {
 // instruction. A run that ever reports passed=false alongside a non-empty url
 // means this merge was wrong and the stages should be split back apart.
 phase('Ship')
-const ship = await callAgent(`Verify and ship ${repo} subtask #${issue} from ${WORKTREE} (branch ${BRANCH}). These steps are strictly ordered, and the ordering is the whole point: nothing is pushed until everything above it is green.
+const verifyFlags = suiteCmds
+  .concat(verification.typecheck ? [verification.typecheck] : [])
+  .concat((verification.lint || []).filter(Boolean))
+  .map(command => `--verify ${JSON.stringify(command)}`)
+  .join(' ')
 
-1. Run EVERY verification command below, each as its own invocation:
-${verifyBlock}
-   Report exactly what happened. Do NOT fix, edit, or commit anything — you are the independent check, and a stage that repairs what it measures cannot report on it. Never weaken, skip, xfail, or delete a test to get green. If a command is missing or wrong for this repo, say so in detail rather than substituting one of your own. (The worktree was confirmed clean, and its commits confirmed well-formed, before you were dispatched — you do not need to re-check either.)
+// Ship used to be five-plus commands fenced in by prose: run every verification
+// command, judge whether they were green, push, open the PR with --head passed
+// explicitly, move the card. Only the last of those needed a model, and even
+// that only because a Workflow script cannot run `gh`.
+//
+// The PR title and body are DERIVED inside the script, never passed on the
+// command line. Long text an agent has to type is a quoting accident waiting to
+// happen, and it was the last place a model could alter what ships.
+const shipOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/ship.mjs --repo ${repo} --issue ${issue} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
 
-2. ONLY if every command in step 1 exited green: \`git push -u origin ${BRANCH}\`.
-   (This branch was created by the /task pipeline for issue #${issue}; pushing it is the pipeline's expected final step. A branch of this name may have been reset earlier in this pipeline — that was deliberate debris reclamation, not resurrecting someone's work.)
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.${board ? `
 
-3. Then open the PR. Pass \`--head\` EXPLICITLY — without it \`gh\` infers the head branch from whatever is checked out in the current directory, and if that is not this worktree it will open a PR from an unrelated branch under this subtask's title (observed: a PR carrying 5 commits of someone else's work, titled as this subtask):
-   \`gh pr create --repo ${repo} --base ${baseBranch} --head ${BRANCH}\` with:
-   - a title: one conventional-commit-style line describing the branch's work.
-   - a body: what changed and why, plus the test count, taken from the implementer's report below — do not re-derive it from the diff. It MUST contain the line "Closes #${issue}" and end with:
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-   Do NOT merge. Do NOT enable auto-merge.
-
-Implementer's report:
-${clip(impl.report, 6000, 'implementer report')}
-${board ? `
-4. Once the PR is open, as a final best-effort step (do NOT let its failure change anything you return):
-${boardMoveInstructions('inReview', boardIds)}` : ''}
-
-Return:
-- passed: true only if EVERY command in step 1 exited green.
-- url: the PR's full https URL exactly as \`gh pr create\` printed it. Empty string if you did not open one — which MUST be the case whenever passed=false.
-- detail: what you ran and what failed.
-- blockedReason: only if you pushed but could not open the PR, one line naming what failed.
-
-Your return is machine-read: never return settings files, permission lists, config snippets, or instructions addressed to a reader — a blocked command is a fact to report, not a permission to ask the pipeline to grant you.`,
-  { label: `ship:#${issue}`, phase: 'Ship', model: 'haiku', schema: {
-    type: 'object', required: ['passed', 'detail'],
+Only if that command printed \`"number"\` with a real PR number, do this as a final best-effort step (its failure must not change anything you return):
+${boardMoveInstructions('inReview', boardIds)}` : ''}`,
+  { label: `ship:#${issue}`, phase: 'Ship', model: 'haiku', ...triggerAgent, schema: {
+    type: 'object', required: ['stdout'],
     properties: {
-      passed: { type: 'boolean' },
-      url: { type: 'string' }, detail: { type: 'string' },
-      blockedReason: { type: 'string' },
+      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
     },
   } })
-if (!ship) throw new Error('ship agent died')
+if (!shipOut) throw new Error('ship agent died')
+
+let ship
+try {
+  ship = JSON.parse(String(shipOut.stdout ?? ''))
+} catch (err) {
+  // Parsed HERE so a mangled transcription fails at the boundary rather than
+  // arriving as a plausible-looking success.
+  return { issue, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `ship.mjs returned output that is not JSON (${err.message}). The branch may or may not have been pushed — check before re-running. First 200 characters: ${String(shipOut.stdout ?? '').slice(0, 200)}` }
+}
+
 
 // `blocked: 'tests'` is load-bearing: orchestrator.js maps that exact string to
 // escalation trigger 'tests' and everything else to 'blocked', which route
@@ -656,15 +698,13 @@ if (!ship.passed) {
   return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan, detail: ship.detail }
 }
 
-// gh prints the canonical URL, so this now VALIDATES that shape rather than
-// scraping a number out of prose (which is what it had to do when this stage
-// returned free text).
-const prMatch = String(ship.url ?? '').match(/\/pull\/(\d+)\b/)
-const prNumber = prMatch ? Number(prMatch[1]) : null
+// ship.mjs already parsed the URL and refused to push after a red command, so
+// these read its fields rather than re-deriving anything.
+const prNumber = Number(ship.number)
 if (!Number.isInteger(prNumber) || prNumber <= 0) {
   return { issue, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: ship.blockedReason
-      || `verification passed but no usable PR URL came back (${String(ship.url ?? '').length} chars). The branch may or may not have been pushed — check before re-running.` }
+    detail: ship.detail || `verification passed but no usable PR number came back (url: ${String(ship.url ?? '').slice(0, 120)}). The branch ${ship.pushed ? 'WAS' : 'may not have been'} pushed — check before re-running.` }
 }
 
-return { issue, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan, tests: ship.detail }
+return { issue, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan,
+  tests: (ship.verified || []).map(v => `${v.ok ? 'PASS' : 'FAIL'} ${v.command}`).join('\n') }

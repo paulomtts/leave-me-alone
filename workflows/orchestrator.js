@@ -979,6 +979,10 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     // no change for this mode.
     dispatched = await workflow({ scriptPath: taskScript }, {
       repo, repoDir, issue: subtask.number, baseBranch: stackBase, branchPrefix, coauthor, verification,
+      // Same checkout's scripts/, derived from detectScript so there is one
+      // path to get wrong instead of two.
+      scriptsDir: detectScript.slice(0, detectScript.lastIndexOf('/')),
+      triggerAgentType,
       project: board ? { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds, optionNames, statusField } : undefined,
     })
   } catch (err) {
