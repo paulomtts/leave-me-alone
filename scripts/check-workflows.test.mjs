@@ -89,7 +89,7 @@ test('a broken file does not stop later files from being checked', async () => {
 
 const SUMMARY_RE = /checked \d+ workflow script\(s\)/
 
-test('--quiet alone suppresses the summary and still checks workflows/', async () => {
+test('--quiet alone is a flag, not a target: the run still exits 0 with no summary', async () => {
   const result = await runChecker(['--quiet'])
   assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
   assert.doesNotMatch(result.stdout, SUMMARY_RE)
