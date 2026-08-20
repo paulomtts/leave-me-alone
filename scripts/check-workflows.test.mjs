@@ -86,3 +86,56 @@ test('a broken file does not stop later files from being checked', async () => {
   assert.notEqual(result.code, 0, 'expected a non-zero exit code')
   assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
 })
+
+// ── smokeInit ────────────────────────────────────────────────────────────────
+// Compiling is not enough: a `const` referenced above its own declaration
+// compiles fine and throws only when the script RUNS. That shipped once and
+// took a live milestone to find.
+
+import { smokeInit, SMOKE_ARGS } from './check-workflows.mjs'
+
+const scratch = async (body) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'smoke-'))
+  const file = path.join(dir, 'x.js')
+  await writeFile(file, body)
+  return file
+}
+
+test('a script that reaches its first dispatch passes', async () => {
+  const file = await scratch("export const meta = {}\nconst a = 1\nawait agent('go')\n")
+  const got = await smokeInit(file, { any: true })
+  assert.equal(got.ok, true)
+})
+
+test('a temporal dead zone is caught — the bug that shipped', async () => {
+  const file = await scratch("export const meta = {}\nconst derived = `${LATER}/x`\nconst LATER = '/wt'\nawait agent('go')\n")
+  const got = await smokeInit(file, { any: true })
+  assert.equal(got.ok, false)
+  assert.match(got.error, /Cannot access 'LATER' before initialization/)
+})
+
+test('any throw before the first dispatch is caught, not just TDZ', async () => {
+  const file = await scratch("export const meta = {}\nthrow new Error('args are wrong')\n")
+  const got = await smokeInit(file, { any: true })
+  assert.equal(got.ok, false)
+  assert.match(got.error, /args are wrong/)
+})
+
+test('a script that never dispatches is a failure, not a pass', async () => {
+  // Otherwise a script that silently returned early would look healthy.
+  const file = await scratch("export const meta = {}\nconst a = 1\n")
+  const got = await smokeInit(file, { any: true })
+  assert.equal(got.ok, false)
+  assert.match(got.error, /without dispatching an agent/)
+})
+
+test('a script with no fixture is skipped rather than guessed at', async () => {
+  const got = await smokeInit('/nonexistent.js', undefined)
+  assert.equal(got.ok, true)
+  assert.equal(got.skipped, true)
+})
+
+test('both workflow scripts have fixtures', () => {
+  // A new workflow script without one would silently skip this whole check.
+  assert.deepEqual(Object.keys(SMOKE_ARGS).sort(), ['orchestrator.js', 'task.js'])
+})

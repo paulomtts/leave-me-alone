@@ -165,6 +165,15 @@ const triggerAgentType = typeof opts.triggerAgentType === 'string'
   : 'command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
+const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
+const BRANCH = `${branchPrefix}${issue}`
+const WORKTREE = `${repoDir}/.claude/worktrees/${BRANCH}`
+
+// MUST come after WORKTREE: these interpolate it, and a `const` referenced
+// above its declaration is a temporal-dead-zone error that only appears when
+// the script RUNS. check-workflows.mjs compiles with vm.Script and never
+// executes, so it cannot see this — it took a live milestone to find.
+//
 // Plans and specs live in the superpowers folders INSIDE THE WORKTREE, with a
 // DETERMINISTIC filename, so each subtask's PR carries the spec and plan it was
 // built from and a reviewer can see all three together.
@@ -197,9 +206,6 @@ const specsDir = typeof opts.specsDir === 'string' && opts.specsDir.startsWith('
 const PLAN_PATH = `${plansDir}/issue-${issue}.md`
 const SPEC_PATH = `${specsDir}/issue-${issue}-design.md`
 
-const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
-const BRANCH = `${branchPrefix}${issue}`
-const WORKTREE = `${repoDir}/.claude/worktrees/${BRANCH}`
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 const DRY = opts.dryRun === true
 
