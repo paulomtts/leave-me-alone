@@ -86,3 +86,25 @@ test('a broken file does not stop later files from being checked', async () => {
   assert.notEqual(result.code, 0, 'expected a non-zero exit code')
   assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
 })
+
+test('--quiet suppresses the summary when nothing fails', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker(['--quiet', file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.doesNotMatch(result.stdout, /checked \d+ workflow script\(s\)/)
+})
+
+test('--quiet still prints failures and still exits non-zero', async () => {
+  const file = await fixture('broken.js', BROKEN_WORKFLOW)
+  const result = await runChecker(['--quiet', file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  const output = result.stdout + result.stderr
+  assert.ok(output.includes(file), `expected output to name ${file}\n${output}`)
+  assert.match(output, /FAIL /)
+})
+
+test('--quiet is not treated as a target path', async () => {
+  const result = await runChecker(['--quiet'])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.equal(result.stdout, '', `expected empty stdout, got ${JSON.stringify(result.stdout)}`)
+})

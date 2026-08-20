@@ -46,10 +46,14 @@ const invokedDirectly =
 
 if (invokedDirectly) {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-  const args = process.argv.slice(2)
+  const argv = process.argv.slice(2)
+  const quiet = argv.includes('--quiet')
+  const args = argv.filter((arg) => arg !== '--quiet')
   const targets = args.length ? args : await listWorkflowScripts(path.join(repoRoot, 'workflows'))
   const results = await checkWorkflows(targets)
   const failed = results.filter((r) => !r.ok)
-  console.log(`checked ${results.length} workflow script(s); ${failed.length} failed`)
+  if (!quiet) {
+    console.log(`checked ${results.length} workflow script(s); ${failed.length} failed`)
+  }
   process.exit(failed.length > 0 ? 1 : 0)
 }
