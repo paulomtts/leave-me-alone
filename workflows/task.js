@@ -123,51 +123,34 @@ function clip(text, max, what) {
 [TRUNCATED: ${what} returned ${value.length} characters, capped at ${max}. If this reads as cut off mid-thought, treat the truncation ITSELF as evidence the upstream stage over-ran its brief — say so in your output rather than guessing what the missing text said.]`
 }
 
-// ── board — resolved ids only, Haiku, low effort, sole board writer ──────────
+// ── board — orchestrator-resolved ids only ───────────────────────────────────
+// Ids are NOT looked up here. The orchestrator resolves them once per milestone
+// in its Configure phase and forwards the resolved block to every subtask, so
+// this workflow only ever receives them ready-made — no dispatch, no GraphQL.
+//
+// An earlier version could also resolve them itself from a bare project.number,
+// for the standalone `/task 251` case. That path cost an agent dispatch on every
+// run and was never taken under the orchestrator, which is how this workflow is
+// actually driven. Pass the resolved block, or omit `project` to run boardless.
+// (orchestrator.js still accepts a plain {number: N} — resolving by name is its
+// job, not this file's.)
 const DEFAULT_OPTION_NAMES = { backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done' }
 
-async function resolveProject() {
+function resolveProject() {
   if (!project) return null
-  if (project.id && project.fieldId && project.optionIds) {
-    // Orchestrator-resolved ids; fill display defaults a standalone caller
-    // may have omitted.
-    return {
-      id: project.id, fieldId: project.fieldId, optionIds: project.optionIds,
-      statusField: project.statusField || 'Status',
-      optionNames: { ...DEFAULT_OPTION_NAMES, ...(project.optionNames || project.options || {}) },
-    }
-  }
-  if (!Number.isInteger(Number(project.number))) {
-    log('project given without a number and without resolved ids — board steps disabled')
+  if (!(project.id && project.fieldId && project.optionIds)) {
+    log('project passed without resolved ids (id/fieldId/optionIds) — board steps disabled for this run. '
+      + 'Either let the orchestrator resolve and forward them, or resolve them once yourself '
+      + '(see the setup-project skill) and pass the whole block. Omit `project` entirely to run boardless on purpose.')
     return null
   }
-  const statusField = project.statusField || 'Status'
-  const optionNames = { ...DEFAULT_OPTION_NAMES, ...(project.options || {}) }
-  const owner = repo.split('/')[0]
-  const resolved = await callAgent(`Resolve GitHub Projects v2 ids for project number ${project.number} owned by "${owner}". Read only — do NOT create, edit, or delete anything.
-
-1. Try the user-owned query, and if it returns null data, the org-owned one:
-gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${project.number}
-gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${project.number}
-2. Find the single-select field named exactly "${statusField}" and, inside it, the options named exactly: ${Object.entries(optionNames).map(([key, value]) => `${key}="${value}"`).join(', ')}.
-3. Return the project id, the field id, and the four option ids keyed backlog/inProgress/inReview/done. If the field or ANY option name is missing, return found=false and name exactly what is missing — do not invent, guess, or create a field or option.`,
-    { label: `resolve-project:${project.number}`, phase: 'Intake', model: 'haiku', effort: 'low', schema: {
-      type: 'object', required: ['found'],
-      properties: {
-        found: { type: 'boolean' }, missing: { type: 'string' },
-        id: { type: 'string' }, fieldId: { type: 'string' },
-        optionIds: { type: 'object', properties: {
-          backlog: { type: 'string' }, inProgress: { type: 'string' }, inReview: { type: 'string' }, done: { type: 'string' },
-        } },
-      },
-    } })
-  if (!resolved || !resolved.found) {
-    log(`project ${project.number} field/option resolution failed${resolved ? `: missing ${resolved.missing}` : ''} — board steps disabled for this run`)
-    return null
+  return {
+    id: project.id, fieldId: project.fieldId, optionIds: project.optionIds,
+    statusField: project.statusField || 'Status',
+    optionNames: { ...DEFAULT_OPTION_NAMES, ...(project.optionNames || project.options || {}) },
   }
-  return { id: resolved.id, fieldId: resolved.fieldId, optionIds: resolved.optionIds, statusField, optionNames }
 }
-const board = await resolveProject()
+const board = resolveProject()
 const optionNames = board ? board.optionNames : null
 
 // This workflow only ever makes TWO card moves: "In progress" when Intake
