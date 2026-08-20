@@ -306,7 +306,7 @@ Setup: from ${repoDir}, run \`git fetch origin && git worktree prune\` (prune cl
      - Check for a matching trailer, scoped to this branch's own commits (not inherited history from origin/${baseBranch}): \`git -C ${WORKTREE} log origin/${baseBranch}..HEAD --grep="^Plan-Hash: $PLAN_HASH" --format=%H\`.
      - If that returns any commit: RESUME. These commits genuinely implement the plan you were just given (a killed earlier run, not stale debris). Do NOT reset. Run \`git -C ${WORKTREE} log --oneline origin/${baseBranch}..HEAD\` and read the plan's step list to see which steps are already committed, then continue STRICT TDD from the next uncompleted step — do not re-do committed steps.
      - If it returns nothing (empty, or the branch predates this convention): RESET. This branch is stale relative to the current plan (an earlier attempt under a different/no plan). \`git -C ${WORKTREE} reset --hard origin/${baseBranch}\` and start the TDD steps below from scratch. A hard reset over genuinely stale debris is deliberate: this plan-driven run re-derives the work deterministically, while building on unrelated partial state does not.
-  This keeps the branch prefix STABLE — which is what lets already-merged subtasks stay detectable — while making leftovers self-healing instead of either a hard stop or blind data loss. NEVER work around a collision by inventing a different branch name: a changed name orphans the Resume step's PR lookup that decides whether a subtask is already done.
+  This keeps the branch prefix STABLE — which is what lets already-merged subtasks stay detectable — while making leftovers self-healing instead of either a hard stop or blind data loss. NEVER work around a collision by inventing a different branch name: the caller decides whether a subtask is already done by finding the PR whose head ref carries this issue's number, and a name you invented is invisible to that lookup.
 Whichever path above you took, you need \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\` from here on — path (b) already computed it for the resume check above; if you took path (a), compute it now (and apply the same STOP-if-empty/failed rule if you're computing it here). Every commit you make below, on either path, must carry this same value as a trailer.
 Work ONLY inside ${WORKTREE}. Sync dependencies per this repo's own convention, then a baseline full-suite run (skip this if you just RESUMED and the suite was already green as of the last commit — re-run it anyway if unsure):
 ${verifyBlock}
@@ -322,14 +322,42 @@ Do NOT push, do NOT open a PR.
 
 As a final best-effort step (do NOT let its failure change anything above): comment on ${repo} issue #${issue} (concise, one line, via \`gh issue comment ${issue} --repo ${repo} --body "..."\`) that implementation finished on branch ${BRANCH} and review/verify/PR is next.
 
-Return: commits made (oneline), test count added, deviations from the plan with reasons, and whether you RESUMED or started fresh.`,
-  { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet' })
+Return a structured result. This stage has THREE stop conditions, all above: an OPEN PR on \`${BRANCH}\`; a \`sha256sum\` that failed or gave an empty PLAN_HASH; a baseline suite already red before you changed anything. Reporting one of those in prose while claiming success is the single worst outcome here — the pipeline would review, verify and open a PR on top of a stop you were told to make.
+
+- blocked: true if ANY stop condition fired, or anything else made implementation impossible. false only if you completed the TDD work.
+- blockedReason: when blocked, ONE line naming which condition fired plus the concrete detail (the PR number, the command that failed, the tests already red). Empty when blocked=false.
+- existingPr: ONLY when an open PR on \`${BRANCH}\` is what stopped you — its number. Omit otherwise.
+- resumed: true if you continued from existing Plan-Hash commits; false if you started fresh (path (a), or after a RESET).
+- report: the normal implementation report — commits made (oneline), test count added, deviations from the plan with reasons. The reviewer reads this next, so keep it factual and scoped to what you changed. Empty when blocked=true.
+
+Do not set blocked=true for a difficulty you worked through and solved.`,
+  { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet', schema: {
+    type: 'object', required: ['blocked', 'report'],
+    properties: {
+      blocked: { type: 'boolean' }, blockedReason: { type: 'string' },
+      existingPr: { type: 'integer' }, resumed: { type: 'boolean' },
+      report: { type: 'string' },
+    },
+  } })
 if (!impl) throw new Error('implement agent died')
+
+// Implement's stop conditions used to be prose in a free-text return, so
+// nothing downstream could see them: the pipeline went on to review, verify and
+// open a PR on top of a stop it had been explicitly told about. `existingPr` is
+// deliberately NOT called `pr` — a blocking PR belongs to whatever else is
+// driving this branch, and putting it in the field the orchestrator reads as
+// "this subtask's PR" is exactly the kind of confusion that costs a milestone.
+if (impl.blocked) {
+  const stoppedOnPr = Number.isInteger(impl.existingPr) && impl.existingPr > 0
+  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
+    ...(stoppedOnPr ? { existingPr: impl.existingPr } : {}),
+    detail: impl.blockedReason || 'implement stopped without naming a reason' }
+}
 
 // ── 5. review + fixes ────────────────────────────────────────────────────────
 phase('Review')
 const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff origin/${baseBranch}...HEAD\`. Context: ${repo} subtask #${issue}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
-${clip(impl, 12000, 'implementer report')}
+${clip(impl.report, 12000, 'implementer report')}
 
 Check every new test file's path against this repo's own test-placement rule (cited in the plan/intake findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
 
