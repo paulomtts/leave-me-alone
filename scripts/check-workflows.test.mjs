@@ -314,3 +314,18 @@ test('every offending phase entry is reported, not just the first', async () => 
   assert.match(output, /meta\.phases\[2\]\.title must be a non-empty string/)
   assert.doesNotMatch(output, /meta\.phases\[1\]\.title/)
 })
+
+const LITERAL_SPREAD_META_WORKFLOW = `export const meta = {
+  ...{ description: 'spread from an inline literal' },
+  name: 'inline-spread',
+}
+
+return { ok: true }
+`
+
+test('meta built with a spread of an inline object literal is rejected as impure', async () => {
+  const file = await fixture('inline-spread-meta.js', LITERAL_SPREAD_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, IMPURE_MESSAGE)
+})
