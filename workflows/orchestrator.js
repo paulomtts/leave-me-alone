@@ -9,6 +9,22 @@ export const meta = {
   ],
 }
 
+// PURE:BEGIN
+// Everything between these markers is a pure function of its arguments: no
+// agent() calls, no globals from the Workflow harness, no I/O. workflows/
+// orchestrator.test.mjs slices this region out of THIS FILE and runs it under
+// `node --test`, so these are the one part of the pipeline covered by real
+// tests rather than by a live run.
+//
+// It is extracted rather than imported because a Workflow script executes in a
+// sandbox with no module resolution — an `import` here would break the
+// orchestrator at launch. Slicing keeps one source of truth and costs the
+// runtime nothing.
+//
+// Two rules for anything added between the markers: it must not reference
+// `args`, `agent`, `log`, `phase`, `pipeline`, or `workflow`, and it must not
+// depend on anything declared below PURE:END.
+
 // ── ordering (task.js drives one already-chosen subtask; only this script orders) ──
 
 const DEFAULT_ORDINAL = '^[A-Za-z]?\\d+(?:\\.\\d+)*\\.(\\d+)\\b'
@@ -206,6 +222,7 @@ function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }
   const message = `orchestrator STOPPED: story #${story} subtask #${subtask} (level ${level}) could not be dispatched/verified against ${baseBranch} — trigger: ${trigger}. Nothing was merged; this run opens stacked PRs only. ${(attempts ?? []).length} note(s) recorded.`
   return { escalated: true, level, story, subtask, pr, trigger, baseBranch, attempts: attempts ?? [], message }
 }
+// PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
 let raw = args
