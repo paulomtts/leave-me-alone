@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+// Create a subtask's worktree, idempotently, and report what was already there.
+//
+// This used to be a decision tree inside Implement's prompt. It is pure
+// mechanism — does the branch exist, does the directory exist, is there a live
+// PR — and it has to happen EARLY now: the spec and the plan are written inside
+// the worktree so they travel with the subtask's own PR, which means the
+// worktree must exist before the first stage that writes.
+//
+//   bun scripts/worktree.mjs --repo o/n --branch m1/task-9 --base main \
+//     --worktree /abs/wt --repo-dir /abs/repo --compact
+//
+// It creates and reports. It never resets, never deletes, and never commits:
+// deciding RESUME vs RESET needs the plan hash, which does not exist yet.
+
+import { ghRunner, gitRunner, ghError, jsonFrom, readFlags } from './gh.mjs'
+
+export function parseArgs(argv) {
+  const flags = readFlags(argv, {
+    '--repo': 'value', '--branch': 'value', '--base': 'value',
+    '--worktree': 'value', '--repo-dir': 'value', '--compact': 'boolean',
+  })
+  const out = {
+    repo: flags['--repo'], branch: flags['--branch'], base: flags['--base'],
+    worktree: flags['--worktree'], repoDir: flags['--repo-dir'],
+    compact: flags['--compact'] === true,
+  }
+  for (const [key, ok, msg] of [
+    ['repo', v => typeof v === 'string' && /^[^/\s]+\/[^/\s]+$/.test(v), '--repo owner/name'],
+    ['branch', v => typeof v === 'string' && v.length > 0, '--branch <name>'],
+    ['base', v => typeof v === 'string' && v.length > 0, '--base <name>'],
+    ['worktree', v => typeof v === 'string' && v.startsWith('/'), '--worktree <absolute path>'],
+    ['repoDir', v => typeof v === 'string' && v.startsWith('/'), '--repo-dir <absolute path>'],
+  ]) if (!ok(out[key])) throw new Error(`worktree needs ${msg}`)
+  return out
+}
+
+// `git worktree list --porcelain` prints a "worktree <path>" line per entry.
+export function worktreePaths(porcelain) {
+  return String(porcelain ?? '').split('\n')
+    .filter(line => line.startsWith('worktree '))
+    .map(line => line.slice('worktree '.length).trim())
+}
+
+export function branchExists(refList, branch) {
+  return String(refList ?? '').split('\n').map(l => l.trim()).filter(Boolean).includes(branch)
+}
+
+export async function prepare(options, git = gitRunner, gh = ghRunner) {
+  const { repo, branch, base, worktree, repoDir } = options
+  const result = { branch, worktree, branchExisted: false, worktreeExisted: false, created: false, openPr: null, commitCount: 0 }
+
+  // A live PR on this branch means something else is driving it. Report and
+  // change NOTHING — this is the only place that check happens, and the caller
+  // stops on it rather than resetting someone's work.
+  try {
+    const open = jsonFrom(await gh(['api', `repos/${repo}/pulls?state=open&per_page=100`,
+      '--jq', `[.[] | select(.head.ref=="${branch}") | .number]`]))
+    if (Array.isArray(open) && open.length > 0) {
+      result.openPr = open[0]
+      return result
+    }
+  } catch (err) {
+    // Not fatal on its own: the caller decides. Say so rather than pretending
+    // the branch is clear.
+    result.prLookupError = ghError(err)
+  }
+
+  result.branchExisted = branchExists(
+    await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']), branch)
+  result.worktreeExisted = worktreePaths(
+    await git(['-C', repoDir, 'worktree', 'list', '--porcelain'])).includes(worktree)
+
+  if (!result.worktreeExisted) {
+    const args = result.branchExisted
+      ? ['-C', repoDir, 'worktree', 'add', worktree, branch]
+      : ['-C', repoDir, 'worktree', 'add', worktree, '-b', branch, `origin/${base}`]
+    await git(args)
+    result.created = true
+  }
+
+  result.commitCount = Number(String(
+    await git(['-C', worktree, 'rev-list', '--count', `origin/${base}..HEAD`])).trim()) || 0
+  return result
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const options = parseArgs(process.argv.slice(2))
+  const result = await prepare(options)
+  process.stdout.write(`${options.compact ? JSON.stringify(result) : JSON.stringify(result, null, 2)}\n`)
+  if (result.openPr) process.exitCode = 1
+}

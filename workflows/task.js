@@ -4,6 +4,7 @@ export const meta = {
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
     { title: 'Intake', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
+    { title: 'Worktree', detail: 'create the subtask worktree before anything writes into it', model: 'haiku' },
     { title: 'Spec', detail: 'scope, behavior, error paths, test list -> docs/superpowers/specs/, then adversarially reviewed BEFORE anything is planned on it', model: 'opus' },
     { title: 'Plan', detail: 'TDD implementation plan from the reviewed spec, via superpowers:writing-plans', model: 'opus' },
     { title: 'Validate', detail: 'adversarial plan review against the spec, fixes folded into the plan file', model: 'sonnet' },
@@ -164,8 +165,19 @@ const triggerAgentType = typeof opts.triggerAgentType === 'string'
   : 'command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
-// Plans and specs live in the superpowers folders, with a DETERMINISTIC
-// filename. superpowers names files YYYY-MM-DD-<topic>.md, which a resumed run
+// Plans and specs live in the superpowers folders INSIDE THE WORKTREE, with a
+// DETERMINISTIC filename, so each subtask's PR carries the spec and plan it was
+// built from and a reviewer can see all three together.
+//
+// That is why the worktree is created before Spec rather than inside Implement:
+// the first stage that writes needs somewhere to write. It also makes the
+// resume checkpoint durable in git rather than in an untracked directory — a
+// worktree deleted between runs is recreated from the branch, and the committed
+// plan comes back with it.
+//
+// Writing them into repoDir instead would put the same paths untracked on the
+// default branch and tracked on every subtask branch, so they could not be
+// gitignored and branch-switching in the shared checkout would conflict. superpowers names files YYYY-MM-DD-<topic>.md, which a resumed run
 // cannot predict — and finding the same file again is the whole point of the
 // plan-check step, so the date is dropped and the issue number carries the
 // identity.
@@ -178,10 +190,10 @@ const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 // checkpoint never fired once.
 const plansDir = typeof opts.plansDir === 'string' && opts.plansDir.startsWith('/')
   ? opts.plansDir.replace(/\/+$/, '')
-  : `${repoDir}/docs/superpowers/plans`
+  : `${WORKTREE}/docs/superpowers/plans`
 const specsDir = typeof opts.specsDir === 'string' && opts.specsDir.startsWith('/')
   ? opts.specsDir.replace(/\/+$/, '')
-  : `${repoDir}/docs/superpowers/specs`
+  : `${WORKTREE}/docs/superpowers/specs`
 const PLAN_PATH = `${plansDir}/issue-${issue}.md`
 const SPEC_PATH = `${specsDir}/issue-${issue}-design.md`
 
@@ -412,6 +424,45 @@ if (DRY) {
 // all three when one already exists, same durable-state pattern orchestrator
 // uses for subtask doneness (see orchestrator.js's isSubtaskDone).
 phase('Spec')
+// ── 1b. worktree — created BEFORE anything writes ───────────────────────────
+// Every stage from Spec onward writes inside the worktree, so it has to exist
+// first. This also pulls the whole create/reuse decision out of Implement's
+// prompt, where it was a prose decision tree, into scripts/worktree.mjs.
+phase('Implement')
+const wtOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/worktree.mjs --repo ${repo} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} --repo-dir ${repoDir} --compact
+
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means a live PR already owns this branch. Report it and stop.`,
+  { label: `worktree:#${issue}`, phase: 'Implement', model: 'haiku', ...triggerAgent, schema: {
+    type: 'object', required: ['stdout'],
+    properties: {
+      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+    },
+  } })
+if (!wtOut) throw new Error('worktree agent died')
+
+let worktreeState
+try {
+  worktreeState = JSON.parse(String(wtOut.stdout ?? ''))
+} catch (err) {
+  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
+    detail: `worktree.mjs returned output that is not JSON (${err.message}). Nothing was created. First 200 characters: ${String(wtOut.stdout ?? '').slice(0, 200)}` }
+}
+
+// An OPEN PR means something else is driving this branch. The caller
+// established there was none when it queued this subtask; one appearing since
+// is a human's call, not this run's.
+if (worktreeState.openPr) {
+  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
+    existingPr: worktreeState.openPr,
+    detail: `an open PR (#${worktreeState.openPr}) already exists on ${BRANCH} — nothing was created, reset or committed.` }
+}
+if (worktreeState.prLookupError) {
+  log(`worktree: could not confirm there is no open PR on ${BRANCH} (${worktreeState.prLookupError}) — proceeding, but Implement will not reset a branch it cannot vouch for`)
+}
+log(`worktree ${worktreeState.created ? 'created' : 'reused'} at ${WORKTREE} (branch ${worktreeState.branchExisted ? 'existed' : 'new'}, ${worktreeState.commitCount} commit(s) on top of ${baseBranch})`)
+
 const planCheck = await (async () => {
   // Find `*issue-<n>.md` and grep it for one marker: `ls` and `grep`, no
   // judgement. It cost a dispatch every run only because a Workflow script
@@ -605,14 +656,16 @@ First, compute the resume key ONCE and reuse that exact value everywhere below �
 \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\`
 If that command fails or \`$PLAN_HASH\` comes back empty, STOP and report it; never proceed with an empty hash. Do NOT modify \`${plan}\`'s content at any point in this workflow — its exact bytes are what the hash is derived from, for this run and for every future resume. If ticking off plan checkboxes as you go is a habit, resist it here: it changes the hash and orphans every commit you already made.
 
-Setup: create the worktree IDEMPOTENTLY. Do NOT run \`git fetch\`, \`git worktree prune\`, or any other command that mutates ${repoDir} itself — several subtasks can be running against that same checkout at once, and a prune from one of them deletes another's worktree registration. The fetch and prune already happened once, before any subtask was dispatched. Everything you do below is scoped to \`${WORKTREE}\` or to creating it. The branch name is STABLE across runs, so a stopped or killed earlier run can leave \`${BRANCH}\` and/or \`${WORKTREE}\` behind and a plain \`-b\` would fail:
-  a. If branch \`${BRANCH}\` does NOT exist: \`git worktree add ${WORKTREE} -b ${BRANCH} origin/${baseBranch}\`. Skip straight to the TDD steps below.
-  b. Else the branch (and possibly its worktree) already exists. First rule out live work on it — this is the ONLY place that check happens, so do not skip it: \`gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '.[] | select(.head.ref=="${BRANCH}") | .number'\`. An OPEN PR here means STOP: report the PR number and change NOTHING — never reset, delete, or commit over it. (The caller established there was no live PR when it queued this subtask; one appearing since means something else is driving this branch, and that is a human's call, not yours.)
-     No open PR: ensure the worktree exists (\`git worktree add ${WORKTREE} ${BRANCH}\` if ${WORKTREE} is missing), then decide RESUME vs RESET by whether the branch's own commits implement the CURRENT plan:
-     - Check for a matching trailer, scoped to this branch's own commits (not inherited history from origin/${baseBranch}): \`git -C ${WORKTREE} log origin/${baseBranch}..HEAD --grep="^Plan-Hash: $PLAN_HASH" --format=%H\`.
-     - If that returns any commit: RESUME. These commits genuinely implement the plan you were just given (a killed earlier run, not stale debris). Do NOT reset. Run \`git -C ${WORKTREE} log --oneline origin/${baseBranch}..HEAD\` and read the plan's step list to see which steps are already committed, then continue STRICT TDD from the next uncompleted step — do not re-do committed steps.
-     - If it returns nothing (empty, or the branch predates this convention): RESET. This branch is stale relative to the current plan (an earlier attempt under a different/no plan). \`git -C ${WORKTREE} reset --hard origin/${baseBranch}\` and start the TDD steps below from scratch. A hard reset over genuinely stale debris is deliberate: this plan-driven run re-derives the work deterministically, while building on unrelated partial state does not.
-  This keeps the branch prefix STABLE — which is what lets already-merged subtasks stay detectable — while making leftovers self-healing instead of either a hard stop or blind data loss. NEVER work around a collision by inventing a different branch name: the caller decides whether a subtask is already done by finding the PR whose head ref carries this issue's number, and a name you invented is invisible to that lookup.
+The worktree at \`${WORKTREE}\` ALREADY EXISTS on branch \`${BRANCH}\`, cut from \`origin/${baseBranch}\`, and it already contains this subtask's spec and plan (untracked). Do NOT create it, and do NOT run \`git fetch\`, \`git worktree prune\` or anything else against \`${repoDir}\` — other subtasks are running against that same checkout, and a prune there deletes their worktrees.
+
+It currently has ${worktreeState.commitCount} commit(s) on top of \`origin/${baseBranch}\`. Decide RESUME vs RESET before writing anything:
+  - Check for a matching trailer, scoped to this branch's own commits: \`git -C ${WORKTREE} log origin/${baseBranch}..HEAD --grep="^Plan-Hash: $PLAN_HASH" --format=%H\`.
+  - Any match: RESUME. Those commits implement the plan you were just given (a killed earlier run, not stale debris). Do NOT reset. Read \`git -C ${WORKTREE} log --oneline origin/${baseBranch}..HEAD\` against the plan's step list and continue STRICT TDD from the next uncompleted step.
+  - No match (or no commits at all): RESET with \`git -C ${WORKTREE} reset --hard origin/${baseBranch}\`. This branch is stale relative to the current plan. The spec and plan files are untracked at this point, so the reset leaves them in place — that is deliberate, they are this run's inputs.
+
+Your FIRST commit must be the spec and the plan themselves:
+\`git -C ${WORKTREE} add docs/superpowers && git -C ${WORKTREE} commit\` with a \`docs:\` subject. They ship with this subtask's PR so a reviewer sees the spec, the plan and the diff together, and so a resumed run can recover the plan from the branch even if the worktree is gone. Then start the TDD steps.
+
 Work ONLY inside ${WORKTREE}. Sync dependencies per this repo's own convention, then a baseline full-suite run (skip this if you just RESUMED and the suite was already green as of the last commit — re-run it anyway if unsure):
 ${verifyBlock}
 If baseline is ALREADY red before you change anything (and you are not resuming known-green work), stop and report it — do not fix someone else's failure inside this subtask.
