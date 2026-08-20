@@ -215,6 +215,32 @@ function stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBr
   return bases
 }
 
+// pipeline()/parallel() have no per-call concurrency limit of their own — the
+// harness caps individual agent() calls globally, but not story LANES. A level
+// with ten independent stories therefore opened ten worktrees at once, each
+// running its own task.js pipeline. This bounds the lanes.
+//
+// A thrown or dead story callback becomes null rather than rejecting, matching
+// what pipeline() did before it: the level loop treats a null result as a hard
+// halt, so a dying lane still stops the run instead of silently vanishing.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length)
+  let next = 0
+  async function worker() {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      try {
+        results[i] = await fn(items[i], i)
+      } catch {
+        results[i] = null
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker()))
+  return results
+}
+
 function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }) {
   if (trigger !== 'tests' && trigger !== 'blocked') {
     throw new Error(`orchestrator: unknown escalation trigger "${trigger}" (expected "tests" or "blocked")`)
@@ -271,6 +297,15 @@ const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
 const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
 const ordinalPattern = typeof opts.ordinalPattern === 'string' ? opts.ordinalPattern : DEFAULT_ORDINAL
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
+// Caps how many stories within one DAG level are in flight at once — separate
+// from the harness's own global agent() concurrency cap, which throttles
+// individual agent calls but not story lanes (each lane makes many calls across
+// its subtasks' Intake/Spec/.../Ship phases). A wide level (e.g. 10 independent
+// level-0 stories) once spun up 10 worktrees simultaneously, which is what this
+// option exists to bound. Default 4.
+const maxConcurrentStories = Number.isInteger(opts.maxConcurrentStories) && opts.maxConcurrentStories > 0
+  ? opts.maxConcurrentStories
+  : 4
 const [owner, repoName] = repo.split('/')
 
 // Workflow scripts cannot locate their own directory, so the sibling script
@@ -608,12 +643,12 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
   if (halted) break
   phase('Dispatch')
   const level = levels[levelIndex]
-  log(`level ${levelIndex}: dispatching ${level.length} story/stories in parallel — ${level.map(story => `#${story.number}`).join(', ')}`)
-  // pipeline(items, ...stages) — the harness global — takes the items array
-  // first and one stage function per remaining arg; it is NOT
-  // pipeline(arrayOfRunnables). One story per item; that story's subtasks run
-  // SEQUENTIALLY inside its stage function.
-  const levelResults = await pipeline(level, async story => {
+  log(`level ${levelIndex}: dispatching ${level.length} story/stories, up to ${maxConcurrentStories} at once — ${level.map(story => `#${story.number}`).join(', ')}`)
+  // mapWithConcurrency, not pipeline(): the harness caps agent() calls but not
+  // story lanes, and each lane opens a worktree and runs a whole task.js
+  // pipeline. One story per item; that story's subtasks run SEQUENTIALLY inside
+  // its callback.
+  const levelResults = await mapWithConcurrency(level, maxConcurrentStories, async story => {
     const out = []
     // Bases come from the FULL ordered list, so an already-done predecessor
     // still supplies the branch its successor stacks on. Computed once per
@@ -631,13 +666,13 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     }
     return { story: story.number, root: bases.size ? [...bases.values()][0] : baseBranch, subtasks: out }
   })
-  // pipeline() maps a rejected/dead stage to null (Promise.allSettled inside)
+  // mapWithConcurrency maps a thrown/dead story callback to null
   // rather than propagating — treat that as a halt, or level N+1 would
   // dispatch on top of a level that never finished.
   if (levelResults.some(result => result === null || result === undefined) && !halted) {
     halt({
       escalated: true, level: levelIndex, story: null, subtask: null, pr: null, trigger: 'blocked', baseBranch, attempts: [],
-      message: `orchestrator STOPPED: level ${levelIndex} had a story pipeline stage die (returned null from pipeline()) with no escalation payload set — treating as a hard halt.`,
+      message: `orchestrator STOPPED: level ${levelIndex} had a story lane die (returned null from mapWithConcurrency) with no escalation payload set — treating as a hard halt.`,
     })
   }
   results.push({ level: levelIndex, stories: levelResults })
