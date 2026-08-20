@@ -211,7 +211,9 @@ By default each violation prints as `FAIL <path>: <message>` on **stderr**, foll
 
 Both flags are position-independent (before or after the paths), are never mistaken for target
 paths, and repeat harmlessly. There are no other flags: any other `--`-prefixed argument is treated
-as a target path and fails as an unreadable file.
+as a target path, and since a path that cannot be read is not handled as a violation, the run aborts
+on the unhandled `ENOENT` (stack trace on stderr, no summary or JSON document, exit 1) rather than
+reporting a `FAIL` line. Give the checker real paths.
 
 ## Notes
 
