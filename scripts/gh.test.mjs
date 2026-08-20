@@ -3,7 +3,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { truncate } from './gh.mjs'
+import { firstLine, truncate } from './gh.mjs'
 
 // ── truncate ─────────────────────────────────────────────────────────────────
 
@@ -49,4 +49,33 @@ test('the ellipsis is one character, not three dots', () => {
 test('a non-string is coerced with String(...)', () => {
   assert.equal(truncate(12345, 10), '12345')
   assert.equal(truncate(12345, 3), '123…')
+})
+
+// ── firstLine ────────────────────────────────────────────────────────────────
+
+test('the first line of multi-line text is returned', () => {
+  // The mirror of lastLine: same splitting, opposite end.
+  assert.equal(firstLine('first\nsecond\nthird'), 'first')
+})
+
+test('the returned first line is trimmed', () => {
+  assert.equal(firstLine('  hello  \nworld'), 'hello')
+  assert.equal(firstLine('\thello\t\nworld'), 'hello')
+})
+
+test('single-line text is returned whole, trimmed', () => {
+  // No trailing-newline artifact, and no empty-string from the trailing split.
+  assert.equal(firstLine('only\n'), 'only')
+  assert.equal(firstLine('only'), 'only')
+})
+
+test('firstLine coerces a non-string with String(...)', () => {
+  assert.equal(firstLine(12345), '12345')
+  assert.equal(firstLine(0), '0')
+})
+
+test('firstLine turns null and undefined into an empty string', () => {
+  assert.equal(firstLine(null), '')
+  assert.equal(firstLine(undefined), '')
+  assert.equal(firstLine(), '')
 })

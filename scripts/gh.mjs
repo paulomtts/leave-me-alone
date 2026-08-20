@@ -70,6 +70,12 @@ export function truncate(text, max) {
   return raw.length <= max ? raw : `${raw.slice(0, max)}…`
 }
 
+// The mirror of lastLine, for output whose useful value is the FIRST line —
+// an error summary or a one-line `gh` answer, with noise below it.
+export function firstLine(text) {
+  return String(text ?? '').split('\n')[0].trim()
+}
+
 export async function withRetries(label, attempt, tries = 3) {
   let last = null
   for (let i = 0; i < tries; i += 1) {
