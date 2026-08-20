@@ -188,8 +188,9 @@ const DRY = opts.dryRun === true
 // The time gap between Detect and this run is covered where it actually
 // matters: Implement re-checks for a live PR on the branch before touching it.
 
-// project: fully resolved ids, passed down by the orchestrator. Omit entirely
-// for boardless repos — every board step then no-ops instead of failing the run.
+// project: fully resolved ids, passed down by the orchestrator. REQUIRED —
+// there is no boardless mode. A subtask that ships a PR while its card silently
+// stays in Backlog is indistinguishable from one that never ran.
 const project = opts.project && typeof opts.project === 'object' ? { ...opts.project } : null
 
 // agent() can throw when the model returns without calling StructuredOutput —
@@ -232,18 +233,22 @@ function clip(text, max, what) {
 // An earlier version could also resolve them itself from a bare project.number,
 // for the standalone `/task 251` case. That path cost an agent dispatch on every
 // run and was never taken under the orchestrator, which is how this workflow is
-// actually driven. Pass the resolved block, or omit `project` to run boardless.
+// actually driven. Pass the resolved block; there is no boardless mode.
 // (orchestrator.js still accepts a plain {number: N} — resolving by name is its
 // job, not this file's.)
 const DEFAULT_OPTION_NAMES = { backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done' }
 
 function resolveProject() {
-  if (!project) return null
+  if (!project) {
+    throw new Error(
+      'task workflow needs args.project with resolved ids {id, fieldId, optionIds} — the '
+      + 'orchestrator resolves them once per milestone and forwards them. There is no boardless mode.')
+  }
   if (!(project.id && project.fieldId && project.optionIds)) {
-    log('project passed without resolved ids (id/fieldId/optionIds) — board steps disabled for this run. '
-      + 'Either let the orchestrator resolve and forward them, or resolve them once yourself '
-      + '(see the setup-project skill) and pass the whole block. Omit `project` entirely to run boardless on purpose.')
-    return null
+    throw new Error(
+      'task workflow was passed `project` without resolved ids (id/fieldId/optionIds). Let the '
+      + 'orchestrator resolve and forward them, or resolve them once yourself (see the '
+      + 'setup-project skill) and pass the whole block.')
   }
   return {
     id: project.id, fieldId: project.fieldId, optionIds: project.optionIds,
@@ -252,7 +257,7 @@ function resolveProject() {
   }
 }
 const board = resolveProject()
-const optionNames = board ? board.optionNames : null
+const optionNames = board.optionNames
 
 // This workflow only ever makes TWO card moves: "In progress" when Intake
 // accepts the subtask, and "In review" when its PR opens. An earlier version
@@ -269,7 +274,6 @@ const optionNames = board ? board.optionNames : null
 const [repoOwner, repoShortName] = repo.split('/')
 
 function boardMoveInstructions(optionKey, cached) {
-  if (!board) return ''
   const known = cached && typeof cached === 'object' ? cached : {}
   const id = value => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : null)
   const itemId = id(known.itemId)
@@ -334,7 +338,7 @@ const intake = await callAgent(`Intake for ${repo} subtask #${issue} in ${repoDi
 4. Locate the code the subtask touches: existing modules and sibling tests.
 ${verificationStep}
 6. Find this repo's own test-tier PLACEMENT rules — do NOT assume a taxonomy. Its testing standards doc usually says which tier owns what kind of test (e.g. "unit owns pure combinations, integration owns paths, e2e owns wiring, conformance owns real-vs-fake equivalence" is one repo's version — another repo's tiers and rules will differ). Cite the doc path and summarize its placement rule in one or two lines inside your summary — every later stage that writes a test needs this to place it correctly, not default to a habitual tier out of habit.
-${DRY || board === null ? '' : `
+${DRY ? '' : `
 7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
 Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`,
@@ -357,7 +361,7 @@ if (!intake || intake.refused) return { issue, refused: true, reason: intake ? i
 // Card ids are stable for the life of the card, so this is resolved once and
 // handed to every later stage instead of being looked up again per board move.
 const boardIds = (intake.board && typeof intake.board === 'object') ? intake.board : {}
-if (board && !boardIds.itemId) {
+if (!boardIds.itemId) {
   log('intake did not report a board item id — later card moves will resolve it themselves (one extra query per move)')
 }
 
@@ -467,7 +471,7 @@ Try to BREAK it before implementation: contradictions with this repo's architect
 
 Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust.
 
-Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. The card is already "${optionNames ? optionNames.inProgress : 'In progress'}" from Intake; do not touch the board here.
+Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. Intake moves the card to "${optionNames.inProgress}" on a best-effort basis; do not touch the board here either way.
 
 Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
     { label: `validate:#${issue}`, phase: 'Validate', model: 'sonnet', schema: {
@@ -666,10 +670,10 @@ const verifyFlags = suiteCmds
 const shipOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
    bun ${scriptsDir}/ship.mjs --repo ${repo} --issue ${issue} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
 
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.${board ? `
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.
 
 Only if that command printed \`"number"\` with a real PR number, do this as a final best-effort step (its failure must not change anything you return):
-${boardMoveInstructions('inReview', boardIds)}` : ''}`,
+${boardMoveInstructions('inReview', boardIds)}`,
   { label: `ship:#${issue}`, phase: 'Ship', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {

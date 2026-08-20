@@ -600,14 +600,23 @@ const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.starts
       'orchestrator needs args.taskScript as an absolute path to this checkout\'s workflows/task.js '
       + '(e.g. "<repo>/workflows/task.js") — there is no default, since this repo can be checked out anywhere.') })()
 
-// Board support is required unless waived: a forgotten args.project once
-// skipped every card move without a single failure, and merged subtasks sat in
-// Backlog for weeks. Pass boardless: true to run issues-and-PRs-only on purpose.
+// The board is REQUIRED. There is no boardless mode: a run that quietly stops
+// moving cards is indistinguishable from one that never had a board, and a
+// forgotten args.project once left merged subtasks in Backlog for weeks.
+//
+// Resolution happens once, before any work exists, so failing here is free —
+// no worktrees, no branches, no PRs. Card MOVES stay best-effort, because by
+// the time one runs there is a real PR that a bookkeeping hiccup must not undo.
 const projectArg = opts.project && typeof opts.project === 'object' ? opts.project : null
-if (!projectArg && opts.boardless !== true) {
+if (!projectArg) {
   throw new Error(
-    'orchestrator needs args.project (e.g. {"number":13}) so subtask cards move ' +
-    'Backlog -> In progress -> In review -> Done. Pass boardless: true to skip the board deliberately.')
+    'orchestrator needs args.project (e.g. {"number":13}) so subtask cards move '
+    + 'Backlog -> In progress -> In review -> Done.')
+}
+if (opts.boardless !== undefined) {
+  throw new Error(
+    'orchestrator: args.boardless is no longer supported — the board is required. '
+    + 'A run that silently stops moving cards looks exactly like a run that never had a board.')
 }
 const statusField = (projectArg && projectArg.statusField) || 'Status'
 const optionNames = {
@@ -741,12 +750,12 @@ if (hasResolvedBoardIds(projectArg)) {
   // skips this dispatch entirely.
   board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
   log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
-} else if (projectArg && Number.isInteger(Number(projectArg.number)) && !projectScript) {
-  log('board DISABLED for this run: `project` was given as a number but args.projectScript is missing, '
-    + 'so there is no deterministic way to resolve its ids (there is no agent fallback). Pass '
-    + 'projectScript as an absolute path to scripts/resolve.mjs, or pass the resolved '
-    + '{id, fieldId, optionIds} block instead.')
-} else if (projectArg && Number.isInteger(Number(projectArg.number))) {
+} else if (Number.isInteger(Number(projectArg.number)) && !projectScript) {
+  throw new Error(
+    'orchestrator: `project` was given as a number but args.projectScript is missing, so there is '
+    + 'no deterministic way to resolve its ids (there is no agent fallback). Pass projectScript as '
+    + 'an absolute path to scripts/resolve.mjs, or pass the resolved {id, fieldId, optionIds} block.')
+} else if (Number.isInteger(Number(projectArg.number))) {
   // Softly, because "the board is best-effort" was only half true: a RETURNED
   // failure was logged and the run survived, but a THROWN one (callAgent gives
   // up after one retry) propagated and killed the milestone. Card bookkeeping
@@ -768,35 +777,26 @@ It prints one line of JSON that the pipeline parses itself, so reformatting, pre
   // Board bookkeeping is not worth failing a milestone over, but a silent
   // downgrade is worse than a loud one.
   let lookup = null
-  if (resolved) {
-    try {
-      lookup = JSON.parse(String(resolved.stdout ?? ''))
-    } catch (err) {
-      log(`board DISABLED for this run: ${projectScript} returned output that is not JSON (${err.message}). `
-        + `First 200 characters: ${String(resolved.stdout ?? '').slice(0, 200)}`)
-    }
+  try {
+    lookup = JSON.parse(String((resolved && resolved.stdout) ?? ''))
+  } catch (err) {
+    throw new Error(`orchestrator: ${projectScript} returned output that is not JSON (${err.message}). `
+      + `First 200 characters: ${String((resolved && resolved.stdout) ?? '').slice(0, 200)}`)
   }
   if (!lookup || !lookup.found || !lookup.id) {
-    log(`board DISABLED for this run: ${(lookup && lookup.missing) || (resolved && resolved.error) || 'the project resolver returned no project'} (see the setup-project skill)`)
-  } else {
-    const ids = resolveBoardIds(lookup.fields, statusField, optionNames)
-    if (!ids.ok) {
-      log(`board DISABLED for this run: ${ids.missing} (see the setup-project skill)`)
-    } else {
-      board = makeBoard(lookup.id, ids.fieldId, ids.optionIds)
-      log(`board resolved: project ${projectArg.number} "${lookup.title || ''}" → ${lookup.id}`)
-      log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
-    }
+    throw new Error(`orchestrator: could not resolve project ${projectArg.number} — `
+      + `${(lookup && lookup.missing) || (resolved && resolved.error) || 'the resolver returned no project'} `
+      + '(see the setup-project skill)')
   }
-} else if (projectArg) {
-  // Reachable when `project` is present but is neither a resolvable number nor
-  // a complete id block. Previously this fell through to the boardless branch
-  // and logged "boardless: true" at someone who never asked for it.
-  log('board DISABLED for this run: `project` was passed without a usable `number` and without a complete '
-    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other, '
-    + 'or pass boardless: true to run without a board on purpose.')
+  const ids = resolveBoardIds(lookup.fields, statusField, optionNames)
+  if (!ids.ok) throw new Error(`orchestrator: ${ids.missing} (see the setup-project skill)`)
+  board = makeBoard(lookup.id, ids.fieldId, ids.optionIds)
+  log(`board resolved: project ${projectArg.number} "${lookup.title || ''}" → ${lookup.id}`)
+  log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
 } else {
-  log('boardless: true — running issues and PRs only, no card moves')
+  throw new Error(
+    'orchestrator: `project` was passed without a usable `number` and without a complete '
+    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other.')
 }
 
 // Detect was started before the board lookup; collect it now. A rejection is
@@ -903,7 +903,7 @@ if (DRY) {
   return {
     repo, milestone: milestoneNumber, milestoneTitle: census.milestoneTitle, baseBranch,
     mode: 'dryRun',
-    board: board ? { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds } : null,
+    board: { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds },
     verification,
     plan: levels.map((levelStories, levelIndex) => ({
       level: levelIndex,
@@ -983,7 +983,7 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
       // path to get wrong instead of two.
       scriptsDir: detectScript.slice(0, detectScript.lastIndexOf('/')),
       triggerAgentType,
-      project: board ? { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds, optionNames, statusField } : undefined,
+      project: { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds, optionNames, statusField },
     })
   } catch (err) {
     thrown = err

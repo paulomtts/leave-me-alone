@@ -321,7 +321,7 @@ point at: re-resolve from `number` after any column change.
 | Passing `PVT_…` as `project.number` | `number` is the small integer from the URL. The node id is resolved for you. |
 | Renaming Status options on a populated board | Option replacement wipes every item's Status. Re-set each card afterwards. |
 | `In Progress` vs `In progress` | Matched exactly, in the script — not by an agent. A mismatch disables the board and logs both strings, rather than resolving to a real id for the wrong column. |
-| Passing `project` with neither a `number` nor a complete id block | The board is disabled and the run says so. It no longer reports this as `boardless: true`, which it never was. |
+| Passing `project` with neither a `number` nor a complete id block | The run STOPS at launch. There is no boardless mode and no silent degradation. |
 | Body checklists instead of sub-issues | `sub_issues` returns empty → `task` refuses the story as having nothing to sequence. |
 | Adding cards to the board later | Cards missing at resolve time are reported, never auto-added. |
 | Expecting a card per PR | One PR per **subtask**. Each subtask's card goes "In review" when its own PR opens. |
@@ -329,4 +329,4 @@ point at: re-resolve from `number` after any column change.
 | Expecting flat branch names | The default prefix is `m<milestone>/task-`, so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme — it is used verbatim. |
 | Adopting the milestone prefix on a milestone that already has merged PRs | Those PRs sit at the old addresses. The run finds them as near misses and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
 | Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A merged PR under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
-| No `project` arg at all | Legal: the run is boardless and only touches issues and PRs. |
+| No `project` arg at all | The run stops at launch. A milestone whose cards silently never move looks exactly like one that never ran — that cost weeks once. |
