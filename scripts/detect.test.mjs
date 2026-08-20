@@ -42,6 +42,14 @@ test('parses both --flag value and --flag=value', () => {
   assert.equal(parseArgs(['--repo=a/b', '--milestone=12']).milestone, 12)
 })
 
+test('--compact is a bare flag, not a value flag', () => {
+  const got = parseArgs(['--repo=a/b', '--milestone=1', '--compact'])
+  assert.equal(got.compact, true)
+  assert.equal(got.milestone, 1)
+  // It must not swallow the next argument as its value.
+  assert.equal(parseArgs(['--repo=a/b', '--compact', '--milestone=1']).milestone, 1)
+})
+
 test('labels default, and are overridable', () => {
   assert.deepEqual(parseArgs(['--repo=a/b', '--milestone=1']).labels, { story: 'story', subtask: 'subtask' })
   assert.equal(parseArgs(['--repo=a/b', '--milestone=1', '--story-label=epic']).labels.story, 'epic')

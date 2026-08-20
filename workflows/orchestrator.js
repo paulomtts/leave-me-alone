@@ -545,6 +545,16 @@ const [owner, repoName] = repo.split('/')
 // path by anyone, so a baked-in absolute path here would be exactly the kind
 // of machine-specific hardcoding this plugin avoids everywhere else. Wrong or
 // missing path fails at launch, not mid-milestone.
+// When given, Detect stops being a shell with opinions and becomes a pure
+// trigger: one command, no loop, no filtering, no per-result transcription.
+// Same wiring as taskScript — an absolute path, because this repo can be
+// checked out anywhere — but optional, since the agent path still works and
+// deleting a path that has run live in favour of one that has not is exactly
+// the swap that keeps biting.
+const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.startsWith('/')
+  ? opts.detectScript
+  : null
+
 const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.startsWith('/')
   ? opts.taskScript
   : (() => { throw new Error(
@@ -642,9 +652,23 @@ const detectVerificationStep = index => `${index}. Discover this repo's OWN veri
 
    **Report what exists; decide nothing.** Do NOT drop, edit, or substitute any command. Instead, for every path named by any command you are returning, check it against the \`ls-tree\` listing and return \`missingPaths\`: the paths that are NOT present at \`origin/${baseBranch}\`, verbatim as the command spells them. The script drops the affected commands itself. An earlier version asked you to do the dropping and it dropped every command, leaving an empty suite that made every later check pass while testing nothing.`
 
+// One command, returned byte for byte. Everything the long version guards
+// against — substituting a tool, dropping a result, tidying a branch name in
+// transit — stops being possible when there is nothing to do but run it.
+const DETECT_TRIGGER_STEP = `1. Run EXACTLY this command and capture its stdout:
+   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --compact${labels.story === 'story' ? '' : ` --story-label ${labels.story}`}${labels.subtask === 'subtask' ? '' : ` --subtask-label ${labels.subtask}`}
+
+   Do NOT modify the command, add flags, substitute a different tool, or run anything else to
+   "check" its answer. Do NOT summarize, reformat, pretty-print, truncate or fix the output: it is
+   a single line of JSON that the pipeline parses itself, and any edit you make to it is a bug you
+   are introducing into a deterministic step.
+   - ok: true if the command exited zero.
+   - stdout: its stdout EXACTLY as printed, as one string. Empty if the command failed.
+   - error: its stderr, only when ok=false.`
+
 const detectSteps = []
-if (!providedState) detectSteps.push(DETECT_STATE_STEPS)
-if (!providedVerification) detectSteps.push(detectVerificationStep(providedState ? 1 : 5))
+if (!providedState) detectSteps.push(detectScript ? DETECT_TRIGGER_STEP : DETECT_STATE_STEPS)
+if (!providedVerification) detectSteps.push(detectVerificationStep(providedState ? 1 : (detectScript ? 2 : 5)))
 
 const detectPromise = detectSteps.length === 0 ? null : callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
 
@@ -653,8 +677,13 @@ ${detectSteps.join('\n\n')}
 Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`,
   { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', schema: {
     type: 'object',
-    required: [...(providedState ? [] : ['stories']), ...(providedVerification ? [] : ['verification'])],
+    required: [
+      ...(providedState ? [] : (detectScript ? ['ok', 'stdout'] : ['stories'])),
+      ...(providedVerification ? [] : ['verification']),
+    ],
     properties: {
+      // trigger path: the script's stdout, parsed by this script, not by the agent.
+      ok: { type: 'boolean' }, stdout: { type: 'string' }, error: { type: 'string' },
       milestoneTitle: { type: 'string' },
       stories: { type: 'array', items: {
         type: 'object', required: ['number', 'title', 'blockedBy', 'subtasks'],
@@ -778,9 +807,26 @@ if (detectPromise) {
 }
 
 // One name for each half, whoever produced it. Everything below reads these.
-const census = providedState || detected
+// On the trigger path the agent hands back a string; parsing it HERE means a
+// mangled or truncated transcription fails loudly at the boundary instead of
+// arriving as a plausible-looking half-census.
+function parseTriggerOutput(result) {
+  if (!result || result.ok !== true) {
+    throw new Error(`orchestrator: ${detectScript} failed: ${(result && result.error) || 'no error reported'}`)
+  }
+  try {
+    return JSON.parse(String(result.stdout ?? ''))
+  } catch (err) {
+    throw new Error(`orchestrator: ${detectScript} returned output that is not JSON (${err.message}). `
+      + `First 200 characters: ${String(result.stdout ?? '').slice(0, 200)}`)
+  }
+}
+
+const census = providedState || (detectScript ? parseTriggerOutput(detected) : detected)
 if (providedState) {
   log(`detect: using the state supplied by the caller (${(census.stories || []).length} stories) — no census dispatched`)
+} else if (detectScript) {
+  log(`detect: census produced deterministically by ${detectScript} (${(census.stories || []).length} stories)`)
 }
 if (!Array.isArray(census.stories)) {
   throw new Error('orchestrator: no stories to work from — detect returned none and args.state supplied none')

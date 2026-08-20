@@ -236,9 +236,20 @@ If the levels, the subtask order, or the targets look wrong, fix the board — n
 The orchestrator's two agents exist because a Workflow script cannot execute a command — not because
 either decides anything. Both can be handed their answers instead:
 
+**Either** point the run at the census script, so its agent is reduced to a trigger:
+
+```jsonc
+"detectScript": "/abs/path/to/leave-me-alone/scripts/detect.mjs"
+```
+
+The Detect prompt becomes one command (~890 characters instead of ~4,300), run via `bun`, whose
+stdout the orchestrator parses itself. Same wiring as `taskScript`: an absolute path, no default.
+
+**Or** run it yourself and hand over the result:
+
 ```bash
 # steps 1-4 of Detect, deterministically. No model involved.
-node scripts/detect.mjs --repo OWNER/REPO --milestone 12 > state.json
+bun scripts/detect.mjs --repo OWNER/REPO --milestone 12 --compact > state.json
 ```
 
 ```jsonc
@@ -247,7 +258,8 @@ node scripts/detect.mjs --repo OWNER/REPO --milestone 12 > state.json
 "project":      { "id": "PVT_…", "fieldId": "PVTSSF_…", "optionIds": { … } }
 ```
 
-Supply all three and the orchestrator dispatches **no agents at all** before it starts work. Supply
+Supply all three and the orchestrator dispatches **no agents at all** before it starts work. With
+`detectScript` instead of `state`, it dispatches one agent that runs one command. Supply
 some and it asks only for what is missing — `verification` alone removes about 40% of Detect's
 prompt, and it is the only part of that stage that involves real judgement.
 

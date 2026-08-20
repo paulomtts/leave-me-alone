@@ -39,6 +39,10 @@ export function parseArgs(argv) {
     else if (flag === '--milestone') { out.milestone = Number(value); consume() }
     else if (flag === '--story-label') { out.labels.story = value; consume() }
     else if (flag === '--subtask-label') { out.labels.subtask = value; consume() }
+    // Compact for machines: the orchestrator's trigger path returns this stdout
+    // through an agent's structured output, and every byte saved is a byte that
+    // cannot be truncated on the way.
+    else if (flag === '--compact') { out.compact = true }
     else throw new Error(`detect: unknown argument "${argv[i]}"`)
   }
   if (typeof out.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
@@ -158,5 +162,6 @@ export async function detect({ repo, milestone, labels, run = ghRunner }) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const options = parseArgs(process.argv.slice(2))
-  process.stdout.write(`${JSON.stringify(await detect(options), null, 2)}\n`)
+  const result = await detect(options)
+  process.stdout.write(`${options.compact ? JSON.stringify(result) : JSON.stringify(result, null, 2)}\n`)
 }
