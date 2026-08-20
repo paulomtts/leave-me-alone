@@ -43,7 +43,7 @@ test('the empty-suite stop names the CALLER when the caller supplied the empty l
   // orchestrator passed down means the BASE BRANCH documents no commands, which
   // is where the second live bug actually lived.
   assert.match(verificationGate([], undefined, true).detail, /orchestrator discovers these from origin/)
-  assert.match(verificationGate([], undefined, false).detail, /Intake found none/)
+  assert.match(verificationGate([], undefined, false).detail, /Exploration found none/)
 })
 
 test('allowNoVerification: true is the only way past an empty suite', () => {

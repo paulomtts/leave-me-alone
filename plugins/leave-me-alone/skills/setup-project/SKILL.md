@@ -265,7 +265,7 @@ cp agents/*.md ~/.claude/agents/     # then RESTART the session
 | type | tools | used by |
 |---|---|---|
 | `command-runner` | Bash | the trigger steps: detect, resolve, plan-check, ship |
-| `repo-reader` | Bash, Read, Grep, Glob | Intake — never writes |
+| `repo-reader` | Bash, Read, Grep, Glob | Explore — never writes |
 | `spec-author` | Read, Write, Grep, Glob | Spec — no shell |
 | `plan-author` | Read, Write, Edit, Grep, Glob, Skill | Plan — invokes `superpowers:writing-plans` |
 | `plan-critic` | Bash, Read, Edit, Grep, Glob | the two Validate passes — never creates files |

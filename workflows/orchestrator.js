@@ -540,7 +540,7 @@ const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <no
 // Caps how many stories within one DAG level are in flight at once — separate
 // from the harness's own global agent() concurrency cap, which throttles
 // individual agent calls but not story lanes (each lane makes many calls across
-// its subtasks' Intake/Spec/.../Ship phases). A wide level (e.g. 10 independent
+// its subtasks' Explore/Spec/.../Ship phases). A wide level (e.g. 10 independent
 // level-0 stories) once spun up 10 worktrees simultaneously, which is what this
 // option exists to bound. Default 4.
 const maxConcurrentStories = Number.isInteger(opts.maxConcurrentStories) && opts.maxConcurrentStories > 0

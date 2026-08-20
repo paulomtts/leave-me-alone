@@ -1,9 +1,9 @@
 export const meta = {
   name: 'task',
-  description: 'Drive ONE subtask issue end-to-end in its own worktree/branch: intake, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo, board, and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
+  description: 'Drive ONE subtask issue end-to-end in its own worktree/branch: explore, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo, board, and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
-    { title: 'Intake', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
+    { title: 'Explore', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
     { title: 'Worktree', detail: 'create the subtask worktree before anything writes into it', model: 'haiku' },
     { title: 'Spec', detail: 'scope, behavior, error paths, test list -> docs/superpowers/specs/, then adversarially reviewed BEFORE anything is planned on it', model: 'opus' },
     { title: 'Plan', detail: 'TDD implementation plan from the reviewed spec, via superpowers:writing-plans', model: 'opus' },
@@ -43,7 +43,7 @@ function verificationGate(suiteCmds, allowNoVerification, callerProvided) {
       + 'Ship would run zero commands and still report success. '
       + (callerProvided
           ? 'The caller passed an empty verification.fullSuite; the orchestrator discovers these from origin/<baseBranch>, so check that the base branch actually documents its test commands.'
-          : 'Intake found none in CLAUDE.md, the CI workflows, or the manifest.')
+          : 'Exploration found none in CLAUDE.md, the CI workflows, or the manifest.')
       + ' Document the command, pass verification.fullSuite explicitly, or set allowNoVerification: true to proceed unverified on purpose.',
   }
 }
@@ -292,7 +292,7 @@ function resolveProject() {
 const board = resolveProject()
 const optionNames = board.optionNames
 
-// This workflow only ever makes TWO card moves: "In progress" when Intake
+// This workflow only ever makes TWO card moves: "In progress" when Explore
 // accepts the subtask, and "In review" when its PR opens. An earlier version
 // also moved the card at spec->implement, but both of those stages map to the
 // SAME "In progress" option — the second mutation always wrote the value the
@@ -300,7 +300,7 @@ const optionNames = board.optionNames
 // the orchestrator's post-merge step; neither is this workflow's to write.
 //
 // Reusable prompt fragment for the board mutation — embeddable as the TAIL of
-// another stage's own agent call (Intake/PR) instead of a separate dispatch,
+// another stage's own agent call (Explore/PR) instead of a separate dispatch,
 // since that agent already has tool access and full context. Every call site
 // must frame this as best-effort and instruct the model not to let its failure
 // affect the stage's real return value.
@@ -316,12 +316,12 @@ function boardMoveInstructions(optionKey, cached) {
   const setStatus = (idRef, optionId) => `gh api graphql -f query='mutation($i:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:"${board.id}",itemId:$i,fieldId:"${board.fieldId}",value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' -f i="${idRef}" -f o="${optionId}"`
 
   // A project item id is stable for the life of the card, so re-resolving it in
-  // a later stage is a round trip that buys nothing. Intake resolves both ids
+  // a later stage is a round trip that buys nothing. Explore resolves both ids
   // and reports them; every stage after it is handed them. The only way a
   // cached id goes bad is a card removed and re-added mid-run, which the
   // stale-id fallback below covers.
   const step1 = itemId
-    ? `1. This card's id was already resolved during intake — use it as-is, do NOT look it up again:
+    ? `1. This card's id was already resolved during exploration — use it as-is, do NOT look it up again:
 ITEM_ID="${itemId}"`
     : `1. Find the card:
 ITEM_ID=$(${findCard(issue)})`
@@ -329,7 +329,7 @@ ITEM_ID=$(${findCard(issue)})`
   // The siblings' statuses are NOT cacheable: they are exactly what changes as
   // the run progresses, which is the whole reason the parent gets re-mirrored.
   const step3 = parentItemId
-    ? `3. Mirror the parent story. Its card id was also resolved during intake:
+    ? `3. Mirror the parent story. Its card id was also resolved during exploration:
 PARENT_ITEM_ID="${parentItemId}"
 You still need the siblings' CURRENT statuses, which change as the run progresses:
 ${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
@@ -356,14 +356,14 @@ ${setStatus('$ITEM_ID', board.optionIds[optionKey])}
 ${step3}${report}`
 }
 
-// ── 1. intake ────────────────────────────────────────────────────────────────
-phase('Intake')
+// ── 1. explore ────────────────────────────────────────────────────────────────
+phase('Explore')
 const providedVerification = opts.verification && typeof opts.verification === 'object' ? opts.verification : null
 const verificationStep = providedVerification
   ? `5. Verification commands are already known for this run (discovered by the caller) — return them EXACTLY as given, do not re-discover them: ${JSON.stringify(providedVerification)}. Still locate this repo's testing standards doc (via CLAUDE.md) — step 6 needs it.`
   : `5. Discover this repo's own verification commands — do NOT assume a stack. Check CLAUDE.md, its testing standards doc, CI workflow files (.github/workflows/), and the manifest (pyproject.toml/package.json/etc.) for how tests, typecheck, and lint actually run. If the repo documents multiple SEPARATE invocations for different test tiers (e.g. one tier must run in its own process), report them as separate items in fullSuite, not concatenated with &&.`
 
-const intake = await callAgent(`Intake for ${repo} subtask #${issue} in ${repoDir}.
+const explore = await callAgent(`Explore ${repo} subtask #${issue} in ${repoDir} and report what the later stages need.
 
 1. \`gh issue view ${issue} --repo ${repo} --json title,body,labels,milestone\` — if the labels do NOT include "subtask" (e.g. it is a story), set refused=true with the reason and stop (skip everything below, including the board step).
 2. Read the parent story (\`gh api graphql\` on issue.parent, or the "Subtask of #N" line in the body) and list its sibling sub-issues with states.
@@ -375,7 +375,7 @@ ${DRY ? '' : `
 7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
 Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`,
-  { label: `intake:#${issue}`, phase: 'Intake', model: 'sonnet', agentType: 'repo-reader', schema: {
+  { label: `explore:#${issue}`, phase: 'Explore', model: 'sonnet', agentType: 'repo-reader', schema: {
     type: 'object', required: ['refused', 'summary', 'verification'],
     properties: {
       refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
@@ -389,16 +389,16 @@ Return: what #${issue} must deliver, exact constraints from the docs (invariants
       } },
     },
   } })
-if (!intake || intake.refused) return { issue, refused: true, reason: intake ? intake.reason : 'intake agent died' }
+if (!explore || explore.refused) return { issue, refused: true, reason: explore ? explore.reason : 'explore agent died' }
 
 // Card ids are stable for the life of the card, so this is resolved once and
 // handed to every later stage instead of being looked up again per board move.
-const boardIds = (intake.board && typeof intake.board === 'object') ? intake.board : {}
+const boardIds = (explore.board && typeof explore.board === 'object') ? explore.board : {}
 if (!boardIds.itemId) {
-  log('intake did not report a board item id — later card moves will resolve it themselves (one extra query per move)')
+  log('explore did not report a board item id — later card moves will resolve it themselves (one extra query per move)')
 }
 
-const verification = providedVerification || intake.verification
+const verification = providedVerification || explore.verification
 const suiteCmds = (verification.fullSuite || []).filter(Boolean)
 
 const noSuite = verificationGate(suiteCmds, opts.allowNoVerification, Boolean(providedVerification))
@@ -414,7 +414,7 @@ const verifyBlock = [
 
 if (DRY) {
   return { issue, mode: 'dryRun', branch: BRANCH, worktree: WORKTREE, verification,
-    note: 'dryRun: Intake only. No worktree, no writes.' }
+    note: 'dryRun: Explore only. No worktree, no writes.' }
 }
 
 // ── plan-check — is there already a VALIDATED plan for this issue? ──────────
@@ -499,17 +499,17 @@ if (planCheck && planCheck.found && planCheck.validated === true &&
   // ── 2a. spec (Sonnet) ──────────────────────────────────────────────────────
   const spec = await callAgent(`Write the spec for ${repo} subtask #${issue} in ${repoDir}.
 
-Intake findings:
-${clip(intake.summary, 8000, 'intake summary')}
+Exploration findings:
+${clip(explore.summary, 8000, 'exploration summary')}
 
 Rules:
 - Scope, observable behavior, error paths, test list — half a page for most subtasks. Scale to subtask size: one subtask = usually one module/function + its tests.
-- For every test in the list, name which tier it belongs in per the test-placement rule cited in the intake findings above — never default to a habitual tier without checking that rule.
+- For every test in the list, name which tier it belongs in per the test-placement rule cited in the exploration findings above — never default to a habitual tier without checking that rule.
 - No hard-wrapped prose. No implementation plan yet — that's the next stage.
 
 Save it to EXACTLY \`${SPEC_PATH}\`, creating the directory if needed and overwriting any existing file. That is the superpowers specs location, so it sits beside the milestone's own design docs.
 
-The design decisions were already argued out when this milestone was broken down — you are NARROWING an agreed design to one subtask, not authoring a new one. Do not invent scope the intake findings do not support.
+The design decisions were already argued out when this milestone was broken down — you are NARROWING an agreed design to one subtask, not authoring a new one. Do not invent scope the exploration findings do not support.
 
 Return a one-paragraph summary of what you specified — the file itself is the artifact, and every later stage reads it from disk.`,
     { label: `spec:#${issue}`, phase: 'Spec', model: 'opus', agentType: 'spec-author' })
@@ -530,7 +530,7 @@ Check it against superpowers' spec reviewer criteria:
 - scope — focused enough for ONE implementation plan, not several subsystems
 - YAGNI — unrequested features, over-engineering
 
-Also check it against this repo's own architecture/standards docs (the intake findings cite them; read them) and against what sibling subtasks own, so this spec does not drift into their work.
+Also check it against this repo's own architecture/standards docs (the exploration findings cite them; read them) and against what sibling subtasks own, so this spec does not drift into their work.
 
 Verify every suspicion against the actual files before reporting. Fold every CONFIRMED fix directly into ${SPEC_PATH}, keeping its structure — the next stage plans from that file, so an unfixed spec becomes an unfixable plan.
 
@@ -556,13 +556,13 @@ Read the spec at ${SPEC_PATH} — read it from disk, do not work from any summar
 Spec author's summary, for orientation only:
 ${clip(spec, 2000, 'spec summary')}
 
-Intake findings:
-${clip(intake.summary, 8000, 'intake summary')}
+Exploration findings:
+${clip(explore.summary, 8000, 'exploration summary')}
 
 Rules:
 - INVOKE the \`superpowers:writing-plans\` skill and follow it: bite-sized tasks, each step one action with real code blocks, RED before GREEN, no placeholders. That skill defines the format this pipeline expects; do not approximate it from memory.
 - Run that skill's own Self-Review checklist before returning (spec coverage, placeholder scan, type consistency) and fix what it finds inline.
-- Every test step must land in the tier its spec entry named (per the test-placement rule in the intake findings) — the file path in each RED step should already reflect that tier's own directory convention (check sibling files in that tier first, don't invent one).
+- Every test step must land in the tier its spec entry named (per the test-placement rule in the exploration findings) — the file path in each RED step should already reflect that tier's own directory convention (check sibling files in that tier first, don't invent one).
 - Prepend the spec verbatim to the top of the saved file, then the plan.
 - Branch will be ${BRANCH}, worktree ${WORKTREE} (fresh, cut from origin/${baseBranch} — the plan must NOT assume any other subtask's code already exists on this branch).
 - Verification commands for this repo:
@@ -608,7 +608,7 @@ Return:
   phase('Validate')
   const verdict = await callAgent(`Adversarial review of the PLAN at ${plan} — ${repo} subtask #${issue} in ${repoDir}. Its spec is at ${SPEC_PATH} and was already reviewed and corrected; treat it as settled and review the plan AGAINST it rather than re-litigating it.
 
-Try to BREAK it before implementation: contradictions with this repo's architecture/standards docs (read them; the intake cites them), decisions that bite sibling subtasks, dishonest or tautological tests, config side-effects, steps not executable verbatim. Verify every suspicion against the actual files/tools before reporting (run commands if needed).
+Try to BREAK it before implementation: contradictions with this repo's architecture/standards docs (read them; the exploration cites them), decisions that bite sibling subtasks, dishonest or tautological tests, config side-effects, steps not executable verbatim. Verify every suspicion against the actual files/tools before reporting (run commands if needed).
 
 Check it against superpowers' plan reviewer criteria:
 - completeness — TODOs, placeholders, incomplete tasks, missing steps
@@ -622,7 +622,7 @@ If a plan defect traces back to the SPEC being wrong, say so in reason and set b
 
 Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust.
 
-Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. Intake moves the card to "${optionNames.inProgress}" on a best-effort basis; do not touch the board here either way.
+Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. Explore moves the card to "${optionNames.inProgress}" on a best-effort basis; do not touch the board here either way.
 
 Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
     { label: `validate-plan:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'plan-critic', schema: {
@@ -719,7 +719,7 @@ phase('Review')
 const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff origin/${baseBranch}...HEAD\`. Context: ${repo} subtask #${issue}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
 ${clip(impl.report, 12000, 'implementer report')}
 
-Check every new test file's path against this repo's own test-placement rule (cited in the plan/intake findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
+Check every new test file's path against this repo's own test-placement rule (cited in the plan/exploration findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
 
 Then the test-integrity gate, on the test portion of that same diff: no weakened or deleted assertions, no tautologies, no tests that merely mirror the implementation, and every new behavior has a test that would fail without its code. A violation here is a finding like any other — raise it, fix it, and if it genuinely cannot be fixed it is blocker-severity. Never weaken, skip, xfail, or delete a test to make anything pass.
 

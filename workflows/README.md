@@ -9,7 +9,7 @@ out at any path, nothing here assumes that location: invoke directly from this c
 (both `Workflow` and `taskScript` below take `args` as JSON too).
 
 - **orchestrator** — drive a whole GitHub milestone on any repo: resolve the board ids by name, compute the story dependency DAG, dispatch each level's stories in parallel — each story's own subtasks run **sequentially**, one worktree/branch/PR per subtask, merged before the next subtask starts — escalate conflicts to a capped Opus resolver.
-- **task** — drive ONE subtask issue: intake → spec → plan → adversarial validation → strict-TDD implementation → review → full verification → PR, in its own fresh worktree/branch. **Stops at PR — never merges.**
+- **task** — drive ONE subtask issue: explore → spec → plan → adversarial validation → strict-TDD implementation → review → full verification → PR, in its own fresh worktree/branch. **Stops at PR — never merges.**
 
 Nothing repo-specific is compiled in. Repo, checkout path, milestone, base branch, board, labels,
 subtask-ordering convention and even the test/lint commands are arguments or discovered at runtime.
@@ -115,20 +115,20 @@ Workflow({ name: "task" }, args: {
 | field | required | notes |
 |---|---|---|
 | `issue` | yes | the **subtask** issue number. A story (or an unlabelled issue) is refused. |
-| `verification` | no | pre-discovered `{fullSuite[], typecheck, lint[]}`; otherwise discovered in Intake. |
+| `verification` | no | pre-discovered `{fullSuite[], typecheck, lint[]}`; otherwise discovered in Explore. |
 | `project`, `branchPrefix`, `coauthor` | no | same as the orchestrator. `project` may be `{number}` or already-resolved ids. |
-| `dryRun` | no | Intake only: returns the branch/worktree it *would* use and the discovered verification commands. No worktree, no writes. |
+| `dryRun` | no | Explore only: returns the branch/worktree it *would* use and the discovered verification commands. No worktree, no writes. |
 
 ### Phases
 
-**Resume** → **Intake** → **Board** → **Spec** → **Plan** → **Validate** → **Implement** → **Review** →
+**Resume** → **Explore** → **Board** → **Spec** → **Plan** → **Validate** → **Implement** → **Review** →
 **Verify** → **PR** → **Board**. One worktree, one branch, one PR — all for this one subtask.
 
 **Resume** is a read-only, Haiku-cheap PR lookup for this issue's branch, run before anything else
 (mirrors the orchestrator's own `Detect`). Branch names are deterministic per issue, so any PR found
 there is always this pipeline's own prior attempt: a merged PR short-circuits with `note: 'resumed:
 PR already merged'`; an open PR short-circuits with `note: 'resumed: PR already open from a prior
-run'`. Neither case re-runs Intake or anything after it.
+run'`. Neither case re-runs Explore or anything after it.
 
 **Spec/Plan/Validate** are also resumable: the plan file is saved under a deterministic name
 (`issue-<N>.md`, no date), and Validate prepends `<!-- task-pipeline: validated -->` to it on
