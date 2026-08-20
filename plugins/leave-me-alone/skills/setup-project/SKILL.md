@@ -240,9 +240,14 @@ The orchestrator's two agents exist because a Workflow script cannot execute a c
 either decides anything. Both are **triggers**: each runs one command and hands back its stdout.
 
 ```jsonc
-"detectScript":  "/abs/path/to/leave-me-alone/scripts/detect.mjs",
-"projectScript": "/abs/path/to/leave-me-alone/scripts/resolve.mjs"
+"taskScript":    "~/.claude/workflows/task.js",
+"detectScript":  "~/.claude/workflows/scripts/detect.mjs",
+"projectScript": "~/.claude/workflows/scripts/resolve.mjs",
+"scriptsDir":    "~/.claude/workflows/scripts"
 ```
+
+(Absolute paths — `~` is shown for brevity. Everything a run needs sits under one root, rather than
+being split between `~/.claude` and a version-stamped plugin cache directory that moves on upgrade.)
 
 `detectScript` is **required**, like `taskScript`, and for the same reason: this repo can be checked
 out anywhere. A missing or relative path fails at launch, and there is no agent-census fallback — the
@@ -258,9 +263,12 @@ and no lookup happens at all. Without either, the board is disabled and the run 
 Every stage runs as a purpose-built agent type with only the tools it needs. They are
 version-controlled in `agents/` and must be installed before the session starts:
 
-```bash
-cp agents/*.md ~/.claude/agents/     # then RESTART the session
-```
+Installing the `leave-me-alone` plugin is enough. Agent types are a native plugin component, so the
+six below register themselves; the Workflow scripts are not, so a SessionStart hook copies them (and
+their helper scripts) into `~/.claude/workflows/` on the first session after install.
+
+**Restart once after installing** — the agent registry is read at session start, and a missing type
+is a hard error rather than a silent fallback to the default subagent.
 
 | type | tools | used by |
 |---|---|---|
@@ -312,8 +320,8 @@ and Detect's prompt drops to the one trigger line:
 To inspect a board by hand — or to debug a run that came back wrong — the same script runs standalone:
 
 ```bash
-bun scripts/detect.mjs --repo OWNER/REPO --milestone 12          # human-readable
-bun scripts/resolve.mjs --owner OWNER --number 13        # ids, ready to paste
+bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone 12
+bun ~/.claude/workflows/scripts/resolve.mjs --owner OWNER --number 13
 ```
 
 ## Skipping the id lookup

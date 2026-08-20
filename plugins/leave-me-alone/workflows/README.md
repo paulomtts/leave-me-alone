@@ -16,9 +16,11 @@ type and a one-line prompt.
 
 ## Preconditions
 
-```bash
-cp agents/*.md ~/.claude/agents/     # then RESTART the session — the registry is read at startup
-```
+Install the `leave-me-alone` plugin, then **restart once**. Agent types are a native plugin
+component and register themselves; Workflow scripts are not distributable by a plugin, so a
+SessionStart hook copies `workflows/*.js` and the runtime helpers into `~/.claude/workflows/`.
+
+The plugin is the source of truth and the hook OVERWRITES — edit the plugin, not the copy.
 
 `bun` and `gh` on PATH. A GitHub Projects v2 board — there is no boardless mode. Board setup and the
 milestone conventions are the `setup-project` and `setup-milestone` skills.

@@ -12,6 +12,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sync-workflows.sh\"",
+            "timeout": 15,
+            "statusMessage": "leave-me-alone: syncing workflows"
+          }
+        ]
+      }
     ]
   }
 }
