@@ -108,6 +108,7 @@ if (invokedDirectly) {
   const targets = named.length ? named : await listWorkflowScripts(path.join(repoRoot, 'workflows'))
   const results = await checkWorkflows(targets)
   const failed = results.filter((r) => !r.ok)
-  if (!quiet) console.log(`checked ${results.length} workflow script(s); ${failed.length} failed`)
+  // --quiet hides only the success summary; a failing run stays fully diagnosable.
+  if (!quiet || failed.length > 0) console.log(`checked ${results.length} workflow script(s); ${failed.length} failed`)
   process.exit(failed.length > 0 ? 1 : 0)
 }

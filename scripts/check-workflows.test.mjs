@@ -109,6 +109,16 @@ test('--quiet after an explicit passing target suppresses the summary', async ()
   assert.doesNotMatch(result.stdout, SUMMARY_RE)
 })
 
+test('--quiet still reports failures, the summary, and exit 1', async () => {
+  const file = await fixture('broken.js', BROKEN_WORKFLOW)
+  const result = await runChecker(['--quiet', file])
+  assert.equal(result.code, 1, `expected exit 1, got ${result.code}`)
+  const output = result.stdout + result.stderr
+  assert.ok(output.includes(file), `expected output to name ${file}\n${output}`)
+  assert.match(output, /Unexpected token/)
+  assert.match(result.stdout, /checked 1 workflow script\(s\); 1 failed/)
+})
+
 // ── smokeInit ────────────────────────────────────────────────────────────────
 // Compiling is not enough: a `const` referenced above its own declaration
 // compiles fine and throws only when the script RUNS. That shipped once and
