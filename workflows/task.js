@@ -108,6 +108,21 @@ async function callAgent(prompt, agentOpts) {
   }
 }
 
+// Free-text stage returns get pasted verbatim into the NEXT stage's prompt. A
+// stage that goes off the rails returns pages of prose instead of a summary,
+// and an oversized/garbled prompt built from it is exactly what got
+// classifier-blocked and halted a milestone once (see the PR stage's own guard
+// at the bottom of this file). Cap every such interpolation — the untruncated
+// text is still in the journal, so nothing is actually lost for debugging.
+function clip(text, max, what) {
+  const value = String(text ?? '')
+  if (value.length <= max) return value
+  log(`${what} returned ${value.length} chars — clipped to ${max} for the next prompt`)
+  return `${value.slice(0, max)}
+
+[TRUNCATED: ${what} returned ${value.length} characters, capped at ${max}. If this reads as cut off mid-thought, treat the truncation ITSELF as evidence the upstream stage over-ran its brief — say so in your output rather than guessing what the missing text said.]`
+}
+
 // ── board — resolved ids only, Haiku, low effort, sole board writer ──────────
 const DEFAULT_OPTION_NAMES = { backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done' }
 
@@ -252,7 +267,7 @@ if (planCheck && planCheck.found && planCheck.validated === true &&
   const spec = await callAgent(`Write the spec for ${repo} subtask #${issue} in ${repoDir}.
 
 Intake findings:
-${intake.summary}
+${clip(intake.summary, 8000, 'intake summary')}
 
 Rules:
 - Scope, observable behavior, error paths, test list — half a page for most subtasks. Scale to subtask size: one subtask = usually one module/function + its tests.
@@ -268,10 +283,10 @@ Return the spec as plain text (not saved to a file yet).`,
   const planPath = await callAgent(`Write the TDD implementation plan for ${repo} subtask #${issue} in ${repoDir}, from the spec below.
 
 Spec:
-${spec}
+${clip(spec, 16000, 'spec')}
 
 Intake findings:
-${intake.summary}
+${clip(intake.summary, 8000, 'intake summary')}
 
 Rules:
 - superpowers:writing-plans format: bite-sized tasks, each step one action with real code blocks, RED before GREEN, no placeholders.
@@ -354,7 +369,7 @@ if (!impl) throw new Error('implement agent died')
 // ── 5. review + fixes ────────────────────────────────────────────────────────
 phase('Review')
 const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff origin/${baseBranch}...HEAD\`. Context: ${repo} subtask #${issue}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
-${impl}
+${clip(impl, 12000, 'implementer report')}
 
 Check every new test file's path against this repo's own test-placement rule (cited in the plan/intake findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
 
@@ -386,7 +401,11 @@ if (unresolvedBlockers.length > 0) {
 
 // ── 6. verify ────────────────────────────────────────────────────────────────
 phase('Verify')
-const tests = await callAgent(`Full verification in ${WORKTREE} (branch ${BRANCH}). Run EVERY command below and report honestly:
+const tests = await callAgent(`Full verification in ${WORKTREE} (branch ${BRANCH}).
+
+0. FIRST, before running anything: \`git -C ${WORKTREE} status --porcelain\`. The review stage that ran before you was asked to commit its own fixes, but if it edited files and did not commit them, that work is invisible to \`git push\` and would be silently dropped when the PR opens — the tests you are about to run would pass against code the PR never contains. If the worktree is dirty, read the changes first: if they are plainly this subtask's work (review fixes, formatting), commit them (conventional commit, reference #${issue}, end with "Co-Authored-By: ${coauthor}"). If they look unrelated to #${issue}, do NOT commit them — stop and report what you found. Never stash, revert, checkout, or clean anything here; uncommitted work is the one thing in this pipeline that cannot be recovered.
+
+Then run EVERY command below and report honestly:
 
 ${verifyBlock}
 
