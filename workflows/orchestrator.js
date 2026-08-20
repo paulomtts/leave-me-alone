@@ -56,6 +56,16 @@ function orderSubtasks(subtasks, pattern) {
     .map(entry => entry.subtask)
 }
 
+// A script's JSON round-trips through an agent's structured output, and that
+// DECODES escapes: a \u001b the script wrote arrives here as a raw ESC byte,
+// which JSON.parse rejects as an invalid control character. Node's test runner
+// colours its output, and one captured line of it failed a milestone at the
+// last step -- after the PRs were already open. The scripts strip this at
+// source now; this is the second line of defence.
+function printableOnly(text) {
+  return String(text ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+}
+
 // ── DAG / lock / escalation core ─────────────────────────────────────────────
 
 // STACKED MODE: nothing merges during a run, so "done" cannot mean "merged".
@@ -778,7 +788,7 @@ It prints one line of JSON that the pipeline parses itself, so reformatting, pre
   // downgrade is worse than a loud one.
   let lookup = null
   try {
-    lookup = JSON.parse(String((resolved && resolved.stdout) ?? ''))
+    lookup = JSON.parse(printableOnly(String((resolved && resolved.stdout) ?? '')))
   } catch (err) {
     throw new Error(`orchestrator: ${projectScript} returned output that is not JSON (${err.message}). `
       + `First 200 characters: ${String((resolved && resolved.stdout) ?? '').slice(0, 200)}`)
@@ -816,7 +826,7 @@ function parseTriggerOutput(result) {
     throw new Error(`orchestrator: ${detectScript} failed: ${(result && result.error) || 'no error reported'}`)
   }
   try {
-    return JSON.parse(String(result.stdout ?? ''))
+    return JSON.parse(printableOnly(String(result.stdout ?? '')))
   } catch (err) {
     throw new Error(`orchestrator: ${detectScript} returned output that is not JSON (${err.message}). `
       + `First 200 characters: ${String(result.stdout ?? '').slice(0, 200)}`)

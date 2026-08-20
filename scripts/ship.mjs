@@ -16,7 +16,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { ghError, jsonFrom, lastLine, readFlags, withRetries } from './gh.mjs'
+import { ghError, jsonFrom, lastLine, plainText, readFlags, withRetries } from './gh.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -83,17 +83,17 @@ export async function ship(options, run = runner, wait) {
   // PR would silently lack the work.
   const status = await run(['git', '-C', worktree, 'status', '--porcelain'])
   if (String(status.stdout).trim()) {
-    result.detail = `worktree is dirty, so the PR would not contain this work:\n${status.stdout.trim()}`
+    result.detail = plainText(`worktree is dirty, so the PR would not contain this work: ${status.stdout.trim()}`, 600)
     return result
   }
 
   for (const command of verify.filter(Boolean)) {
     try {
       const out = await run(command, { cwd: worktree, shell: true })
-      result.verified.push({ command, ok: true, tail: lastLine(out.stdout) })
+      result.verified.push({ command, ok: true, tail: plainText(lastLine(out.stdout)) })
     } catch (err) {
-      result.verified.push({ command, ok: false, tail: ghError(err) })
-      result.detail = `verification failed: ${command}\n${ghError(err)}`
+      result.verified.push({ command, ok: false, tail: plainText(ghError(err)) })
+      result.detail = plainText(`verification failed: ${command} — ${ghError(err)}`, 600)
       return result   // nothing is pushed after a red command
     }
   }

@@ -264,6 +264,16 @@ function clip(text, max, what) {
 [TRUNCATED: ${what} returned ${value.length} characters, capped at ${max}. If this reads as cut off mid-thought, treat the truncation ITSELF as evidence the upstream stage over-ran its brief — say so in your output rather than guessing what the missing text said.]`
 }
 
+// A script's JSON round-trips through an agent's structured output, and that
+// DECODES escapes: a \u001b the script wrote arrives here as a raw ESC byte,
+// which JSON.parse rejects as an invalid control character. Node's test runner
+// colours its output, and one captured line of it failed a milestone at the
+// last step -- after the PRs were already open. The scripts strip this at
+// source now; this is the second line of defence.
+function printableOnly(text) {
+  return String(text ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+}
+
 // ── board — orchestrator-resolved ids only ───────────────────────────────────
 // Ids are NOT looked up here. The orchestrator resolves them once per milestone
 // in its Configure phase and forwards the resolved block to every subtask, so
@@ -450,7 +460,7 @@ if (!wtOut) throw new Error('worktree agent died')
 
 let worktreeState
 try {
-  worktreeState = JSON.parse(String(wtOut.stdout ?? ''))
+  worktreeState = JSON.parse(printableOnly(String(wtOut.stdout ?? '')))
 } catch (err) {
   return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
     detail: `worktree.mjs returned output that is not JSON (${err.message}). Nothing was created. First 200 characters: ${String(wtOut.stdout ?? '').slice(0, 200)}` }
@@ -487,7 +497,7 @@ It prints one line of JSON that the pipeline parses itself, so reformatting, pre
     } })
   if (!out) return null
   try {
-    return JSON.parse(String(out.stdout ?? ''))
+    return JSON.parse(printableOnly(String(out.stdout ?? '')))
   } catch (err) {
     // Not fatal: an unreadable answer means "no reusable plan", which costs a
     // re-plan rather than the run.
@@ -844,7 +854,7 @@ if (!shipOut) throw new Error('ship agent died')
 
 let ship
 try {
-  ship = JSON.parse(String(shipOut.stdout ?? ''))
+  ship = JSON.parse(printableOnly(String(shipOut.stdout ?? '')))
 } catch (err) {
   // Parsed HERE so a mangled transcription fails at the boundary rather than
   // arriving as a plausible-looking success.

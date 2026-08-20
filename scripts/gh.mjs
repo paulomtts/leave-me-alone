@@ -27,6 +27,26 @@ export function ghError(err) {
   return String((err && err.message) || err || 'unknown error').split('\n')[0]
 }
 
+// Anything a script puts in its JSON has to survive a round trip through an
+// agent's structured output, and that round trip DECODES escapes: a `\u001b`
+// the script wrote comes back as a raw ESC byte, and JSON.parse then rejects it
+// as an invalid control character. Node's test runner colours its output, so
+// one `tail` field of captured stdout was enough to fail a whole milestone at
+// the very last step -- after the PRs had already been opened.
+//
+// So captured output is flattened to printable text before it is reported:
+// ANSI sequences removed, remaining control characters dropped, and a length
+// cap because a "tail" is a human hint, not a payload.
+export function plainText(text, max = 300) {
+  const flat = String(text ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .trim()
+  return flat.length <= max ? flat : `${flat.slice(0, max)}…`
+}
+
 // Same shape for git, so the scripts that touch a checkout are injectable too.
 export async function gitRunner(args) {
   const { stdout } = await execFileAsync('git', args, { maxBuffer: 64 * 1024 * 1024 })

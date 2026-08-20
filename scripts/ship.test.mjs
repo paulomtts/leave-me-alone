@@ -184,3 +184,36 @@ test('verification commands are NEVER retried', async () => {
   assert.equal(runs, 1)
   assert.equal(got.passed, false)
 })
+
+test('captured output is flattened to printable text', async () => {
+  // The failure this prevents: Node's test runner colours its output, the
+  // script JSON-escaped the ESC bytes, the agent's structured output DECODED
+  // them back to raw control characters, and JSON.parse rejected the report --
+  // after the PR had already been opened.
+  const ESC = String.fromCharCode(27)
+  const coloured = `${ESC}[34m\u2139 duration_ms 302.9${ESC}[39m`
+  const run = async (command) => {
+    const joined = Array.isArray(command) ? command.join(' ') : command
+    if (joined.includes('npm test')) return { code: 0, stdout: coloured, stderr: '' }
+    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  assert.equal(got.verified[0].tail, '\u2139 duration_ms 302.9')
+  // The report must survive being serialized and decoded, which is what the
+  // round trip through an agent actually does.
+  const roundTripped = JSON.parse(JSON.stringify(got))
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(roundTripped)))
+  assert.equal(/[\u0000-\u001f\u007f]/.test(JSON.stringify(got)), false, 'no raw control characters anywhere')
+})
+
+test('a long tail is capped — it is a hint, not a payload', async () => {
+  const run = async (command) => {
+    const joined = Array.isArray(command) ? command.join(' ') : command
+    if (joined.includes('npm test')) return { code: 0, stdout: 'x'.repeat(5000), stderr: '' }
+    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  assert.ok(got.verified[0].tail.length <= 301, `tail was ${got.verified[0].tail.length}`)
+})
