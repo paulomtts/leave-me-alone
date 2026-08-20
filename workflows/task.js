@@ -13,6 +13,94 @@ export const meta = {
   ],
 }
 
+// ── pure decision logic ──────────────────────────────────────────────────────
+// Everything between the PURE markers is a pure function of its arguments: no
+// harness globals, no module-level state, no logging. workflows/task.test.mjs
+// slices this region out of THIS file and imports it, so the gates are tested
+// against the same bytes the workflow runs.
+//
+// These two gates are the run's hard stops, and both live here rather than
+// inline because they are decisions about numbers and strings — deterministic,
+// and worth being able to prove without a live dispatch. A gate that reaches
+// for BRANCH or calls log() stops being testable, and load-pure.mjs will refuse
+// the whole region rather than let that pass quietly.
+// PURE:BEGIN
+
+// An empty suite makes every downstream gate vacuous: Ship runs nothing and
+// reports passed=true, Review has no red/green to work against, and the PR
+// opens unverified. Observed on a run whose base branch documented no commands
+// — the Ship agents happened to improvise and find the tests themselves, which
+// is luck, not design, and their prompt explicitly tells them NOT to substitute
+// commands. Fail loudly instead, with a deliberate opt-out for repos that
+// genuinely have no suite yet.
+function verificationGate(suiteCmds, allowNoVerification, callerProvided) {
+  if (suiteCmds.length > 0) return null
+  if (allowNoVerification === true) return null
+  return {
+    blocked: 'verification',
+    detail: 'no full-suite command is available for this repo, so nothing downstream could verify this subtask — '
+      + 'Ship would run zero commands and still report success. '
+      + (callerProvided
+          ? 'The caller passed an empty verification.fullSuite; the orchestrator discovers these from origin/<baseBranch>, so check that the base branch actually documents its test commands.'
+          : 'Intake found none in CLAUDE.md, the CI workflows, or the manifest.')
+      + ' Document the command, pass verification.fullSuite explicitly, or set allowNoVerification: true to proceed unverified on purpose.',
+  }
+}
+
+// Number() is too eager to be a validator here: Number(null) and Number('')
+// are both 0, so a Review that reported no count at all would be judged as
+// having found ZERO COMMITS and the run would stop claiming the implementation
+// produced nothing. That is a fabricated fact pinned on the wrong stage. An
+// absent count is unusable, not zero — only a real number, or a string holding
+// one, counts.
+function countOf(value) {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string' && value.trim() !== '') return Number(value)
+  return NaN
+}
+
+// The Review -> Ship boundary. Review is asked to REPORT three facts and never
+// to interpret or act on them: an agent that both measures and judges can talk
+// itself out of the judgement. Review is also the last stage that writes, so
+// this is the earliest boundary at which the facts can be judged — and judging
+// here costs no dispatch, because Ship simply never boots.
+//
+// Returns null to proceed, {blocked, detail} to stop, or {warn} when Review's
+// numbers are unusable and the Plan-Hash half of the gate has to be skipped.
+function reviewGate(review, branch, baseBranch) {
+  const porcelain = String((review && review.porcelain) || '').trim()
+  if (porcelain.length > 0) {
+    return {
+      blocked: 'tests',
+      detail: `worktree still dirty after review, so the PR would not contain this work (nothing was pushed):\n${porcelain}`,
+    }
+  }
+
+  // Implement decides RESUME vs RESET by grepping for exactly this trailer, so
+  // an untagged commit reads as stale debris and a later run would
+  // `reset --hard` it away. Catching that here, before anything is pushed, is
+  // the whole point.
+  const commitCount = countOf(review && review.commitCount)
+  const taggedCount = countOf(review && review.taggedCount)
+  if (!Number.isInteger(commitCount) || !Number.isInteger(taggedCount)) {
+    return { warn: `review did not report usable commit/trailer counts (${review && review.commitCount}/${review && review.taggedCount}) — Plan-Hash gate skipped` }
+  }
+  if (commitCount === 0) {
+    return {
+      blocked: 'implement',
+      detail: `branch ${branch} has no commits on top of ${baseBranch} — implementation produced nothing to ship.`,
+    }
+  }
+  if (taggedCount < commitCount) {
+    return {
+      blocked: 'implement',
+      detail: `only ${taggedCount} of ${commitCount} commits on ${branch} carry their Plan-Hash trailer, so a future run would read this branch as stale and hard-reset it. Nothing was pushed. Do NOT re-run this subtask until the trailers are added (interactively, by a human) or the work is otherwise preserved.`,
+    }
+  }
+  return null
+}
+// PURE:END
+
 // ── args ─────────────────────────────────────────────────────────────────────
 let raw = args
 if (typeof raw === 'string') {
@@ -191,21 +279,9 @@ if (!intake || intake.refused) return { issue, refused: true, reason: intake ? i
 const verification = providedVerification || intake.verification
 const suiteCmds = (verification.fullSuite || []).filter(Boolean)
 
-// An empty suite makes every downstream gate vacuous: Ship runs nothing and
-// reports passed=true, Review has no red/green to work against, and the PR
-// opens unverified. Observed on a run whose base branch documented no commands
-// — the Ship agents happened to improvise and find the tests themselves, which
-// is luck, not design, and their prompt explicitly tells them NOT to substitute
-// commands. Fail loudly instead, with a deliberate opt-out for repos that
-// genuinely have no suite yet.
-if (suiteCmds.length === 0 && opts.allowNoVerification !== true) {
-  return { issue, blocked: 'verification', branch: BRANCH, worktree: WORKTREE,
-    detail: 'no full-suite command is available for this repo, so nothing downstream could verify this subtask — '
-      + 'Ship would run zero commands and still report success. '
-      + (providedVerification
-          ? 'The caller passed an empty verification.fullSuite; the orchestrator discovers these from origin/<baseBranch>, so check that the base branch actually documents its test commands.'
-          : 'Intake found none in CLAUDE.md, the CI workflows, or the manifest.')
-      + ' Document the command, pass verification.fullSuite explicitly, or set allowNoVerification: true to proceed unverified on purpose.' }
+const noSuite = verificationGate(suiteCmds, opts.allowNoVerification, Boolean(providedVerification))
+if (noSuite) {
+  return { issue, blocked: noSuite.blocked, branch: BRANCH, worktree: WORKTREE, detail: noSuite.detail }
 }
 
 const verifyBlock = [
@@ -411,6 +487,14 @@ Return:
       taggedCount: { type: 'integer' },
     },
   } })
+// agent() returns null when a stage dies terminally. Every other stage stops on
+// that; Review had no such check, so a dead reviewer read as "no unresolved
+// blockers" and the run walked on with nothing actually reviewed.
+if (!review) {
+  return { issue, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `the review stage returned nothing, so this branch has not been reviewed and its worktree state is unknown. Nothing was pushed. ${WORKTREE} is intact — re-run this subtask to review it.` }
+}
+
 // Review both raises AND fixes, so a blocker in `findings` may well have been
 // resolved in the same pass — only what the reviewer says is STILL standing
 // gates the PR. Previously nothing read this at all: a blocker-severity
@@ -428,27 +512,12 @@ if (unresolvedBlockers.length > 0) {
 // boundary at which they can be judged, and gating here costs no dispatch:
 // Ship simply never boots.
 //
-// Review is asked to REPORT these, never to interpret or act on them. An agent
-// that both measures and judges can talk itself out of the judgement.
-const porcelain = String((review && review.porcelain) || '').trim()
-if (porcelain.length > 0) {
-  return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `worktree still dirty after review, so the PR would not contain this work (nothing was pushed):\n${porcelain}` }
-}
-
-// Implement decides RESUME vs RESET by grepping for exactly this trailer, so an
-// untagged commit reads as stale debris and a later run would `reset --hard` it
-// away. Catching that here, before anything is pushed, is the whole point.
-const commitCount = Number(review && review.commitCount)
-const taggedCount = Number(review && review.taggedCount)
-if (!Number.isInteger(commitCount) || !Number.isInteger(taggedCount)) {
-  log(`review did not report usable commit/trailer counts (${review && review.commitCount}/${review && review.taggedCount}) — Plan-Hash gate skipped`)
-} else if (commitCount === 0) {
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `branch ${BRANCH} has no commits on top of ${baseBranch} — implementation produced nothing to ship.` }
-} else if (taggedCount < commitCount) {
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `only ${taggedCount} of ${commitCount} commits on ${BRANCH} carry their Plan-Hash trailer, so a future run would read this branch as stale and hard-reset it. Nothing was pushed. Do NOT re-run this subtask until the trailers are added (interactively, by a human) or the work is otherwise preserved.` }
+// The gate itself is reviewGate(), up in the PURE region, where it can be
+// tested without a dispatch. All that is left here is doing what it says.
+const gate = reviewGate(review, BRANCH, baseBranch)
+if (gate && gate.warn) log(gate.warn)
+if (gate && gate.blocked) {
+  return { issue, blocked: gate.blocked, branch: BRANCH, worktree: WORKTREE, plan, detail: gate.detail }
 }
 
 // ── 6. ship — verify, then push and open the PR (never merge) ───────────────
