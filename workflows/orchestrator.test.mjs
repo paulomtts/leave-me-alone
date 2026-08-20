@@ -18,9 +18,11 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const {
   orderSubtasks, isSubtaskDone, remainingSubtasks, computeLevels,
   assertNoBlockerCycles, storyRoot, stackBases, escalation,
+  prMatchesSubtask, matchPullRequest, dropCommandsNamingMissingPaths,
 } = await loadPure(join(HERE, 'orchestrator.js'), [
   'orderSubtasks', 'isSubtaskDone', 'remainingSubtasks', 'computeLevels',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
+  'prMatchesSubtask', 'normalizePr', 'matchPullRequest', 'dropCommandsNamingMissingPaths',
 ])
 
 const PREFIX = 'task-'
@@ -196,4 +198,130 @@ test('escalation says plainly that nothing was merged', () => {
   const payload = escalation({ level: 0, story: 1, subtask: 2, pr: null, trigger: 'tests', baseBranch: 'main', attempts: [] })
   assert.equal(payload.escalated, true)
   assert.match(payload.message, /Nothing was merged/)
+})
+
+// ── prMatchesSubtask ─────────────────────────────────────────────────────────
+
+test('a subtask number matches any prefix, and a bare number', () => {
+  // The whole point: doneness survives a branch-prefix change.
+  for (const ref of ['task-1050', 'aq-1050', 'wip/1050', '1050', 'feature/x-1050']) {
+    assert.equal(prMatchesSubtask(ref, 1050), true, ref)
+  }
+})
+
+test('a longer number that merely ENDS with the subtask number does not match', () => {
+  // task-11050 is subtask 11050's branch. Matching it to 1050 would report
+  // someone else's work as this subtask's, which is the #1050 bug's shape.
+  assert.equal(prMatchesSubtask('task-11050', 1050), false)
+  assert.equal(prMatchesSubtask('task-01050', 1050), false)
+})
+
+test('the number must be a SUFFIX, not merely present', () => {
+  assert.equal(prMatchesSubtask('task-1050-followup', 1050), false)
+  assert.equal(prMatchesSubtask('1050-task', 1050), false)
+})
+
+test('a missing or empty ref never matches', () => {
+  for (const ref of [null, undefined, '']) assert.equal(prMatchesSubtask(ref, 1050), false)
+})
+
+// ── matchPullRequest ─────────────────────────────────────────────────────────
+
+const pr = (number, ref, base, over = {}) => ({ number, ref, base, url: `u/${number}`, state: 'open', ...over })
+
+test('no candidate means no PR — unstarted work, not a failure', () => {
+  assert.deepEqual(matchPullRequest(13, [pr(1, 'task-99', 'main')], 'main'), { pr: null, note: null })
+  assert.deepEqual(matchPullRequest(13, [], 'main'), { pr: null, note: null })
+  assert.deepEqual(matchPullRequest(13, null, 'main'), { pr: null, note: null })
+})
+
+test('a PR on the expected stack parent is this subtask, normalized', () => {
+  const { pr: found } = matchPullRequest(14, [pr(7, 'task-14', 'task-13', { merged_at: null })], 'task-13')
+  assert.equal(found.number, 7)
+  assert.equal(found.state, 'OPEN')        // REST says "open"; everything downstream compares uppercase
+  assert.equal(found.merged, false)
+  assert.equal(found.base, 'task-13')
+})
+
+test('merged_at is what makes a PR merged, not the issue being closed', () => {
+  const { pr: found } = matchPullRequest(14, [pr(7, 'task-14', 'main', { merged_at: '2026-08-19T00:00:00Z' })], 'main')
+  assert.equal(found.merged, true)
+  const { pr: open } = matchPullRequest(14, [pr(8, 'task-14', 'main', { merged_at: null })], 'main')
+  assert.equal(open.merged, false)
+})
+
+test('a PR against the WRONG base is rejected, and is not the same as no PR', () => {
+  // The #1133 bug: head task-1133, base main instead of its stack parent,
+  // counted as done across many runs. 'wrong-base' is a distinct sentinel from
+  // null precisely so isSubtaskDone cannot read it as finished work.
+  const { pr: found, note } = matchPullRequest(14, [pr(7, 'task-14', 'main')], 'task-13')
+  assert.equal(found, 'wrong-base')
+  assert.match(note, /base "main" is not its stack parent "task-13"/)
+})
+
+test('an unreported base is unverifiable, which halts rather than guesses', () => {
+  const { pr: found, note } = matchPullRequest(14, [pr(7, 'task-14', '')], 'task-13')
+  assert.equal(found, 'unknown')
+  assert.match(note, /no base branch/)
+})
+
+test('the right base wins over a merged PR on the wrong one', () => {
+  // Preference order is base, then merged, then most recent. The prose version
+  // preferred the MILESTONE base, which is correct only for a story's first
+  // subtask -- every later one targets its predecessor.
+  const pulls = [pr(9, 'task-14', 'main', { merged_at: '2026-08-01T00:00:00Z' }), pr(4, 'task-14', 'task-13')]
+  const { pr: found } = matchPullRequest(14, pulls, 'task-13')
+  assert.equal(found.number, 4)
+})
+
+test('among PRs on the right base, merged wins; then the most recent', () => {
+  const merged = [pr(4, 'task-14', 'task-13'), pr(3, 'task-14', 'task-13', { merged_at: '2026-08-01T00:00:00Z' })]
+  assert.equal(matchPullRequest(14, merged, 'task-13').pr.number, 3)
+
+  const both = [pr(4, 'task-14', 'task-13'), pr(9, 'task-14', 'task-13')]
+  assert.equal(matchPullRequest(14, both, 'task-13').pr.number, 9)
+})
+
+// ── dropCommandsNamingMissingPaths ───────────────────────────────────────────
+
+test('commands survive when nothing is missing', () => {
+  const { kept, dropped } = dropCommandsNamingMissingPaths(['npm test', 'npm run lint'], [])
+  assert.deepEqual(kept, ['npm test', 'npm run lint'])
+  assert.deepEqual(dropped, [])
+})
+
+test('a command naming an absent path is dropped, and says which path', () => {
+  // Bug two: a suite command naming a test file that exists only on another
+  // branch. Every worktree is cut from origin/<base>, so it crashed there.
+  const { kept, dropped } = dropCommandsNamingMissingPaths(
+    ['node --test workflows/orchestrator.test.mjs', 'npm test'],
+    ['workflows/orchestrator.test.mjs'])
+  assert.deepEqual(kept, ['npm test'])
+  assert.equal(dropped.length, 1)
+  assert.equal(dropped[0].path, 'workflows/orchestrator.test.mjs')
+})
+
+test('dropping EVERY command is reported, never silently returned as green', () => {
+  // Bug three: the over-correction. An empty kept list with a non-empty dropped
+  // list is the signature the caller warns on -- the two must stay
+  // distinguishable from "this repo documented nothing at all".
+  const wiped = dropCommandsNamingMissingPaths(['node --test a.mjs'], ['a.mjs'])
+  assert.deepEqual(wiped.kept, [])
+  assert.equal(wiped.dropped.length, 1)
+
+  const nothingFound = dropCommandsNamingMissingPaths([], ['a.mjs'])
+  assert.deepEqual(nothingFound.kept, [])
+  assert.deepEqual(nothingFound.dropped, [])
+})
+
+test('blank commands and blank missing paths are ignored, not matched', () => {
+  // An empty-string path would substring-match EVERY command and wipe the suite.
+  const { kept, dropped } = dropCommandsNamingMissingPaths(['npm test', '', '  '], ['', '   ', null])
+  assert.deepEqual(kept, ['npm test'])
+  assert.deepEqual(dropped, [])
+})
+
+test('missing/absent inputs are handled without throwing', () => {
+  assert.deepEqual(dropCommandsNamingMissingPaths(undefined, undefined), { kept: [], dropped: [] })
+  assert.deepEqual(dropCommandsNamingMissingPaths(null, null), { kept: [], dropped: [] })
 })

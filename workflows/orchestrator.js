@@ -248,6 +248,114 @@ function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }
   const message = `orchestrator STOPPED: story #${story} subtask #${subtask} (level ${level}) could not be dispatched/verified against ${baseBranch} — trigger: ${trigger}. Nothing was merged; this run opens stacked PRs only. ${(attempts ?? []).length} note(s) recorded.`
   return { escalated: true, level, story, subtask, pr, trigger, baseBranch, attempts: attempts ?? [], message }
 }
+
+// ── which PR belongs to a subtask ───────────────────────────────────────────
+// This was ~700 characters of prose in Detect's prompt, executed per subtask by
+// a haiku agent. It is pure string and number logic, and it is the exact rule
+// that produced the #1050 bug (prefix-exact matching orphaned every PR merged
+// under an earlier branch prefix, so finished work was re-dispatched and died
+// on an empty diff). A rule with that history belongs where it can be pinned
+// down by tests.
+//
+// Detect now fetches the PR list ONCE for the whole milestone and returns it
+// raw; the matching happens here, per subtask.
+
+// Match on the NUMBER, never the prefix: `aq-1050`, `task-1050`, `wip/1050`
+// and a bare `1050` all belong to subtask 1050, while `task-11050` does not.
+// Suffix matching is what makes doneness survive a prefix change — which is
+// also why branchPrefix must never be randomised or timestamped.
+function prMatchesSubtask(ref, number) {
+  const text = String(ref ?? '')
+  const suffix = String(number)
+  if (suffix.length === 0 || !text.endsWith(suffix)) return false
+  const before = text[text.length - suffix.length - 1]
+  return before === undefined || !/[0-9]/.test(before)
+}
+
+// REST reports state lowercase and merged-ness as a merged_at timestamp;
+// GraphQL and `gh --json` report state uppercase and merged as a boolean.
+// Normalize once so nothing downstream depends on which path Detect took.
+function normalizePr(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  return {
+    number: Number(source.number),
+    url: String(source.url ?? ''),
+    state: String(source.state ?? '').toUpperCase(),
+    merged: source.merged === true
+      || (typeof source.merged_at === 'string' && source.merged_at.length > 0),
+    ref: String(source.ref ?? ''),
+    base: String(source.base ?? ''),
+  }
+}
+
+// Returns { pr, note }. `pr` uses the same three sentinels the rest of this
+// file already understands: an object (a real PR), null (no PR — unstarted
+// work), the string 'unknown' (the lookup could not answer, which is NOT the
+// same as "none" and halts the run), or 'wrong-base' (a PR exists but is not
+// this subtask's stack parent, so it is not evidence of doneness).
+//
+// wantedBase is the subtask's OWN stack parent, not the milestone base. The
+// prose version preferred a PR whose base was the milestone base, which in
+// stacked mode is right only for a story's first subtask — every later one
+// targets its predecessor's branch, so the preference could pick a stray PR
+// over the real one and then get it rejected as wrong-base.
+function matchPullRequest(number, pulls, wantedBase) {
+  const candidates = (pulls ?? [])
+    .filter(raw => prMatchesSubtask(raw && raw.ref, number))
+    .map(normalizePr)
+  if (candidates.length === 0) return { pr: null, note: null }
+
+  candidates.sort((a, b) => {
+    const aWanted = a.base === wantedBase ? 0 : 1
+    const bWanted = b.base === wantedBase ? 0 : 1
+    if (aWanted !== bWanted) return aWanted - bWanted
+    if (a.merged !== b.merged) return a.merged ? -1 : 1
+    return b.number - a.number
+  })
+
+  const best = candidates[0]
+  if (!best.base) {
+    return { pr: 'unknown',
+      note: `detect: PR #${best.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
+  }
+  if (best.base !== wantedBase) {
+    return { pr: 'wrong-base',
+      note: `detect: ignoring PR #${best.number} for subtask #${number} — base "${best.base}" is not its stack parent "${wantedBase}"` }
+  }
+  return { pr: best, note: null }
+}
+
+// ── dropping verification commands that cannot run at the base ref ──────────
+// Bugs two and three both lived in this one judgement. Reading commands from
+// the working tree named a test file absent from origin/<base>, which every
+// worktree is cut from (crash mid-milestone). The fix -- drop commands naming
+// absent paths -- was then handed to the agent as prose, and it dropped ALL of
+// them, leaving an empty suite that made every downstream gate vacuous while
+// reporting green.
+//
+// So the agent now REPORTS what it saw and decides nothing: which commands it
+// found, and which paths those commands name that are not present at the ref.
+// The drop happens here, where it is visible, testable, and cannot quietly
+// empty a suite.
+function dropCommandsNamingMissingPaths(commands, missingPaths) {
+  const missing = (missingPaths ?? [])
+    .map(path => String(path ?? '').trim())
+    .filter(path => path.length > 0)
+  const kept = []
+  const dropped = []
+  for (const command of commands ?? []) {
+    const text = String(command ?? '').trim()
+    if (text.length === 0) continue
+    // findIndex, not find: find returns the matched string, and an empty-string
+    // path would match every command while reading as falsy — the suite would
+    // be wiped and the guard would look like it had held.
+    const hit = missing.findIndex(path => text.includes(path))
+    if (hit >= 0) dropped.push({ command: text, path: missing[hit] })
+    else kept.push(text)
+  }
+  return { kept, dropped }
+}
+
 // PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
@@ -394,13 +502,13 @@ const detected = await callAgent(`Detect the remaining work on ${repo} milestone
    \`gh issue list --repo ${repo} --milestone "<title>" --label ${labels.story} --state all --json number,title,state\`
 2. For each story, get its blockedBy edges via GraphQL (\`issue { blockedBy(first:50) { nodes { number } } }\`). Report ONLY the numbers — do NOT compute levels or interpret them; that happens in-script. If the repo uses no blockedBy relations, report empty arrays (that is normal, not an error).
 3. For each story, list its sub-issues via \`gh api repos/${repo}/issues/<story number>/sub_issues --jq '.[] | {number, title, state}'\` (the native sub-issue relation). Do NOT substitute \`gh issue list --label ${labels.subtask}\`, which returns every subtask in the milestone with no link back to its parent. Preserve the ORDER THE ENDPOINT RETURNS and report titles VERBATIM — ordering depends on both.
-4. For EACH SUBTASK, find its pull request by head branch, matching on the SUBTASK NUMBER and NOT on the branch prefix. Use the REST endpoint, NOT \`gh pr list\`:
+4. List the repo's pull requests ONCE — not per subtask. Use the REST endpoint, NOT \`gh pr list\`:
    \`gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}'\`
-   Accept a PR for subtask N only if its \`ref\` ENDS WITH N and the character immediately before N is a non-digit — so \`aq-1050\`, \`task-1050\` and \`wip/1050\` all match subtask 1050, while \`task-11050\` does NOT. If several qualify, prefer one whose \`base\` is exactly \`${baseBranch}\`, then the merged one, then the most recent.
-   MATCH ON THE NUMBER, NOT THE PREFIX — deliberate: prefix-exact matching once orphaned every PR merged under an earlier prefix, so finished work was re-dispatched and died on an empty diff (2026-08-18, #1050). Suffix matching makes doneness survive a prefix change; for the same reason NEVER randomise or timestamp \`branchPrefix\`.
-   \`gh pr list\` goes through GraphQL, which returned empty results for genuinely-merged PRs during the 2026-08-17 GitHub incident; REST kept answering. Do NOT use free-text search (\`--search "<n> in:body"\` matches unrelated PRs). Set that subtask's pr to {number, url, state, merged, ref, base} where merged is true ONLY if merged_at is non-null and ref is the head branch verbatim. Always report \`base\` VERBATIM (never blank, never guessed) — the script, not you, decides what a wrong base means. Never infer merged from the issue being closed.
+   Return every PR whose \`ref\` contains ANY of the subtask numbers you listed in step 3, as \`pullRequests\`. That is a LOOSE filter and it is meant to be — report a few extras rather than dropping a real one. Do NOT decide which PR belongs to which subtask, do NOT compare bases, do NOT judge merged-ness: the script does all of that, because getting it subtly wrong once orphaned finished work and re-dispatched it onto an empty diff (2026-08-18, #1050). Copy \`ref\` and \`base\` VERBATIM — never blank, never guessed.
+   \`gh pr list\` goes through GraphQL, which returned empty results for genuinely-merged PRs during the 2026-08-17 GitHub incident; REST kept answering. Do NOT use free-text search (\`--search "<n> in:body"\` matches unrelated PRs).
 
-   **If that command ERRORS or times out** (non-zero exit, 5xx, "no server is currently available"), retry it up to 3 times with a short pause. If it still fails, set that subtask's pr to the string "unknown" — NOT null. null means "this subtask has no PR and is unstarted work"; an API failure is not evidence of that (reporting failures as null re-implemented merged subtasks, 2026-08-17). Report an empty result as null only when the command actually SUCCEEDED and returned nothing.
+   **If that command ERRORS or times out** (non-zero exit, 5xx, "no server is currently available"), retry it up to 3 times with a short pause. If it still fails, set \`prLookupFailed: true\` and return \`pullRequests: []\`. Do NOT return an empty list with prLookupFailed false to mean "the API broke" — an empty list means the command SUCCEEDED and this repo genuinely has no matching PRs, and reporting a failure that way re-implemented merged subtasks once (2026-08-17).
+
 5. Discover this repo's OWN verification commands — do not assume a toolchain.
 
    **Read them as they exist on \`origin/${baseBranch}\`, NOT from ${repoDir}'s working tree.** That checkout can sit on an unrelated branch, and every subtask worktree is cut from \`origin/${baseBranch}\` — so a command discovered from the working tree can name a test file that does not exist where it will actually run. That failure looks exactly like a broken test and stops the whole milestone (observed: a suite command naming a test file added on another branch).
@@ -411,9 +519,9 @@ const detected = await callAgent(`Detect the remaining work on ${repo} milestone
    \`\`\`
    Read whichever exist AT THAT REF: CLAUDE.md, the testing/standards doc it points to, .github/workflows/*, and the project manifest (pyproject.toml / package.json / Makefile / justfile).
 
-   Before returning any command, check every path it names against the \`ls-tree\` listing above. **Drop any command naming a path that is not on \`origin/${baseBranch}\`**, and say which you dropped and why in verificationSource — a command that cannot run there is worse than one fewer command.
-
    Return the exact full-suite command(s) (each separate invocation listed separately if the repo requires tiers to run apart), the typecheck command (empty if none), the lint/format commands (empty array if none), and which file(s) you took them from.
+
+   **Report what exists; decide nothing.** Do NOT drop, edit, or substitute any command. Instead, for every path named by any command you are returning, check it against the \`ls-tree\` listing and return \`missingPaths\`: the paths that are NOT present at \`origin/${baseBranch}\`, verbatim as the command spells them. The script drops the affected commands itself. An earlier version asked you to do the dropping and it dropped every command, leaving an empty suite that made every later check pass while testing nothing.
 
 Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`,
   { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', schema: {
@@ -429,14 +537,16 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
             type: 'object', required: ['number', 'title', 'state'],
             properties: {
               number: { type: 'integer' }, title: { type: 'string' }, state: { type: 'string' },
-              // string is the "unknown" sentinel: the lookup itself failed,
-              // which is NOT the same as "there is no PR" (null).
-              pr: { type: ['object', 'null', 'string'], properties: {
-                number: { type: 'integer' }, url: { type: 'string' },
-                state: { type: 'string' }, merged: { type: 'boolean' },
-                ref: { type: 'string' }, base: { type: 'string' } } },
             } } },
         } } },
+      // The raw list, matched to subtasks in-script by matchPullRequest().
+      prLookupFailed: { type: 'boolean' },
+      pullRequests: { type: 'array', items: {
+        type: 'object', required: ['number', 'ref', 'base'],
+        properties: {
+          number: { type: 'integer' }, url: { type: 'string' }, state: { type: 'string' },
+          merged_at: { type: ['string', 'null'] }, merged: { type: 'boolean' },
+          ref: { type: 'string' }, base: { type: 'string' } } } },
       verification: {
         type: 'object', required: ['fullSuite'],
         properties: {
@@ -444,15 +554,12 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
           typecheck: { type: 'string' },
           lint: { type: 'array', items: { type: 'string' } },
           verificationSource: { type: 'string' },
+          missingPaths: { type: 'array', items: { type: 'string' } },
         } },
     },
   } })
 if (!detected) throw new Error('detect agent died')
 
-// The REST pulls API reports state lowercase ("open"); GitHub's GraphQL and
-// gh's --json report it uppercase. Normalize once so no comparison downstream
-// depends on which path the Detect agent took.
-//
 // Suffix matching is base-blind: a PR opened by mistake against another branch
 // still matches by head ref, and treating it as this subtask's own work is the
 // #1133 bug (PR #1150, head task-1133, base main, rediscovered as done across
@@ -463,6 +570,13 @@ if (!detected) throw new Error('detect agent died')
 // The expected base is per-subtask, not the milestone base: subtask N stacks on
 // N-1, and only a story's FIRST subtask targets the story root. Computed from
 // the full ordered list, so an already-done predecessor still supplies the base.
+// matchPullRequest() needs it, which is why matching happens inside this loop
+// rather than up front.
+const pullRequests = Array.isArray(detected.pullRequests) ? detected.pullRequests : []
+const prLookupFailed = detected.prLookupFailed === true
+if (prLookupFailed) {
+  log('detect: the PR lookup failed after retries — every subtask is treated as unverifiable rather than unstarted')
+}
 const storiesByNumber = new Map(detected.stories.map(story => [story.number, story]))
 assertNoBlockerCycles(detected.stories)
 for (const story of detected.stories) {
@@ -475,19 +589,14 @@ for (const story of detected.stories) {
     throw err
   }
   for (const subtask of story.subtasks ?? []) {
-    if (subtask.pr && typeof subtask.pr === 'object' && subtask.pr.state) {
-      subtask.pr.state = String(subtask.pr.state).toUpperCase()
+    if (prLookupFailed) {
+      subtask.pr = 'unknown'   // the API did not answer — not evidence of anything
+      continue
     }
-    if (subtask.pr && typeof subtask.pr === 'object') {
-      const prBase = String(subtask.pr.base ?? '')
-      const wanted = expectedBases.get(subtask.number) || baseBranch
-      if (!prBase) {
-        subtask.pr = 'unknown'   // base unreported → doneness unverifiable, abort below
-      } else if (prBase !== wanted) {
-        log(`detect: ignoring PR #${subtask.pr.number} for subtask #${subtask.number} — base "${prBase}" is not its stack parent "${wanted}"`)
-        subtask.pr = 'wrong-base'   // rejected, NOT the same as "no PR ever existed" — see isSubtaskDone
-      }
-    }
+    const wanted = expectedBases.get(subtask.number) || baseBranch
+    const { pr, note } = matchPullRequest(subtask.number, pullRequests, wanted)
+    if (note) log(note)
+    subtask.pr = pr
   }
 }
 
@@ -504,8 +613,31 @@ if (unknownPrs.length > 0) {
     + 'Re-run once the GitHub API is answering reliably.')
 }
 
-const verification = detected.verification
-const suiteCmds = (verification.fullSuite || []).filter(Boolean)
+// Detect reports which paths are absent at origin/<base>; the dropping happens
+// here, out loud. Silence is what made the empty-suite bug survive a whole run.
+const rawVerification = detected.verification
+const missingPaths = rawVerification.missingPaths || []
+const suite = dropCommandsNamingMissingPaths(rawVerification.fullSuite, missingPaths)
+const typecheck = dropCommandsNamingMissingPaths(
+  rawVerification.typecheck ? [rawVerification.typecheck] : [], missingPaths)
+const lint = dropCommandsNamingMissingPaths(rawVerification.lint, missingPaths)
+for (const { command, path } of [...suite.dropped, ...typecheck.dropped, ...lint.dropped]) {
+  log(`detect: dropped verification command "${command}" — it names "${path}", which is not on origin/${baseBranch}`)
+}
+if (suite.kept.length === 0 && suite.dropped.length > 0) {
+  // Not fatal here: task.js refuses to run a subtask with no suite, and that is
+  // the right place to stop. Saying so here makes the cause legible instead of
+  // leaving someone to wonder why every subtask blocked at once.
+  log(`detect: WARNING — every full-suite command was dropped as unrunnable at origin/${baseBranch}. `
+    + 'Subtasks will refuse to run rather than verify nothing. Fix the base branch\'s documented test command.')
+}
+const verification = {
+  fullSuite: suite.kept,
+  typecheck: typecheck.kept[0] || '',
+  lint: lint.kept,
+  verificationSource: rawVerification.verificationSource,
+}
+const suiteCmds = verification.fullSuite
 const suiteBlock = suiteCmds.length
   ? suiteCmds.map(command => `  - ${command}`).join('\n')
   : '  (NOT DOCUMENTED — find this repo\'s real full-suite command before claiming anything passes)'
