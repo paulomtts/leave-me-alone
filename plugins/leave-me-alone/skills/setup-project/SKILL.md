@@ -231,6 +231,29 @@ against a base that has never seen the code it depends on.
 
 If the levels, the subtask order, or the targets look wrong, fix the board — not the workflow.
 
+## Skipping the agents entirely
+
+The orchestrator's two agents exist because a Workflow script cannot execute a command — not because
+either decides anything. Both can be handed their answers instead:
+
+```bash
+# steps 1-4 of Detect, deterministically. No model involved.
+node scripts/detect.mjs --repo OWNER/REPO --milestone 12 > state.json
+```
+
+```jsonc
+"state":        { /* the contents of state.json */ },
+"verification": { "fullSuite": ["npm test"], "typecheck": "", "lint": [] },
+"project":      { "id": "PVT_…", "fieldId": "PVTSSF_…", "optionIds": { … } }
+```
+
+Supply all three and the orchestrator dispatches **no agents at all** before it starts work. Supply
+some and it asks only for what is missing — `verification` alone removes about 40% of Detect's
+prompt, and it is the only part of that stage that involves real judgement.
+
+`state` must be freshly generated: it is a snapshot of what is merged and what is open, and a stale
+one will re-dispatch finished work. Regenerate it per run, or omit it and let the agent look.
+
 ## Skipping the id lookup
 
 Resolving `{number: 12}` into node ids costs one agent dispatch per run. The ids never change, so you

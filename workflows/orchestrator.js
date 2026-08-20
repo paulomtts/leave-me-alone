@@ -604,9 +604,20 @@ async function callAgentSoftly(prompt, agentOpts) {
 //
 // Each call passes its phase explicitly, so the progress grouping does not
 // depend on which one happens to be running when phase() was last called.
-const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+// A caller can supply either half and skip that part of the prompt entirely.
+// `state` is what scripts/detect.mjs prints — steps 1-4 done deterministically,
+// no model involved. `verification` is the answer to "how does this repo run
+// its tests", which changes about twice a year and is the one genuinely
+// model-shaped step here. Supply both and this stage makes no call at all.
+const providedState = opts.state && typeof opts.state === 'object' && Array.isArray(opts.state.stories)
+  ? opts.state
+  : null
+const providedVerification = opts.verification && typeof opts.verification === 'object'
+  && Array.isArray(opts.verification.fullSuite)
+  ? opts.verification
+  : null
 
-1. Resolve the milestone title: \`gh api repos/${repo}/milestones/${milestoneNumber} --jq .title\`. Then list its story issues:
+const DETECT_STATE_STEPS = `1. Resolve the milestone title: \`gh api repos/${repo}/milestones/${milestoneNumber} --jq .title\`. Then list its story issues:
    \`gh issue list --repo ${repo} --milestone "<title>" --label ${labels.story} --state all --json number,title,state\`
 2. For each story, get its blockedBy edges via GraphQL (\`issue { blockedBy(first:50) { nodes { number } } }\`). Report ONLY the numbers — do NOT compute levels or interpret them; that happens in-script. If the repo uses no blockedBy relations, report empty arrays (that is normal, not an error).
 3. For each story, list its sub-issues via \`gh api repos/${repo}/issues/<story number>/sub_issues --jq '.[] | {number, title, state}'\` (the native sub-issue relation). Do NOT substitute \`gh issue list --label ${labels.subtask}\`, which returns every subtask in the milestone with no link back to its parent. Preserve the ORDER THE ENDPOINT RETURNS and report titles VERBATIM — ordering depends on both.
@@ -615,9 +626,9 @@ const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone 
    Return every PR whose \`ref\` contains ANY of the subtask numbers you listed in step 3, as \`pullRequests\`. That is a LOOSE filter and it is meant to be — report a few extras rather than dropping a real one. Do NOT decide which PR belongs to which subtask, do NOT compare bases, do NOT judge merged-ness: the script does all of that, because getting it subtly wrong once orphaned finished work and re-dispatched it onto an empty diff (2026-08-18, #1050). Copy \`ref\` and \`base\` VERBATIM — never blank, never guessed.
    \`gh pr list\` goes through GraphQL, which returned empty results for genuinely-merged PRs during the 2026-08-17 GitHub incident; REST kept answering. Do NOT use free-text search (\`--search "<n> in:body"\` matches unrelated PRs).
 
-   **If that command ERRORS or times out** (non-zero exit, 5xx, "no server is currently available"), retry it up to 3 times with a short pause. If it still fails, set \`prLookupFailed: true\` and return \`pullRequests: []\`. Do NOT return an empty list with prLookupFailed false to mean "the API broke" — an empty list means the command SUCCEEDED and this repo genuinely has no matching PRs, and reporting a failure that way re-implemented merged subtasks once (2026-08-17).
+   **If that command ERRORS or times out** (non-zero exit, 5xx, "no server is currently available"), retry it up to 3 times with a short pause. If it still fails, set \`prLookupFailed: true\` and return \`pullRequests: []\`. Do NOT return an empty list with prLookupFailed false to mean "the API broke" — an empty list means the command SUCCEEDED and this repo genuinely has no matching PRs, and reporting a failure that way re-implemented merged subtasks once (2026-08-17).`
 
-5. Discover this repo's OWN verification commands — do not assume a toolchain.
+const detectVerificationStep = index => `${index}. Discover this repo's OWN verification commands — do not assume a toolchain.
 
    **Read them as they exist on \`origin/${baseBranch}\`, NOT from ${repoDir}'s working tree.** That checkout can sit on an unrelated branch, and every subtask worktree is cut from \`origin/${baseBranch}\` — so a command discovered from the working tree can name a test file that does not exist where it will actually run. That failure looks exactly like a broken test and stops the whole milestone (observed: a suite command naming a test file added on another branch).
    \`\`\`
@@ -629,11 +640,20 @@ const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone 
 
    Return the exact full-suite command(s) (each separate invocation listed separately if the repo requires tiers to run apart), the typecheck command (empty if none), the lint/format commands (empty array if none), and which file(s) you took them from.
 
-   **Report what exists; decide nothing.** Do NOT drop, edit, or substitute any command. Instead, for every path named by any command you are returning, check it against the \`ls-tree\` listing and return \`missingPaths\`: the paths that are NOT present at \`origin/${baseBranch}\`, verbatim as the command spells them. The script drops the affected commands itself. An earlier version asked you to do the dropping and it dropped every command, leaving an empty suite that made every later check pass while testing nothing.
+   **Report what exists; decide nothing.** Do NOT drop, edit, or substitute any command. Instead, for every path named by any command you are returning, check it against the \`ls-tree\` listing and return \`missingPaths\`: the paths that are NOT present at \`origin/${baseBranch}\`, verbatim as the command spells them. The script drops the affected commands itself. An earlier version asked you to do the dropping and it dropped every command, leaving an empty suite that made every later check pass while testing nothing.`
+
+const detectSteps = []
+if (!providedState) detectSteps.push(DETECT_STATE_STEPS)
+if (!providedVerification) detectSteps.push(detectVerificationStep(providedState ? 1 : 5))
+
+const detectPromise = detectSteps.length === 0 ? null : callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+
+${detectSteps.join('\n\n')}
 
 Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`,
   { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', schema: {
-    type: 'object', required: ['stories', 'verification'],
+    type: 'object',
+    required: [...(providedState ? [] : ['stories']), ...(providedVerification ? [] : ['verification'])],
     properties: {
       milestoneTitle: { type: 'string' },
       stories: { type: 'array', items: {
@@ -747,10 +767,24 @@ If neither query returned a project, set found=false and say which errors you sa
 // Detect was started before the board lookup; collect it now. A rejection is
 // rethrown with its original error — unlike the board, a failed census means
 // nothing can be dispatched safely.
-const detectOutcome = await detectPromise
-if (detectOutcome.error) throw detectOutcome.error
-const detected = detectOutcome.value
-if (!detected) throw new Error('detect agent died')
+let detected = {}
+if (detectPromise) {
+  const detectOutcome = await detectPromise
+  if (detectOutcome.error) throw detectOutcome.error
+  if (!detectOutcome.value) throw new Error('detect agent died')
+  detected = detectOutcome.value
+} else {
+  log('detect: state and verification both supplied — no census dispatched')
+}
+
+// One name for each half, whoever produced it. Everything below reads these.
+const census = providedState || detected
+if (providedState) {
+  log(`detect: using the state supplied by the caller (${(census.stories || []).length} stories) — no census dispatched`)
+}
+if (!Array.isArray(census.stories)) {
+  throw new Error('orchestrator: no stories to work from — detect returned none and args.state supplied none')
+}
 
 
 // Suffix matching is base-blind: a PR opened by mistake against another branch
@@ -765,22 +799,22 @@ if (!detected) throw new Error('detect agent died')
 // the full ordered list, so an already-done predecessor still supplies the base.
 // matchPullRequest() needs it, which is why matching happens inside this loop
 // rather than up front.
-const pullRequests = Array.isArray(detected.pullRequests) ? detected.pullRequests : []
-const prLookupFailed = detected.prLookupFailed === true
+const pullRequests = Array.isArray(census.pullRequests) ? census.pullRequests : []
+const prLookupFailed = census.prLookupFailed === true
 if (prLookupFailed) {
   log('detect: the PR lookup failed after retries — every subtask is treated as unverifiable rather than unstarted')
 }
-const storiesByNumber = new Map(detected.stories.map(story => [story.number, story]))
-assertNoBlockerCycles(detected.stories)
+const storiesByNumber = new Map(census.stories.map(story => [story.number, story]))
+assertNoBlockerCycles(census.stories)
 for (const note of attachPullRequests(
-  detected.stories, pullRequests, prLookupFailed, branchPrefix, ordinalPattern, baseBranch)) {
+  census.stories, pullRequests, prLookupFailed, branchPrefix, ordinalPattern, baseBranch)) {
   log(note)
 }
 
 // An "unknown" pr means the API did not answer, so doneness is genuinely
 // unknown — guessing either way is wrong (guess "pending" re-implemented
 // merged work twice on 2026-08-17). Stopping costs one re-run.
-const unknownPrs = detected.stories.flatMap(story =>
+const unknownPrs = census.stories.flatMap(story =>
   (story.subtasks ?? []).filter(subtask => subtask.pr === 'unknown')
     .map(subtask => `#${subtask.number} (story #${story.number})`))
 if (unknownPrs.length > 0) {
@@ -792,7 +826,7 @@ if (unknownPrs.length > 0) {
 
 // Detect reports which paths are absent at origin/<base>; the dropping happens
 // here, out loud. Silence is what made the empty-suite bug survive a whole run.
-const rawVerification = detected.verification
+const rawVerification = providedVerification || detected.verification || { fullSuite: [] }
 const missingPaths = rawVerification.missingPaths || []
 const suite = dropCommandsNamingMissingPaths(rawVerification.fullSuite, missingPaths)
 const typecheck = dropCommandsNamingMissingPaths(
@@ -819,12 +853,12 @@ const suiteBlock = suiteCmds.length
   ? suiteCmds.map(command => `  - ${command}`).join('\n')
   : '  (NOT DOCUMENTED — find this repo\'s real full-suite command before claiming anything passes)'
 
-const levels = computeLevels(detected.stories, ordinalPattern)
-log(`milestone #${milestoneNumber} "${detected.milestoneTitle || ''}": ${detected.stories.length} stories, ${levels.length} dependency level(s)`)
+const levels = computeLevels(census.stories, ordinalPattern)
+log(`milestone #${milestoneNumber} "${census.milestoneTitle || ''}": ${census.stories.length} stories, ${levels.length} dependency level(s)`)
 
 if (DRY) {
   return {
-    repo, milestone: milestoneNumber, milestoneTitle: detected.milestoneTitle, baseBranch,
+    repo, milestone: milestoneNumber, milestoneTitle: census.milestoneTitle, baseBranch,
     mode: 'dryRun',
     board: board ? { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds } : null,
     verification,
@@ -845,7 +879,7 @@ if (DRY) {
         }
       }),
     })),
-    alreadyDone: detected.stories.filter(story => remainingSubtasks(story, ordinalPattern).length === 0).map(story => story.number),
+    alreadyDone: census.stories.filter(story => remainingSubtasks(story, ordinalPattern).length === 0).map(story => story.number),
     note: 'dryRun: nothing was dispatched, no board or GitHub write happened. One worktree/branch/PR per SUBTASK, '
       + 'dispatched sequentially within each story. Each PR targets its stack parent (prTargets), NOT the milestone base — '
       + 'verify that column before a real run. Nothing is ever merged.',
