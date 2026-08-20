@@ -436,6 +436,7 @@ test('--json on an all-passing run prints a JSON document and exits 0', async ()
   assert.equal(doc.results[0].path, file)
   assert.equal(doc.results[0].ok, true)
   assert.deepEqual(doc.results[0].violations, [])
+  assert.equal(result.stdout, `${JSON.stringify(doc, null, 2)}\n`)
 })
 
 test('--json on a failing run still prints JSON and exits non-zero', async () => {
