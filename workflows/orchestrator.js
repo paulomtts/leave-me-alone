@@ -571,6 +571,12 @@ const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.
       + 'repo can be checked out anywhere, and no fallback: the census is deterministic or it does '
       + 'not happen. It is run with `bun`.') })()
 
+// Only needed when the board is given as a NUMBER — resolved ids skip the
+// lookup entirely, and unlike a census those are stable config, not a snapshot.
+const projectScript = typeof opts.projectScript === 'string' && opts.projectScript.startsWith('/')
+  ? opts.projectScript
+  : null
+
 const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.startsWith('/')
   ? opts.taskScript
   : (() => { throw new Error(
@@ -708,53 +714,49 @@ if (hasResolvedBoardIds(projectArg)) {
   // skips this dispatch entirely.
   board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
   log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
+} else if (projectArg && Number.isInteger(Number(projectArg.number)) && !projectScript) {
+  log('board DISABLED for this run: `project` was given as a number but args.projectScript is missing, '
+    + 'so there is no deterministic way to resolve its ids (there is no agent fallback). Pass '
+    + 'projectScript as an absolute path to scripts/resolve-project.mjs, or pass the resolved '
+    + '{id, fieldId, optionIds} block instead.')
 } else if (projectArg && Number.isInteger(Number(projectArg.number))) {
   // Softly, because "the board is best-effort" was only half true: a RETURNED
   // failure was logged and the run survived, but a THROWN one (callAgent gives
   // up after one retry) propagated and killed the milestone. Card bookkeeping
   // must never be able to do that.
-  const resolved = await callAgentSoftly(`Read the GitHub Projects v2 configuration for project number ${projectArg.number} owned by "${owner}" (repo ${repo}). Read only — do NOT create, edit, or delete anything, and do NOT create a missing field or option.
+  const resolved = await callAgentSoftly(`Run EXACTLY this command and capture its stdout:
+   bun ${projectScript} --owner ${owner} --number ${projectArg.number} --compact
 
-Try the user-owned query first; if its data is null, try the org-owned one:
-gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
-gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
-
-Report what the query returned and NOTHING else. Do not decide which field or which options are the right ones, do not correct or normalize any name, and do not omit a field because it looks irrelevant — the script matches names itself, exactly, and a name you tidied up on the way through would resolve to a real id for the wrong column.
-
-- found: true if either query returned a project.
-- id: the project's node id ("PVT_..."). title: its title.
-- fields: EVERY single-select field the query listed, verbatim — each with its id, its name exactly as returned, and all of its options' ids and names exactly as returned.
-
-If neither query returned a project, set found=false and say which errors you saw.
+Do NOT modify the command, add flags, substitute a different tool, or run anything else. Do NOT summarize, reformat, pretty-print, truncate or fix the output: it is a single line of JSON that the pipeline parses itself, and any edit you make to it is a bug you are introducing into a deterministic step. The command exits non-zero when it finds no project; that is a normal answer, not a reason to retry or improvise.
+- stdout: its stdout EXACTLY as printed, as one string.
+- error: its stderr, if any.
 
 [cache-buster, ignore: ${nonce}]`,
     { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', schema: {
-      type: 'object', required: ['found'],
-      properties: {
-        found: { type: 'boolean' }, missing: { type: 'string' }, title: { type: 'string' },
-        id: { type: 'string' },
-        fields: { type: 'array', items: {
-          type: 'object', required: ['id', 'name'],
-          properties: {
-            id: { type: 'string' }, name: { type: 'string' },
-            options: { type: 'array', items: {
-              type: 'object', required: ['id', 'name'],
-              properties: { id: { type: 'string' }, name: { type: 'string' } } } },
-          } } },
-      },
+      type: 'object', required: ['stdout'],
+      properties: { stdout: { type: 'string' }, error: { type: 'string' } },
     } })
 
   // Board bookkeeping is not worth failing a milestone over, but a silent
   // downgrade is worse than a loud one.
-  if (!resolved || !resolved.found || !resolved.id) {
-    log(`board DISABLED for this run: ${resolved && resolved.missing ? resolved.missing : 'the project resolver returned no project'} (see the setup-project skill)`)
+  let lookup = null
+  if (resolved) {
+    try {
+      lookup = JSON.parse(String(resolved.stdout ?? ''))
+    } catch (err) {
+      log(`board DISABLED for this run: ${projectScript} returned output that is not JSON (${err.message}). `
+        + `First 200 characters: ${String(resolved.stdout ?? '').slice(0, 200)}`)
+    }
+  }
+  if (!lookup || !lookup.found || !lookup.id) {
+    log(`board DISABLED for this run: ${(lookup && lookup.missing) || (resolved && resolved.error) || 'the project resolver returned no project'} (see the setup-project skill)`)
   } else {
-    const ids = resolveBoardIds(resolved.fields, statusField, optionNames)
+    const ids = resolveBoardIds(lookup.fields, statusField, optionNames)
     if (!ids.ok) {
       log(`board DISABLED for this run: ${ids.missing} (see the setup-project skill)`)
     } else {
-      board = makeBoard(resolved.id, ids.fieldId, ids.optionIds)
-      log(`board resolved: project ${projectArg.number} "${resolved.title || ''}" → ${resolved.id}`)
+      board = makeBoard(lookup.id, ids.fieldId, ids.optionIds)
+      log(`board resolved: project ${projectArg.number} "${lookup.title || ''}" → ${lookup.id}`)
       log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
     }
   }

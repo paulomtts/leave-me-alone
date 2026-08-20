@@ -220,6 +220,7 @@ Workflow({ name: "orchestrator" }, args: {
   nonce: "<current timestamp>", dryRun: true,
   taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
   detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
+  projectScript: "/abs/path/to/leave-me-alone/scripts/resolve-project.mjs",
   project: { number: PROJ }
 })
 ```
@@ -233,18 +234,24 @@ against a base that has never seen the code it depends on.
 
 If the levels, the subtask order, or the targets look wrong, fix the board — not the workflow.
 
-## Making Detect deterministic
+## Making both agents deterministic
 
 The orchestrator's two agents exist because a Workflow script cannot execute a command — not because
-either decides anything. Detect is a **trigger**: it runs one command and hands back its stdout.
+either decides anything. Both are **triggers**: each runs one command and hands back its stdout.
 
 ```jsonc
-"detectScript": "/abs/path/to/leave-me-alone/scripts/detect.mjs"
+"detectScript":  "/abs/path/to/leave-me-alone/scripts/detect.mjs",
+"projectScript": "/abs/path/to/leave-me-alone/scripts/resolve-project.mjs"
 ```
 
-**Required**, like `taskScript`, and for the same reason: this repo can be checked out anywhere. A
-missing or relative path fails at launch. There is no agent-census fallback — the census is
-deterministic or it does not happen. `bun` must be on PATH.
+`detectScript` is **required**, like `taskScript`, and for the same reason: this repo can be checked
+out anywhere. A missing or relative path fails at launch, and there is no agent-census fallback — the
+census is deterministic or it does not happen.
+
+`projectScript` is needed only when `project` is given as a `number`. Pass the resolved ids instead
+and no lookup happens at all. Without either, the board is disabled and the run says so.
+
+`bun` must be on PATH.
 
 The census is also always taken **fresh**. There is deliberately no way to hand over one you took
 earlier: a census is a snapshot of what is merged, and a stale one re-dispatches work that has since
@@ -261,7 +268,7 @@ To inspect a board by hand — or to debug a run that came back wrong — the sa
 
 ```bash
 bun scripts/detect.mjs --repo OWNER/REPO --milestone 12          # human-readable
-bun scripts/detect.mjs --repo OWNER/REPO --milestone 12 --compact
+bun scripts/resolve-project.mjs --owner OWNER --number 13        # ids, ready to paste
 ```
 
 ## Skipping the id lookup

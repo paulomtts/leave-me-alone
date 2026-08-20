@@ -18,32 +18,23 @@
 // genuinely model-shaped task in the stage. Configure it once via
 // `args.verification` instead, or let the agent fall back to discovering it.
 
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { ghRunner, jsonFrom, lastLine, parseNdjson, withRetries, readFlags } from './gh.mjs'
 
-const execFileAsync = promisify(execFile)
-
-// Injectable so the logic below can be tested without a network or a `gh`.
-export async function ghRunner(args) {
-  const { stdout } = await execFileAsync('gh', args, { maxBuffer: 64 * 1024 * 1024 })
-  return stdout
-}
+export { jsonFrom, lastLine, parseNdjson } from './gh.mjs'
 
 export function parseArgs(argv) {
-  const out = { labels: { story: 'story', subtask: 'subtask' } }
-  for (let i = 0; i < argv.length; i += 1) {
-    const [flag, inline] = argv[i].split(/=(.*)/s)
-    const value = inline !== undefined ? inline : argv[i + 1]
-    const consume = () => { if (inline === undefined) i += 1 }
-    if (flag === '--repo') { out.repo = value; consume() }
-    else if (flag === '--milestone') { out.milestone = Number(value); consume() }
-    else if (flag === '--story-label') { out.labels.story = value; consume() }
-    else if (flag === '--subtask-label') { out.labels.subtask = value; consume() }
-    // Compact for machines: the orchestrator's trigger path returns this stdout
-    // through an agent's structured output, and every byte saved is a byte that
-    // cannot be truncated on the way.
-    else if (flag === '--compact') { out.compact = true }
-    else throw new Error(`detect: unknown argument "${argv[i]}"`)
+  const flags = readFlags(argv, {
+    '--repo': 'value', '--milestone': 'value', '--compact': 'boolean',
+    '--story-label': 'value', '--subtask-label': 'value',
+  })
+  const out = {
+    repo: flags['--repo'],
+    milestone: Number(flags['--milestone']),
+    compact: flags['--compact'] === true,
+    labels: {
+      story: flags['--story-label'] ?? 'story',
+      subtask: flags['--subtask-label'] ?? 'subtask',
+    },
   }
   if (typeof out.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
     throw new Error('detect needs --repo owner/name')
@@ -52,35 +43,6 @@ export function parseArgs(argv) {
     throw new Error('detect needs --milestone <positive integer>')
   }
   return out
-}
-
-// `gh api --paginate --jq '.[] | …'` emits one JSON object per line rather than
-// a single array, because concatenated pages would not be valid JSON.
-export function parseNdjson(text) {
-  return String(text ?? '')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line.startsWith('{') || line.startsWith('['))
-    .map(line => JSON.parse(line))
-}
-
-// Tool managers print activation banners into stdout the first time they
-// resolve a binary — `mise ~/.config/mise/config.toml tools: gh@2.97.0` broke
-// the very first real run of this script. That text is not our output, and it
-// is not specific to mise (direnv and nvm do the same), so parse from the first
-// structural character rather than assuming byte zero.
-export function jsonFrom(text) {
-  const raw = String(text ?? '')
-  const start = raw.search(/[[{]/)
-  if (start === -1) throw new Error(`detect: expected JSON, got: ${raw.slice(0, 200).trim() || '(empty)'}`)
-  return JSON.parse(raw.slice(start))
-}
-
-// Same problem for plain-text output: the value we asked for is the LAST line,
-// with any banner above it.
-export function lastLine(text) {
-  const lines = String(text ?? '').split('\n').map(line => line.trim()).filter(Boolean)
-  return lines.length > 0 ? lines[lines.length - 1] : ''
 }
 
 // Deliberately LOOSE — anything whose branch name contains any subtask number.
@@ -93,16 +55,6 @@ export function filterPullRequests(pulls, subtaskNumbers) {
     const ref = String((pull && pull.ref) ?? '')
     return numbers.some(number => ref.includes(number))
   })
-}
-
-async function withRetries(label, attempt, tries = 3) {
-  let last = null
-  for (let i = 0; i < tries; i += 1) {
-    try { return await attempt() } catch (err) { last = err }
-  }
-  const error = new Error(`detect: ${label} failed after ${tries} attempts: ${last && last.message}`)
-  error.cause = last
-  return Promise.reject(error)
 }
 
 export async function detect({ repo, milestone, labels, run = ghRunner }) {
@@ -144,7 +96,7 @@ export async function detect({ repo, milestone, labels, run = ghRunner }) {
   let pullRequests = []
   let prLookupFailed = false
   try {
-    const raw = await withRetries('pull request listing', () => run([
+    const raw = await withRetries('detect: pull request listing', () => run([
       'api', `repos/${repo}/pulls?state=all&per_page=100`, '--paginate',
       '--jq', '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}',
     ]))
