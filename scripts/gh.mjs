@@ -71,9 +71,11 @@ export function truncate(text, max) {
 }
 
 // The mirror of lastLine, for output whose useful value is the FIRST line —
-// an error summary or a one-line `gh` answer, with noise below it.
+// an error summary or a one-line `gh` answer, with noise below it. Blank and
+// whitespace-only lines are not lines for this purpose.
 export function firstLine(text) {
-  return String(text ?? '').split('\n')[0].trim()
+  const lines = String(text ?? '').split('\n').map(line => line.trim()).filter(Boolean)
+  return lines.length > 0 ? lines[0] : ''
 }
 
 export async function withRetries(label, attempt, tries = 3) {

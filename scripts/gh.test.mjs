@@ -79,3 +79,20 @@ test('firstLine turns null and undefined into an empty string', () => {
   assert.equal(firstLine(undefined), '')
   assert.equal(firstLine(), '')
 })
+
+test('leading blank lines are skipped', () => {
+  assert.equal(firstLine('\n\nreal'), 'real')
+  assert.equal(firstLine('\nfirst\nsecond'), 'first')
+})
+
+test('whitespace-only leading lines are skipped', () => {
+  // A line that trims to '' is not "the first line".
+  assert.equal(firstLine('\n\n   \nreal'), 'real')
+  assert.equal(firstLine('\t \nreal\nlast'), 'real')
+})
+
+test('text with no non-empty line is an empty string', () => {
+  assert.equal(firstLine(''), '')
+  assert.equal(firstLine('   '), '')
+  assert.equal(firstLine('\n\n'), '')
+})
