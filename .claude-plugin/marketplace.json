@@ -8,7 +8,7 @@
     {
       "name": "leave-me-alone",
       "source": "./plugins/leave-me-alone",
-      "description": "Personal Claude Code skills: brief, build-containers, dispatch-subagent, explain, setup-project, setup-milestone, setup-report, smoke-test. Includes a hook that auto-allows routine Bash patterns so the auto-mode classifier stops asking every session."
+      "description": "The orchestrator/task Workflow scripts and their deterministic helper scripts, the six purpose-built agent types they dispatch, the setup/explain/smoke skills, and a PreToolUse hook that auto-allows the Bash patterns these routinely need. A SessionStart hook installs the workflows into ~/.claude/workflows/, which plugins cannot distribute natively."
     }
   ]
 }
