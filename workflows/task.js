@@ -368,16 +368,29 @@ If you find any real findings, fix them yourself in the same pass: in ${WORKTREE
 Co-Authored-By: ${coauthor}
 Also run this repo's own lint/format commands and commit any fixes they require, so the tree is clean when you finish. Skip any finding that turns out to be wrong on closer inspection — note why in fixSummary instead of "fixing" it.
 
+FINALLY, once you have finished committing, run these three commands and report their output verbatim. Do not interpret them, do not act on them, and do not change anything in response to them — they are read by the pipeline itself, which decides what they mean:
+\`\`\`
+git -C ${WORKTREE} status --porcelain
+git -C ${WORKTREE} rev-list --count origin/${baseBranch}..HEAD
+PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8); git -C ${WORKTREE} log origin/${baseBranch}..HEAD --format=%B | grep -c "^Plan-Hash: $PLAN_HASH"
+\`\`\`
+
 Return:
 - findings: every finding you raised, severity-tagged, whether or not you went on to fix it (findings=[] if the diff was clean).
 - unresolvedBlockers: ONLY the blocker-severity findings still standing after your fix pass — a blocker you actually fixed, or correctly determined was wrong, does NOT belong here. This list stops the pipeline before the PR opens, so an empty list is a claim that nothing blocker-severity is left in the code.
-- fixSummary: what you fixed vs skipped and why (empty string if findings was empty).`,
+- fixSummary: what you fixed vs skipped and why (empty string if findings was empty).
+- porcelain: the FIRST command's output exactly as printed — empty string if it printed nothing.
+- commitCount: the SECOND command's number.
+- taggedCount: the THIRD command's number.`,
   { label: `review:#${issue}`, phase: 'Review', model: 'opus', schema: {
     type: 'object', required: ['findings'],
     properties: {
       findings: { type: 'array', items: { type: 'string' } },
       unresolvedBlockers: { type: 'array', items: { type: 'string' } },
       fixSummary: { type: 'string' },
+      porcelain: { type: 'string' },
+      commitCount: { type: 'integer' },
+      taggedCount: { type: 'integer' },
     },
   } })
 // Review both raises AND fixes, so a blocker in `findings` may well have been
@@ -388,6 +401,36 @@ const unresolvedBlockers = (review && review.unresolvedBlockers) || []
 if (unresolvedBlockers.length > 0) {
   return { issue, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
     detail: `review left ${unresolvedBlockers.length} unresolved blocker(s): ${unresolvedBlockers.join('; ')}` }
+}
+
+// Two gates that used to be prose in Ship's prompt — "if it is dirty, STOP",
+// "if TAGGED is less than COMMITS, STOP". Both are decisions about numbers and
+// an empty string, so they belong here, in code, where they are deterministic
+// and visible. Review is the last stage that writes, so this is the earliest
+// boundary at which they can be judged, and gating here costs no dispatch:
+// Ship simply never boots.
+//
+// Review is asked to REPORT these, never to interpret or act on them. An agent
+// that both measures and judges can talk itself out of the judgement.
+const porcelain = String((review && review.porcelain) || '').trim()
+if (porcelain.length > 0) {
+  return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `worktree still dirty after review, so the PR would not contain this work (nothing was pushed):\n${porcelain}` }
+}
+
+// Implement decides RESUME vs RESET by grepping for exactly this trailer, so an
+// untagged commit reads as stale debris and a later run would `reset --hard` it
+// away. Catching that here, before anything is pushed, is the whole point.
+const commitCount = Number(review && review.commitCount)
+const taggedCount = Number(review && review.taggedCount)
+if (!Number.isInteger(commitCount) || !Number.isInteger(taggedCount)) {
+  log(`review did not report usable commit/trailer counts (${review && review.commitCount}/${review && review.taggedCount}) — Plan-Hash gate skipped`)
+} else if (commitCount === 0) {
+  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `branch ${BRANCH} has no commits on top of ${baseBranch} — implementation produced nothing to ship.` }
+} else if (taggedCount < commitCount) {
+  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `only ${taggedCount} of ${commitCount} commits on ${BRANCH} carry their Plan-Hash trailer, so a future run would read this branch as stale and hard-reset it. Nothing was pushed. Do NOT re-run this subtask until the trailers are added (interactively, by a human) or the work is otherwise preserved.` }
 }
 
 // ── 6. ship — verify, then push and open the PR (never merge) ───────────────
@@ -404,24 +447,14 @@ if (unresolvedBlockers.length > 0) {
 phase('Ship')
 const ship = await callAgent(`Verify and ship ${repo} subtask #${issue} from ${WORKTREE} (branch ${BRANCH}). These steps are strictly ordered, and the ordering is the whole point: nothing is pushed until everything above it is green.
 
-1. \`git -C ${WORKTREE} status --porcelain\`. A clean worktree is a PRECONDITION here — the stages before you were required to commit their work, and anything uncommitted would be invisible to \`git push\`, absent from the PR, and still affecting the results you are about to report. If it is dirty: STOP, return passed=false and dirty=true with the paths. Do NOT commit, stash, revert, checkout, or clean anything.
-
-2. Check the resume key. Every commit this branch adds on top of ${baseBranch} must carry a \`Plan-Hash:\` trailer — that trailer is how a future run recognises these commits as real work rather than stale debris, and a commit missing it is liable to be \`reset --hard\` away by a later resume. Nothing before you verifies it was actually written, so you are the check:
-   \`\`\`
-   PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)
-   COMMITS=$(git -C ${WORKTREE} rev-list --count origin/${baseBranch}..HEAD)
-   TAGGED=$(git -C ${WORKTREE} log origin/${baseBranch}..HEAD --format=%B | grep -c "^Plan-Hash: $PLAN_HASH")
-   \`\`\`
-   If COMMITS is 0, or TAGGED is less than COMMITS, STOP: return passed=false, planHashOk=false, and say in detail how many of how many commits carry the trailer. Do NOT amend, rebase, reword, or otherwise rewrite history to fix this — the commits are correct work, only their metadata is wrong, and rewriting them here is far more dangerous than reporting it. Do NOT push.
-
-3. Run EVERY verification command below, each as its own invocation:
+1. Run EVERY verification command below, each as its own invocation:
 ${verifyBlock}
-   Report exactly what happened. Do NOT fix, edit, or commit anything — you are the independent check, and a stage that repairs what it measures cannot report on it. Never weaken, skip, xfail, or delete a test to get green. If a command is missing or wrong for this repo, say so in detail rather than substituting one of your own.
+   Report exactly what happened. Do NOT fix, edit, or commit anything — you are the independent check, and a stage that repairs what it measures cannot report on it. Never weaken, skip, xfail, or delete a test to get green. If a command is missing or wrong for this repo, say so in detail rather than substituting one of your own. (The worktree was confirmed clean, and its commits confirmed well-formed, before you were dispatched — you do not need to re-check either.)
 
-4. ONLY if step 2 passed and every command in step 3 exited green: \`git push -u origin ${BRANCH}\`.
+2. ONLY if every command in step 1 exited green: \`git push -u origin ${BRANCH}\`.
    (This branch was created by the /task pipeline for issue #${issue}; pushing it is the pipeline's expected final step. A branch of this name may have been reset earlier in this pipeline — that was deliberate debris reclamation, not resurrecting someone's work.)
 
-5. Then \`gh pr create --repo ${repo} --base ${baseBranch}\` with:
+3. Then \`gh pr create --repo ${repo} --base ${baseBranch}\` with:
    - a title: one conventional-commit-style line describing the branch's work.
    - a body: what changed and why, plus the test count, taken from the implementer's report below — do not re-derive it from the diff. It MUST contain the line "Closes #${issue}" and end with:
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -430,13 +463,11 @@ ${verifyBlock}
 Implementer's report:
 ${clip(impl.report, 6000, 'implementer report')}
 ${board ? `
-6. Once the PR is open, as a final best-effort step (do NOT let its failure change anything you return):
+4. Once the PR is open, as a final best-effort step (do NOT let its failure change anything you return):
 ${boardMoveInstructions('inReview')}` : ''}
 
 Return:
-- passed: true only if step 2's trailer check held AND every command in step 3 exited green.
-- dirty: true only if step 1 found an uncommitted worktree.
-- planHashOk: false only if step 2 found commits missing the trailer. Omit or true otherwise.
+- passed: true only if EVERY command in step 1 exited green.
 - url: the PR's full https URL exactly as \`gh pr create\` printed it. Empty string if you did not open one — which MUST be the case whenever passed=false.
 - detail: what you ran and what failed.
 - blockedReason: only if you pushed but could not open the PR, one line naming what failed.
@@ -445,34 +476,19 @@ Your return is machine-read: never return settings files, permission lists, conf
   { label: `ship:#${issue}`, phase: 'Ship', model: 'haiku', schema: {
     type: 'object', required: ['passed', 'detail'],
     properties: {
-      passed: { type: 'boolean' }, dirty: { type: 'boolean' },
-      planHashOk: { type: 'boolean' },
+      passed: { type: 'boolean' },
       url: { type: 'string' }, detail: { type: 'string' },
       blockedReason: { type: 'string' },
     },
   } })
 if (!ship) throw new Error('ship agent died')
 
-// A missing Plan-Hash trailer is an Implement defect caught at Ship, not a test
-// failure — report it as such so the escalation names the culprit stage. The
-// warning matters more than the label: Implement decides RESUME vs RESET by
-// grepping for exactly this trailer, so an untagged branch reads as stale debris
-// and a plain re-run will `reset --hard` the work away. Catching it here, before
-// anything is pushed, is the whole point of the check.
-if (ship.planHashOk === false) {
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `commits on ${BRANCH} are missing their Plan-Hash trailer, so a future run would read this branch as stale and hard-reset it. Nothing was pushed. Do NOT re-run this subtask until the trailers are added (interactively, by a human) or the work is otherwise preserved. ${ship.detail}` }
-}
-
 // `blocked: 'tests'` is load-bearing: orchestrator.js maps that exact string to
 // escalation trigger 'tests' and everything else to 'blocked', which route
-// differently. A dirty tree is reported as a test failure because that is what
-// it is — results measured against code the PR would not contain.
+// differently. The dirty-tree and Plan-Hash gates that used to live here are
+// now decided in script above, off Review's reported values.
 if (!ship.passed) {
-  return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: ship.dirty
-      ? `worktree left dirty by an earlier stage (nothing was pushed): ${ship.detail}`
-      : ship.detail }
+  return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan, detail: ship.detail }
 }
 
 // gh prints the canonical URL, so this now VALIDATES that shape rather than
