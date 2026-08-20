@@ -123,3 +123,64 @@ test('a push that succeeds but yields no PR URL is reported, not silently passed
   assert.equal(got.number, null)
   assert.match(got.detail, /no usable PR URL/)
 })
+
+// ── retries: reads freely, writes carefully ──────────────────────────────────
+
+const NOWAIT = () => Promise.resolve()
+
+test('a flaky push is retried — pushing the same commits twice is a no-op', async () => {
+  let pushes = 0
+  const run = async (command, opts = {}) => {
+    const joined = Array.isArray(command) ? command.join(' ') : command
+    if (joined.includes('push')) { pushes += 1; if (pushes < 3) throw new Error('HTTP2 framing layer') }
+    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  assert.equal(got.number, 77)
+  assert.equal(pushes, 3)
+})
+
+test('a failed `pr create` does NOT retry — it asks what actually happened', async () => {
+  // A lost response after a successful create would make a blind retry open a
+  // SECOND PR for one branch, leaving the orchestrator two candidates.
+  let creates = 0
+  const run = async (command) => {
+    const joined = Array.isArray(command) ? command.join(' ') : command
+    if (joined.includes('pr create')) { creates += 1; throw new Error('timeout') }
+    if (joined.includes('pulls?state=open')) return { code: 0, stdout: '["https://github.com/o/n/pull/91"]', stderr: '' }
+    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  assert.equal(creates, 1, 'must not retry the mutation')
+  assert.equal(got.number, 91, 'adopts the PR that already exists')
+  assert.match(got.detail, /using it rather than opening a second/)
+})
+
+test('a failed `pr create` with no PR afterwards is reported as a failure', async () => {
+  const run = async (command) => {
+    const joined = Array.isArray(command) ? command.join(' ') : command
+    if (joined.includes('pr create')) throw new Error('permission denied')
+    if (joined.includes('pulls?state=open')) return { code: 0, stdout: '[]', stderr: '' }
+    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  assert.equal(got.number, null)
+  assert.equal(got.pushed, true)
+  assert.match(got.detail, /no PR exists/)
+})
+
+test('verification commands are NEVER retried', async () => {
+  // Retrying a test suite until it passes is how a flaky test ships.
+  let runs = 0
+  const run = async (command) => {
+    const joined = Array.isArray(command) ? command.join(' ') : command
+    if (joined.includes('npm test')) { runs += 1; throw new Error('1 failing') }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  assert.equal(runs, 1)
+  assert.equal(got.passed, false)
+})

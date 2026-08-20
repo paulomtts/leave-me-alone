@@ -68,14 +68,14 @@ export function parseArgs(argv) {
 // refs/remotes/origin/<branch> as a side effect. Only the milestone base comes
 // from the network, and freezing it here is a feature — every story in the run
 // then builds on the same base rather than on whatever landed mid-run.
-export async function prepareCheckout(repoDir, git = gitRunner) {
+export async function prepareCheckout(repoDir, git = gitRunner, wait) {
   if (!repoDir) return false
   // Retried like the PR listing is, and for the same reason: this is a network
   // call, and it is the FIRST thing a run does. An HTTP2 framing flake here
   // killed a whole milestone at Detect — before a single subtask was
   // dispatched — while the identical class of failure on the PR listing was
   // already being absorbed three attempts deep.
-  await withRetries('detect: git fetch', () => git(['-C', repoDir, 'fetch', 'origin']))
+  await withRetries('detect: git fetch', () => git(['-C', repoDir, 'fetch', 'origin']), { wait })
   // Local, so a single attempt is right: a failure here is a real problem with
   // the checkout, not the network, and retrying would just hide it.
   await git(['-C', repoDir, 'worktree', 'prune'])
@@ -94,34 +94,36 @@ export function filterPullRequests(pulls, subtaskNumbers) {
   })
 }
 
-export async function detect({ repo, milestone, labels, repoDir, run = ghRunner, git = gitRunner }) {
+export async function detect({ repo, milestone, labels, repoDir, run = ghRunner, git = gitRunner, wait }) {
   const [owner, name] = repo.split('/')
-  const prepared = await prepareCheckout(repoDir, git)
+  const prepared = await prepareCheckout(repoDir, git, wait)
 
-  const milestoneTitle = lastLine(await run(['api', `repos/${repo}/milestones/${milestone}`, '--jq', '.title']))
+  const milestoneTitle = lastLine(await withRetries('detect: milestone lookup',
+    () => run(['api', `repos/${repo}/milestones/${milestone}`, '--jq', '.title']), { wait }))
   if (!milestoneTitle) throw new Error(`detect: milestone #${milestone} on ${repo} has no title — wrong number or wrong repo?`)
 
-  const storyList = jsonFrom(await run([
+  const storyList = jsonFrom(await withRetries('detect: story list', () => run([
     'issue', 'list', '--repo', repo, '--milestone', milestoneTitle,
     '--label', labels.story, '--state', 'all', '--limit', '200',
     '--json', 'number,title,state',
-  ]))
+  ]), { wait }))
 
   const stories = []
   for (const story of storyList) {
     // An ERROR here is not "no dependencies" — that would be an empty nodes
     // list. Letting a failed query become [] is how a milestone ends up flat,
     // with every story dispatched at once against a base none has built on.
-    const blocked = jsonFrom(await run([
+    const blocked = jsonFrom(await withRetries(`detect: blockedBy for #${story.number}`, () => run([
       'api', 'graphql', '-f',
       'query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){blockedBy(first:50){nodes{number}}}}}',
       '-f', `o=${owner}`, '-f', `r=${name}`, '-F', `n=${story.number}`,
-    ]))
+    ]), { wait }))
     const blockedBy = (blocked?.data?.repository?.issue?.blockedBy?.nodes ?? []).map(node => node.number)
 
     // Order is the stack geometry, so the endpoint's order is preserved exactly
     // and titles are copied verbatim (their ordinal prefixes decide sorting).
-    const subs = jsonFrom(await run(['api', `repos/${repo}/issues/${story.number}/sub_issues`, '--paginate']))
+    const subs = jsonFrom(await withRetries(`detect: sub-issues of #${story.number}`,
+      () => run(['api', `repos/${repo}/issues/${story.number}/sub_issues`, '--paginate']), { wait }))
     const subtasks = subs.map(sub => ({
       number: sub.number, title: sub.title, state: String(sub.state ?? '').toUpperCase(),
     }))
@@ -137,7 +139,7 @@ export async function detect({ repo, milestone, labels, repoDir, run = ghRunner,
     const raw = await withRetries('detect: pull request listing', () => run([
       'api', `repos/${repo}/pulls?state=all&per_page=100`, '--paginate',
       '--jq', '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}',
-    ]))
+    ]), { wait })
     const all = parseNdjson(raw)
     pullRequests = filterPullRequests(all, stories.flatMap(story => story.subtasks.map(sub => sub.number)))
   } catch (err) {

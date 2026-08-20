@@ -62,12 +62,30 @@ export function parseNdjson(text) {
     .map(line => JSON.parse(line))
 }
 
-export async function withRetries(label, attempt, tries = 3) {
+export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+// Every network call goes through this. Retrying with NO pause — which is what
+// this did — is barely a retry at all: a GitHub 5xx, a rate-limit window and an
+// HTTP2 framing fault all outlast three immediate attempts, and the run dies
+// anyway having achieved nothing but three failures in a row.
+//
+// Backoff doubles: 500ms, 1s, 2s, 4s. `wait` is injectable so tests do not
+// sleep.
+//
+// READS only. A retried write can succeed twice — `gh pr create` retried after
+// a lost response opens a second PR — so callers that mutate must check what
+// actually happened instead of blindly repeating themselves.
+export async function withRetries(label, attempt, { tries = 4, baseDelayMs = 500, wait = sleep } = {}) {
   let last = null
   for (let i = 0; i < tries; i += 1) {
-    try { return await attempt() } catch (err) { last = err }
+    try {
+      return await attempt()
+    } catch (err) {
+      last = err
+      if (i < tries - 1) await wait(baseDelayMs * (2 ** i))
+    }
   }
-  const error = new Error(`${label} failed after ${tries} attempts: ${last && last.message}`)
+  const error = new Error(`${label} failed after ${tries} attempts: ${ghError(last)}`)
   error.cause = last
   return Promise.reject(error)
 }

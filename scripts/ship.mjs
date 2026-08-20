@@ -16,7 +16,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { ghError, jsonFrom, lastLine, readFlags } from './gh.mjs'
+import { ghError, jsonFrom, lastLine, readFlags, withRetries } from './gh.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -75,7 +75,7 @@ export function buildBody(commitLines, issue) {
   ].join('\n')
 }
 
-export async function ship(options, run = runner) {
+export async function ship(options, run = runner, wait) {
   const { repo, issue, branch, base, worktree, verify } = options
   const result = { passed: false, verified: [], pushed: false, url: '', number: null, detail: '' }
 
@@ -99,21 +99,40 @@ export async function ship(options, run = runner) {
   }
   result.passed = true
 
-  await run(['git', '-C', worktree, 'push', '-u', 'origin', branch])
+  // Pushing the same commits twice is a no-op, so this retries freely.
+  await withRetries('ship: push', () => run(['git', '-C', worktree, 'push', '-u', 'origin', branch]), { wait })
   result.pushed = true
 
   const issueTitle = options.title
-    || titleFromIssue(jsonFrom(
-      (await run(['gh', 'issue', 'view', String(issue), '--repo', repo, '--json', 'title'])).stdout).title)
+    || titleFromIssue(jsonFrom((await withRetries('ship: issue title',
+      () => run(['gh', 'issue', 'view', String(issue), '--repo', repo, '--json', 'title']), { wait })).stdout).title)
   const subjects = String(
     (await run(['git', '-C', worktree, 'log', `origin/${base}..HEAD`, '--format=%s'])).stdout).split('\n')
 
   // --head EXPLICITLY: without it gh infers the head branch from whatever is
   // checked out in the current directory, and once opened a PR carrying five
   // commits of unrelated work under this subtask's title.
-  const created = await run(['gh', 'pr', 'create', '--repo', repo, '--base', base, '--head', branch,
-    '--title', issueTitle, '--body', buildBody(subjects, issue)])
-  result.url = lastLine(created.stdout)
+  // NOT retried like the reads above. `gh pr create` is a mutation: a lost
+  // response after a successful create means a blind retry opens a SECOND PR
+  // for the same subtask, and the orchestrator would then have two candidates
+  // for one branch. So on failure, ask GitHub what actually happened.
+  let url = ''
+  try {
+    url = lastLine((await run(['gh', 'pr', 'create', '--repo', repo, '--base', base, '--head', branch,
+      '--title', issueTitle, '--body', buildBody(subjects, issue)])).stdout)
+  } catch (err) {
+    const existing = jsonFrom((await withRetries('ship: post-failure PR check',
+      () => run(['gh', 'api', `repos/${repo}/pulls?state=open&per_page=100`,
+        '--jq', `[.[] | select(.head.ref=="${branch}") | .html_url]`]), { wait })).stdout)
+    if (Array.isArray(existing) && existing.length > 0) {
+      url = String(existing[0])
+      result.detail = `pr create reported "${ghError(err)}", but a PR on ${branch} exists — using it rather than opening a second`
+    } else {
+      result.detail = `pr create failed and no PR exists on ${branch}: ${ghError(err)}`
+      return result
+    }
+  }
+  result.url = url
   const match = result.url.match(/\/pull\/(\d+)\b/)
   result.number = match ? Number(match[1]) : null
   if (!result.number) result.detail = `pushed, but no usable PR URL came back: ${result.url.slice(0, 200)}`

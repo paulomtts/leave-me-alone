@@ -13,7 +13,7 @@
 // It creates and reports. It never resets, never deletes, and never commits:
 // deciding RESUME vs RESET needs the plan hash, which does not exist yet.
 
-import { ghRunner, gitRunner, ghError, jsonFrom, readFlags } from './gh.mjs'
+import { ghRunner, gitRunner, ghError, jsonFrom, readFlags, withRetries } from './gh.mjs'
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
@@ -46,7 +46,7 @@ export function branchExists(refList, branch) {
   return String(refList ?? '').split('\n').map(l => l.trim()).filter(Boolean).includes(branch)
 }
 
-export async function prepare(options, git = gitRunner, gh = ghRunner) {
+export async function prepare(options, git = gitRunner, gh = ghRunner, wait) {
   const { repo, branch, base, worktree, repoDir } = options
   const result = { branch, worktree, branchExisted: false, worktreeExisted: false, created: false, openPr: null, commitCount: 0 }
 
@@ -54,8 +54,9 @@ export async function prepare(options, git = gitRunner, gh = ghRunner) {
   // change NOTHING — this is the only place that check happens, and the caller
   // stops on it rather than resetting someone's work.
   try {
-    const open = jsonFrom(await gh(['api', `repos/${repo}/pulls?state=open&per_page=100`,
-      '--jq', `[.[] | select(.head.ref=="${branch}") | .number]`]))
+    const open = jsonFrom(await withRetries('worktree: open-PR check',
+      () => gh(['api', `repos/${repo}/pulls?state=open&per_page=100`,
+        '--jq', `[.[] | select(.head.ref=="${branch}") | .number]`]), { wait }))
     if (Array.isArray(open) && open.length > 0) {
       result.openPr = open[0]
       return result

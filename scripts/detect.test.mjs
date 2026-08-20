@@ -124,23 +124,27 @@ test('a FAILED dependency query stops the run rather than reporting no deps', as
   // [] means "genuinely independent". An error means "we do not know", and
   // letting those collapse is how every story lands at level 0 at once.
   const broken = BASE_ROUTES.map(([n, r]) => n === 'blockedBy' ? [n, new Error('502')] : [n, r])
-  await assert.rejects(() => detect(opts(fakeGh(broken))), /502/)
+  await assert.rejects(() => detect({ ...opts(fakeGh(broken)), wait: () => Promise.resolve() }), /502/)
 })
 
 test('a failed PR listing sets prLookupFailed, NOT an empty list', async () => {
   const broken = BASE_ROUTES.map(([n, r]) => n === 'pulls?state=all' ? [n, new Error('no server available')] : [n, r])
-  const got = await detect(opts(fakeGh(broken)))
+  const got = await detect({ ...opts(fakeGh(broken)), wait: () => Promise.resolve() })
   assert.equal(got.prLookupFailed, true)
   assert.deepEqual(got.pullRequests, [])
   // The stories still came back — a PR outage does not erase the census.
   assert.equal(got.stories.length, 1)
 })
 
-test('the PR listing is retried three times before giving up', async () => {
+test('the PR listing is retried, with a pause between attempts', async () => {
+  // No pause is barely a retry: a 5xx, a rate-limit window and an HTTP2 fault
+  // all outlast three back-to-back attempts.
   const log = []
+  const waits = []
   const broken = BASE_ROUTES.map(([n, r]) => n === 'pulls?state=all' ? [n, new Error('502')] : [n, r])
-  await detect(opts(fakeGh(broken, log)))
-  assert.equal(log.filter(args => args.join(' ').includes('pulls?state=all')).length, 3)
+  await detect({ ...opts(fakeGh(broken, log)), wait: ms => { waits.push(ms); return Promise.resolve() } })
+  assert.equal(log.filter(args => args.join(' ').includes('pulls?state=all')).length, 4)
+  assert.deepEqual(waits, [500, 1000, 2000])   // doubling, and none after the last try
 })
 
 test('it uses the REST pulls endpoint, never `gh pr list`', async () => {
@@ -243,14 +247,14 @@ test('a flaky fetch is retried — it is the first network call of the run', asy
     if (args.includes('fetch')) { attempts += 1; if (attempts < 3) throw new Error('HTTP2 framing layer') }
     return ''
   }
-  const got = await detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git })
+  const got = await detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git, wait: () => Promise.resolve() })
   assert.equal(got.prepared, true)
   assert.equal(attempts, 3)
 })
 
 test('a fetch that never recovers still fails the run', async () => {
   const git = async (args) => { if (args.includes('fetch')) throw new Error('no network'); return '' }
-  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git }), /no network/)
+  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git, wait: () => Promise.resolve() }), /no network/)
 })
 
 test('worktree prune is NOT retried — a failure there is the checkout, not the network', async () => {
@@ -259,6 +263,6 @@ test('worktree prune is NOT retried — a failure there is the checkout, not the
     if (args.includes('prune')) { pruneAttempts += 1; throw new Error('locked') }
     return ''
   }
-  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git }), /locked/)
+  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git, wait: () => Promise.resolve() }), /locked/)
   assert.equal(pruneAttempts, 1)
 })

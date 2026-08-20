@@ -12,7 +12,7 @@
 // declares, it lives in the orchestrator's tested resolveBoardIds(), and there
 // is no reason for two copies of it to exist.
 
-import { ghRunner, ghError, jsonFrom, readFlags } from './gh.mjs'
+import { ghRunner, ghError, jsonFrom, readFlags, withRetries } from './gh.mjs'
 
 const FIELDS = 'id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}'
 
@@ -39,12 +39,13 @@ export function query(scope) {
 // A project belongs to either a user or an organisation, and asking the wrong
 // one returns null rather than an error — so the fallback is a genuine
 // sequence, not a guess.
-export async function resolveProject({ owner, number, run = ghRunner }) {
+export async function resolveProject({ owner, number, run = ghRunner, wait }) {
   const attempts = []
   for (const scope of ['user', 'organization']) {
     let payload
     try {
-      payload = jsonFrom(await run(['api', 'graphql', '-f', `query=${query(scope)}`, '-f', `o=${owner}`, '-F', `n=${number}`]))
+      payload = jsonFrom(await withRetries(`resolve: ${scope} project lookup`,
+        () => run(['api', 'graphql', '-f', `query=${query(scope)}`, '-f', `o=${owner}`, '-F', `n=${number}`]), { wait }))
     } catch (err) {
       attempts.push(`${scope}: ${ghError(err)}`)
       continue

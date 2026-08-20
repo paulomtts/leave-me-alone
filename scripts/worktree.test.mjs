@@ -72,7 +72,7 @@ test('a live PR stops everything before a single git command runs', async () => 
 
 test('a failed PR lookup is reported, not treated as "no PR"', async () => {
   // "The API did not answer" and "the branch is clear" must stay distinct.
-  const got = await prepare(opts(), gitFake([['rev-list', '0\n']]), async () => { throw new Error('502 bad gateway') })
+  const got = await prepare(opts(), gitFake([['rev-list', '0\n']]), async () => { throw new Error('502 bad gateway') }, () => Promise.resolve())
   assert.match(got.prLookupError, /502/)
   assert.equal(got.openPr, null)
   assert.equal(got.created, true)

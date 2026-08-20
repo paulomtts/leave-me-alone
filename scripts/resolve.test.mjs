@@ -21,7 +21,7 @@ const fakeGh = (byScope) => async (args) => {
   return JSON.stringify({ data: { [scope]: reply ? { projectV2: reply } : null } })
 }
 
-const opts = (run) => ({ owner: 'you', number: 13, run })
+const opts = (run) => ({ owner: 'you', number: 13, run, wait: () => Promise.resolve() })
 
 // ── parseArgs ────────────────────────────────────────────────────────────────
 

@@ -1,0 +1,3 @@
+# Worktrees the task workflow creates. They are full checkouts of this same
+# repo — never repo content.
+.claude/
