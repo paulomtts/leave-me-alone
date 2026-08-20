@@ -257,6 +257,61 @@ function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }
   return { escalated: true, level, story, subtask, pr, trigger, baseBranch, attempts: attempts ?? [], message }
 }
 
+// ── board ids ───────────────────────────────────────────────────────────────
+// Turning a project NUMBER into the opaque node ids the mutation API needs.
+// The two GraphQL queries are the agent's job; deciding which field and which
+// options they name is not.
+//
+// This used to be prose: "find the single-select field named exactly X and the
+// options named exactly A, B, C, D". That is string equality handed to a model
+// trained to be helpful about near misses — and "In Progress" vs "In progress"
+// is exactly the mismatch the setup skill warns about. A model that helpfully
+// matched it would return a valid-looking option id for the WRONG column, the
+// mutation would succeed, and cards would land in the wrong place all run with
+// nothing able to notice: the ids are opaque, so there is no later check that
+// could catch it.
+function resolveBoardIds(fields, statusField, optionNames) {
+  const list = Array.isArray(fields) ? fields : []
+  const named = value => `"${String(value ?? '')}"`
+  const loose = value => String(value ?? '').trim().toLowerCase()
+
+  const field = list.find(entry => entry && entry.name === statusField)
+  if (!field) {
+    // A near miss is the likely cause, so name it rather than saying "missing".
+    const near = list.find(entry => entry && loose(entry.name) === loose(statusField))
+    return { ok: false, missing: near
+      ? `no field named exactly ${named(statusField)} — the closest is ${named(near.name)}. Names are matched exactly, case and spacing included.`
+      : `no single-select field named ${named(statusField)} (present: ${list.map(entry => named(entry && entry.name)).join(', ') || 'none'})` }
+  }
+  if (!field.id) return { ok: false, missing: `field ${named(statusField)} was reported without an id` }
+
+  const options = Array.isArray(field.options) ? field.options : []
+  const optionIds = {}
+  const missing = []
+  for (const [key, wanted] of Object.entries(optionNames)) {
+    const option = options.find(entry => entry && entry.name === wanted && entry.id)
+    if (option) { optionIds[key] = option.id; continue }
+    const near = options.find(entry => entry && loose(entry.name) === loose(wanted))
+    missing.push(near ? `${named(wanted)} (found ${named(near.name)})` : named(wanted))
+  }
+  if (missing.length > 0) {
+    return { ok: false, missing: `field ${named(statusField)} is missing option(s): ${missing.join(', ')}. `
+      + `Present: ${options.map(entry => named(entry && entry.name)).join(', ') || 'none'}. Names are matched exactly, case and spacing included.` }
+  }
+  return { ok: true, fieldId: field.id, optionIds }
+}
+
+// Ids never change, so a caller that already has them can skip the lookup
+// dispatch entirely. All four options must be present: a partial block would
+// disable exactly one column's moves and look like it worked.
+function hasResolvedBoardIds(projectArg) {
+  if (!projectArg || typeof projectArg !== 'object') return false
+  const ids = projectArg.optionIds
+  const filled = value => typeof value === 'string' && value.length > 0
+  if (!filled(projectArg.id) || !filled(projectArg.fieldId) || !ids || typeof ids !== 'object') return false
+  return ['backlog', 'inProgress', 'inReview', 'done'].every(key => filled(ids[key]))
+}
+
 // ── which PR belongs to a subtask ───────────────────────────────────────────
 // This was ~700 characters of prose in Detect's prompt, executed per subtask by
 // a haiku agent. It is pure string and number logic, and it is the exact rule
@@ -531,34 +586,68 @@ async function callAgent(prompt, agentOpts) {
 // ── 1. Configure — board ids BY NAME ────────────────────────────────────────
 phase('Configure')
 let board = null
-if (projectArg && Number.isInteger(Number(projectArg.number))) {
-  const resolved = await callAgent(`Resolve GitHub Projects v2 ids for project number ${projectArg.number} owned by "${owner}" (repo ${repo}). Read only — do NOT create, edit, or delete anything, and do NOT create a missing field or option.
+const makeBoard = (id, fieldId, optionIds) =>
+  ({ id, fieldId, optionIds, optionNames, statusField, number: projectArg && projectArg.number })
 
-1. Try the user-owned query first; if its data is null, try the org-owned one:
+if (hasResolvedBoardIds(projectArg)) {
+  // Nothing to look up. Ids are stable for the life of a board, so a caller
+  // that has them (from a previous run's log, or the setup-project skill)
+  // skips this dispatch entirely.
+  board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
+  log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
+} else if (projectArg && Number.isInteger(Number(projectArg.number))) {
+  const resolved = await callAgent(`Read the GitHub Projects v2 configuration for project number ${projectArg.number} owned by "${owner}" (repo ${repo}). Read only — do NOT create, edit, or delete anything, and do NOT create a missing field or option.
+
+Try the user-owned query first; if its data is null, try the org-owned one:
 gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
 gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
-2. Find the single-select field named exactly "${statusField}" and inside it the options named exactly: ${Object.entries(optionNames).map(([key, value]) => `${key}="${value}"`).join(', ')}.
-3. Return the project id, field id, and the four option ids. If the field or ANY option is missing, return found=false naming exactly what is missing.
+
+Report what the query returned and NOTHING else. Do not decide which field or which options are the right ones, do not correct or normalize any name, and do not omit a field because it looks irrelevant — the script matches names itself, exactly, and a name you tidied up on the way through would resolve to a real id for the wrong column.
+
+- found: true if either query returned a project.
+- id: the project's node id ("PVT_..."). title: its title.
+- fields: EVERY single-select field the query listed, verbatim — each with its id, its name exactly as returned, and all of its options' ids and names exactly as returned.
+
+If neither query returned a project, set found=false and say which errors you saw.
 
 [cache-buster, ignore: ${nonce}]`,
     { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', schema: {
       type: 'object', required: ['found'],
       properties: {
         found: { type: 'boolean' }, missing: { type: 'string' }, title: { type: 'string' },
-        id: { type: 'string' }, fieldId: { type: 'string' },
-        optionIds: { type: 'object', properties: {
-          backlog: { type: 'string' }, inProgress: { type: 'string' },
-          inReview: { type: 'string' }, done: { type: 'string' } } },
+        id: { type: 'string' },
+        fields: { type: 'array', items: {
+          type: 'object', required: ['id', 'name'],
+          properties: {
+            id: { type: 'string' }, name: { type: 'string' },
+            options: { type: 'array', items: {
+              type: 'object', required: ['id', 'name'],
+              properties: { id: { type: 'string' }, name: { type: 'string' } } } },
+          } } },
       },
     } })
-  if (!resolved || !resolved.found) {
-    // Board bookkeeping is not worth failing a milestone over, but a silent
-    // downgrade is worse than a loud one.
-    log(`board DISABLED for this run: ${resolved ? resolved.missing : 'project resolver died'} (see the github-project-setup skill)`)
+
+  // Board bookkeeping is not worth failing a milestone over, but a silent
+  // downgrade is worse than a loud one.
+  if (!resolved || !resolved.found || !resolved.id) {
+    log(`board DISABLED for this run: ${resolved && resolved.missing ? resolved.missing : 'the project resolver returned no project'} (see the setup-project skill)`)
   } else {
-    board = { id: resolved.id, fieldId: resolved.fieldId, optionIds: resolved.optionIds, optionNames, statusField, number: projectArg.number }
-    log(`board resolved: project ${projectArg.number} "${resolved.title || ''}" → ${resolved.id}`)
+    const ids = resolveBoardIds(resolved.fields, statusField, optionNames)
+    if (!ids.ok) {
+      log(`board DISABLED for this run: ${ids.missing} (see the setup-project skill)`)
+    } else {
+      board = makeBoard(resolved.id, ids.fieldId, ids.optionIds)
+      log(`board resolved: project ${projectArg.number} "${resolved.title || ''}" → ${resolved.id}`)
+      log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
+    }
   }
+} else if (projectArg) {
+  // Reachable when `project` is present but is neither a resolvable number nor
+  // a complete id block. Previously this fell through to the boardless branch
+  // and logged "boardless: true" at someone who never asked for it.
+  log('board DISABLED for this run: `project` was passed without a usable `number` and without a complete '
+    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other, '
+    + 'or pass boardless: true to run without a board on purpose.')
 } else {
   log('boardless: true — running issues and PRs only, no card moves')
 }

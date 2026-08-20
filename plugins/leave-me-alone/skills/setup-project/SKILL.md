@@ -231,13 +231,33 @@ against a base that has never seen the code it depends on.
 
 If the levels, the subtask order, or the targets look wrong, fix the board — not the workflow.
 
+## Skipping the id lookup
+
+Resolving `{number: 12}` into node ids costs one agent dispatch per run. The ids never change, so you
+can hand them over instead and skip it. Every successful run logs them ready to paste:
+
+```
+board ids for reuse — pass these back to skip this lookup next run: {"id":"PVT_…","fieldId":"PVTSSF_…","optionIds":{…}}
+```
+
+```jsonc
+"project": { "id": "PVT_…", "fieldId": "PVTSSF_…",
+             "optionIds": { "backlog": "…", "inProgress": "…", "inReview": "…", "done": "…" } }
+```
+
+All four option ids must be present — a partial block is rejected rather than half-applied, because
+disabling exactly one column's moves looks like it worked. Column names are matched **in the script,
+exactly**, so a board renamed since you copied the ids will move cards to whatever those ids now
+point at: re-resolve from `number` after any column change.
+
 ## Gotchas
 
 | Trap | Reality |
 |---|---|
 | Passing `PVT_…` as `project.number` | `number` is the small integer from the URL. The node id is resolved for you. |
 | Renaming Status options on a populated board | Option replacement wipes every item's Status. Re-set each card afterwards. |
-| `In Progress` vs `In progress` | Matched exactly. Mismatch → the workflow disables the board and logs why. |
+| `In Progress` vs `In progress` | Matched exactly, in the script — not by an agent. A mismatch disables the board and logs both strings, rather than resolving to a real id for the wrong column. |
+| Passing `project` with neither a `number` nor a complete id block | The board is disabled and the run says so. It no longer reports this as `boardless: true`, which it never was. |
 | Body checklists instead of sub-issues | `sub_issues` returns empty → `task` refuses the story as having nothing to sequence. |
 | Adding cards to the board later | Cards missing at resolve time are reported, never auto-added. |
 | Expecting a card per PR | One PR per **subtask**. Each subtask's card goes "In review" when its own PR opens. |
