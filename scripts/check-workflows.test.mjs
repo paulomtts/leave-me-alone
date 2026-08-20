@@ -494,3 +494,54 @@ test('--json works after the target path as well as before it', async () => {
   assert.equal(after.code, 0, `expected exit 0, got ${after.code}\n${after.stderr}`)
   assert.deepEqual(JSON.parse(after.stdout), JSON.parse(before.stdout))
 })
+
+test('--quiet suppresses the FAIL diagnostics on a failing run', async () => {
+  const file = await fixture('broken.js', BROKEN_WORKFLOW)
+  const result = await runChecker(['--quiet', file])
+  assert.equal(result.code, 1, `expected exit 1, got ${result.code}\n${result.stderr}`)
+  assert.ok(!result.stderr.includes('FAIL '), `unexpected FAIL line:\n${result.stderr}`)
+  assert.equal(result.stderr, '', `expected empty stderr, got:\n${result.stderr}`)
+})
+
+test('--quiet still prints the summary line', async () => {
+  const broken = await fixture('broken.js', BROKEN_WORKFLOW)
+  const valid = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker(['--quiet', broken, valid])
+  assert.equal(result.code, 1, `expected exit 1, got ${result.code}\n${result.stderr}`)
+  assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
+  assert.equal(result.stdout, 'checked 2 workflow script(s); 1 failed\n')
+})
+
+test('--quiet leaves exit codes unchanged', async () => {
+  const valid = await fixture('valid.js', VALID_WORKFLOW)
+  const passing = await runChecker(['--quiet', valid])
+  assert.equal(passing.code, 0, `expected exit 0, got ${passing.code}\n${passing.stderr}`)
+  assert.match(passing.stdout, /checked 1 workflow script\(s\); 0 failed/)
+
+  const broken = await fixture('broken.js', BROKEN_WORKFLOW)
+  const failing = await runChecker(['--quiet', broken])
+  assert.equal(failing.code, 1, `expected exit 1, got ${failing.code}\n${failing.stdout}`)
+})
+
+test('--quiet is consumed as a flag, never treated as a target path', async () => {
+  const result = await runChecker(['--quiet'])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.match(result.stdout, /checked 2 workflow script\(s\); 0 failed/)
+  assert.ok(!result.stdout.includes('--quiet'), `unexpected flag in output:\n${result.stdout}`)
+})
+
+test('--quiet works after the target path as well as before it', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const before = await runChecker(['--quiet', file])
+  const after = await runChecker([file, '--quiet'])
+  assert.equal(after.code, before.code, 'flag order must not change the exit code')
+  assert.equal(after.stdout, before.stdout)
+  assert.equal(after.stderr, '')
+})
+
+test('repeated --quiet is harmless', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker(['--quiet', '--quiet', file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.match(result.stdout, /checked 1 workflow script\(s\); 0 failed/)
+})

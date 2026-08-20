@@ -192,9 +192,15 @@ if (invokedDirectly) {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
   const args = process.argv.slice(2)
   const json = args.includes('--json')
-  const paths = args.filter((arg) => arg !== '--json')
+  const quiet = args.includes('--quiet')
+  const paths = args.filter((arg) => arg !== '--json' && arg !== '--quiet')
   const targets = paths.length ? paths : await listWorkflowScripts(path.join(repoRoot, 'workflows'))
-  const results = await checkWorkflows(targets, json ? () => {} : undefined)
+  // `--json` wins over `--quiet`: JSON mode already drops both the FAIL lines and
+  // the summary, so it is strictly quieter, and its document is the payload the
+  // caller asked for — silencing it would leave nothing but an exit code. Both
+  // modes suppress the per-file diagnostics with the same no-op `report`;
+  // passing `undefined` keeps `checkWorkflows`'s `console.error` default.
+  const results = await checkWorkflows(targets, json || quiet ? () => {} : undefined)
   const failed = results.filter((r) => !r.ok)
   if (json) {
     console.log(JSON.stringify(toJsonReport(results), null, 2))
