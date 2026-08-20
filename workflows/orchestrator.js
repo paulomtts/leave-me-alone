@@ -697,7 +697,7 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
               number: { type: 'integer' }, title: { type: 'string' }, state: { type: 'string' },
             } } },
         } } },
-      // The raw list, matched to subtasks in-script by matchPullRequest().
+      // The raw list, matched to subtasks in-script by matchPr().
       prLookupFailed: { type: 'boolean' },
       pullRequests: { type: 'array', items: {
         type: 'object', required: ['number', 'ref', 'base'],
