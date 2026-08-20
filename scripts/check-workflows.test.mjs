@@ -189,3 +189,57 @@ test('the checker never executes the module body', async () => {
   assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
   assert.doesNotMatch(result.stdout + result.stderr, /should not run/)
 })
+
+function metaOnly(body) {
+  return `export const meta = {\n${body}\n}\n\nreturn { ok: true }\n`
+}
+
+test('meta with no name fails', async () => {
+  const file = await fixture('no-name.js', metaOnly(`  description: 'has no name',`))
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, /meta\.name must be a non-empty string/)
+})
+
+test('meta with an empty or blank name fails', async () => {
+  for (const value of ["''", "'   '"]) {
+    const file = await fixture('blank-name.js', metaOnly(`  name: ${value},\n  description: 'ok',`))
+    const result = await runChecker([file])
+    assert.notEqual(result.code, 0, `expected a non-zero exit code for name ${value}`)
+    assert.match(result.stdout + result.stderr, /meta\.name must be a non-empty string/)
+  }
+})
+
+test('meta with a non-string name fails', async () => {
+  const file = await fixture('number-name.js', metaOnly(`  name: 42,\n  description: 'ok',`))
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, /meta\.name must be a non-empty string/)
+})
+
+test('meta with a missing or empty description fails', async () => {
+  for (const body of [`  name: 'ok',`, `  name: 'ok',\n  description: '',`]) {
+    const file = await fixture('bad-description.js', metaOnly(body))
+    const result = await runChecker([file])
+    assert.notEqual(result.code, 0, `expected a non-zero exit code for body ${body}`)
+    assert.match(result.stdout + result.stderr, /meta\.description must be a non-empty string/)
+  }
+})
+
+test('a file missing both name and description reports both, and counts as one failure', async () => {
+  const file = await fixture('bare-meta.js', metaOnly(`  phases: [],`))
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  const output = result.stdout + result.stderr
+  assert.match(output, /meta\.name must be a non-empty string/)
+  assert.match(output, /meta\.description must be a non-empty string/)
+  assert.match(result.stdout, /checked 1 workflow script\(s\); 1 failed/)
+})
+
+test('a meta-invalid file does not stop later files or inflate the failure count', async () => {
+  const bad = await fixture('bare-meta.js', metaOnly(`  phases: [],`))
+  const valid = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker([bad, valid])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
+})

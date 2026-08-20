@@ -103,6 +103,10 @@ export function hasImpureSyntax(literal) {
   return false
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
 export function validateMeta(source) {
   if (!EXPORT_META_RE.test(source)) return ['missing top-level "export const meta"']
   const literal = extractMetaLiteral(source)
@@ -114,7 +118,13 @@ export function validateMeta(source) {
     return [IMPURE_META]
   }
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return [IMPURE_META]
-  return []
+
+  const errors = []
+  if (!isNonEmptyString(meta.name)) errors.push('meta.name must be a non-empty string')
+  if (!isNonEmptyString(meta.description)) {
+    errors.push('meta.description must be a non-empty string')
+  }
+  return errors
 }
 
 export async function checkFile(file) {
