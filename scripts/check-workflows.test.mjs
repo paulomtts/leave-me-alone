@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { checkFile } from './check-workflows.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -328,4 +329,27 @@ test('meta built with a spread of an inline object literal is rejected as impure
   const result = await runChecker([file])
   assert.notEqual(result.code, 0, 'expected a non-zero exit code')
   assert.match(result.stdout + result.stderr, IMPURE_MESSAGE)
+})
+
+test('checkFile collects every violation and joins them into the back-compat error string', async () => {
+  const file = await fixture('bare-meta.js', metaOnly(`  phases: [],`))
+  const result = await checkFile(file)
+  assert.equal(result.file, file)
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.errors, [
+    'meta.name must be a non-empty string',
+    'meta.description must be a non-empty string',
+  ])
+  assert.equal(
+    result.error,
+    'meta.name must be a non-empty string; meta.description must be a non-empty string',
+  )
+})
+
+test('checkFile reports a passing file with no violations and a null error', async () => {
+  const file = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await checkFile(file)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.errors, [])
+  assert.equal(result.error, null)
 })
