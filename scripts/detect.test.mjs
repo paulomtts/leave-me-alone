@@ -233,3 +233,32 @@ test('--repo-dir must be absolute', () => {
   assert.equal(parseArgs(['--repo=a/b', '--milestone=1']).repoDir, undefined)
   assert.throws(() => parseArgs(['--repo=a/b', '--milestone=1', '--repo-dir=rel']), /absolute/)
 })
+
+test('a flaky fetch is retried — it is the first network call of the run', async () => {
+  // An HTTP2 framing error here killed a milestone at Detect, before any
+  // subtask was dispatched, while the same class of failure on the PR listing
+  // was already absorbed three attempts deep.
+  let attempts = 0
+  const git = async (args) => {
+    if (args.includes('fetch')) { attempts += 1; if (attempts < 3) throw new Error('HTTP2 framing layer') }
+    return ''
+  }
+  const got = await detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git })
+  assert.equal(got.prepared, true)
+  assert.equal(attempts, 3)
+})
+
+test('a fetch that never recovers still fails the run', async () => {
+  const git = async (args) => { if (args.includes('fetch')) throw new Error('no network'); return '' }
+  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git }), /no network/)
+})
+
+test('worktree prune is NOT retried — a failure there is the checkout, not the network', async () => {
+  let pruneAttempts = 0
+  const git = async (args) => {
+    if (args.includes('prune')) { pruneAttempts += 1; throw new Error('locked') }
+    return ''
+  }
+  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo', git }), /locked/)
+  assert.equal(pruneAttempts, 1)
+})

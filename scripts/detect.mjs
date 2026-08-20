@@ -70,7 +70,14 @@ export function parseArgs(argv) {
 // then builds on the same base rather than on whatever landed mid-run.
 export async function prepareCheckout(repoDir, git = gitRunner) {
   if (!repoDir) return false
-  await git(['-C', repoDir, 'fetch', 'origin'])
+  // Retried like the PR listing is, and for the same reason: this is a network
+  // call, and it is the FIRST thing a run does. An HTTP2 framing flake here
+  // killed a whole milestone at Detect — before a single subtask was
+  // dispatched — while the identical class of failure on the PR listing was
+  // already being absorbed three attempts deep.
+  await withRetries('detect: git fetch', () => git(['-C', repoDir, 'fetch', 'origin']))
+  // Local, so a single attempt is right: a failure here is a real problem with
+  // the checkout, not the network, and retrying would just hide it.
   await git(['-C', repoDir, 'worktree', 'prune'])
   return true
 }
