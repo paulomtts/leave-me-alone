@@ -10,11 +10,11 @@ Each entry below is one export of `scripts/gh.mjs`, in the order it appears in t
 
 **Takes** `args`, an array of argument strings for the `gh` CLI. **Returns** a promise resolving to the command's `stdout` as a string; rejects with the `execFile` error when `gh` exits non-zero. Runs through `execFile` with a 64 MB `maxBuffer`, because a paginated `gh api` response is far larger than Node's default cap.
 
-**Why:** it is the injectable seam. Every helper script takes its runner as a parameter defaulting to this one, so the logic above it can be unit-tested without a network.
+**Why:** it is the injectable seam. The scripts that call `gh` (`detect.mjs`, `resolve.mjs`, `worktree.mjs`) take their runner as a parameter defaulting to this one, so the logic above it can be unit-tested without a network. (`ship.mjs` shells out through its own local `runner`, because it also has to run arbitrary verification commands.)
 
 ### `ghError(err)`
 
-**Takes** `err`, a rejected `execFile` error. **Returns** the first non-blank line of its `stderr`; when there is no usable `stderr`, the first line of `err.message`; when there is neither, `'unknown error'`.
+**Takes** `err`, a rejected `execFile` error. **Returns** the first non-blank line of its `stderr`; when there is no usable `stderr`, the first line of `err.message` — or of the thrown value itself when it has no `message` (a thrown string, say); when there is nothing at all, `'unknown error'`.
 
 **Why:** `execFile`'s own message is `Command failed: <the entire command>\n<stderr>`, which for a GraphQL query buries the actual error under a couple hundred characters of query text. The useful part is almost always the first line of stderr.
 
@@ -26,7 +26,7 @@ Each entry below is one export of `scripts/gh.mjs`, in the order it appears in t
 
 ### `jsonFrom(text)`
 
-**Takes** `text`, captured stdout. **Returns** the parsed value, `JSON.parse`d from the first `[` or `{` onwards. **Throws** `expected JSON, got: <first 200 characters, trimmed>` when the text contains no structural character at all — or `expected JSON, got: (empty)` when there is nothing to quote.
+**Takes** `text`, captured stdout. **Returns** the parsed value, `JSON.parse`d from the first `[` or `{` onwards. **Throws** `expected JSON, got: <first 200 characters, trimmed>` when the text contains no structural character at all — or `expected JSON, got: (empty)` when there is nothing to quote. A `JSON.parse` failure on the sliced remainder propagates unchanged.
 
 **Why:** tool managers print activation banners into stdout the first time they resolve a binary — `mise ~/.config/mise/config.toml tools: gh@2.97.0` broke the very first real run of `detect.mjs`. That text is not our output, and it is not specific to mise (direnv and nvm do the same), so parsing starts at the first structural character rather than assuming byte zero.
 
