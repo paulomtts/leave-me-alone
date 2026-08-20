@@ -164,10 +164,18 @@ function assertNoBlockerCycles(stories) {
   for (const story of stories) walk(story.number, [])
 }
 
+// A subtask's branch is DERIVED, never discovered. The issue number is
+// immutable, unique within the repo, and already the identity everything else
+// uses, so branch = prefix + number is reproducible from the graph alone and
+// needs no lookup.
+//
+// An earlier version preferred a PR's real head ref, to survive a run whose
+// branchPrefix had changed. That made the geometry depend on the PRs and the
+// PR matching depend on the geometry — a circularity that produced two separate
+// bugs in one afternoon. Determinism is worth more than that resilience, so the
+// prefix is now treated as part of the milestone's identity: matchPr() reports
+// a merged PR under some OTHER name rather than silently ignoring it.
 function subtaskBranch(subtask, branchPrefix) {
-  // Prefer a PR's real head ref: a resumed stack may carry an older prefix, and
-  // the branch that actually exists is the one the next subtask must target.
-  if (subtask.pr && typeof subtask.pr === 'object' && subtask.pr.ref) return subtask.pr.ref
   return `${branchPrefix}${subtask.number}`
 }
 
@@ -248,6 +256,214 @@ function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }
   const message = `orchestrator STOPPED: story #${story} subtask #${subtask} (level ${level}) could not be dispatched/verified against ${baseBranch} — trigger: ${trigger}. Nothing was merged; this run opens stacked PRs only. ${(attempts ?? []).length} note(s) recorded.`
   return { escalated: true, level, story, subtask, pr, trigger, baseBranch, attempts: attempts ?? [], message }
 }
+
+// ── board ids ───────────────────────────────────────────────────────────────
+// Turning a project NUMBER into the opaque node ids the mutation API needs.
+// The two GraphQL queries are the agent's job; deciding which field and which
+// options they name is not.
+//
+// This used to be prose: "find the single-select field named exactly X and the
+// options named exactly A, B, C, D". That is string equality handed to a model
+// trained to be helpful about near misses — and "In Progress" vs "In progress"
+// is exactly the mismatch the setup skill warns about. A model that helpfully
+// matched it would return a valid-looking option id for the WRONG column, the
+// mutation would succeed, and cards would land in the wrong place all run with
+// nothing able to notice: the ids are opaque, so there is no later check that
+// could catch it.
+function resolveBoardIds(fields, statusField, optionNames) {
+  const list = Array.isArray(fields) ? fields : []
+  const named = value => `"${String(value ?? '')}"`
+  const loose = value => String(value ?? '').trim().toLowerCase()
+
+  const field = list.find(entry => entry && entry.name === statusField)
+  if (!field) {
+    // A near miss is the likely cause, so name it rather than saying "missing".
+    const near = list.find(entry => entry && loose(entry.name) === loose(statusField))
+    return { ok: false, missing: near
+      ? `no field named exactly ${named(statusField)} — the closest is ${named(near.name)}. Names are matched exactly, case and spacing included.`
+      : `no single-select field named ${named(statusField)} (present: ${list.map(entry => named(entry && entry.name)).join(', ') || 'none'})` }
+  }
+  if (!field.id) return { ok: false, missing: `field ${named(statusField)} was reported without an id` }
+
+  const options = Array.isArray(field.options) ? field.options : []
+  const optionIds = {}
+  const missing = []
+  for (const [key, wanted] of Object.entries(optionNames)) {
+    const option = options.find(entry => entry && entry.name === wanted && entry.id)
+    if (option) { optionIds[key] = option.id; continue }
+    const near = options.find(entry => entry && loose(entry.name) === loose(wanted))
+    missing.push(near ? `${named(wanted)} (found ${named(near.name)})` : named(wanted))
+  }
+  if (missing.length > 0) {
+    return { ok: false, missing: `field ${named(statusField)} is missing option(s): ${missing.join(', ')}. `
+      + `Present: ${options.map(entry => named(entry && entry.name)).join(', ') || 'none'}. Names are matched exactly, case and spacing included.` }
+  }
+  return { ok: true, fieldId: field.id, optionIds }
+}
+
+// Ids never change, so a caller that already has them can skip the lookup
+// dispatch entirely. All four options must be present: a partial block would
+// disable exactly one column's moves and look like it worked.
+function hasResolvedBoardIds(projectArg) {
+  if (!projectArg || typeof projectArg !== 'object') return false
+  const ids = projectArg.optionIds
+  const filled = value => typeof value === 'string' && value.length > 0
+  if (!filled(projectArg.id) || !filled(projectArg.fieldId) || !ids || typeof ids !== 'object') return false
+  return ['backlog', 'inProgress', 'inReview', 'done'].every(key => filled(ids[key]))
+}
+
+// ── which PR belongs to a subtask ───────────────────────────────────────────
+// This was ~700 characters of prose in Detect's prompt, executed per subtask by
+// a haiku agent. It is pure string and number logic, and it is the exact rule
+// that produced the #1050 bug (prefix-exact matching orphaned every PR merged
+// under an earlier branch prefix, so finished work was re-dispatched and died
+// on an empty diff). A rule with that history belongs where it can be pinned
+// down by tests.
+//
+// Detect now fetches the PR list ONCE for the whole milestone and returns it
+// raw; the matching happens here, per subtask.
+
+// Not the matcher any more — the DIAGNOSTIC. Branches are derived, so a PR is
+// this subtask's only if its head ref is exactly the derived name. This answers
+// the narrower question "does some other branch end with this subtask's
+// number?", which is what a changed branchPrefix looks like: `aq-1050`,
+// `wip/1050` and a bare `1050` are all near misses for 1050, while `task-11050`
+// belongs to a different subtask entirely. matchPr() halts on a MERGED near
+// miss rather than re-implementing finished work (#1050); randomising or
+// timestamping branchPrefix would make every run one big near miss.
+function prMatchesSubtask(ref, number) {
+  const text = String(ref ?? '')
+  const suffix = String(number)
+  if (suffix.length === 0 || !text.endsWith(suffix)) return false
+  const before = text[text.length - suffix.length - 1]
+  return before === undefined || !/[0-9]/.test(before)
+}
+
+// REST reports state lowercase and merged-ness as a merged_at timestamp;
+// GraphQL and `gh --json` report state uppercase and merged as a boolean.
+// Normalize once so nothing downstream depends on which path Detect took.
+function normalizePr(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  return {
+    number: Number(source.number),
+    url: String(source.url ?? ''),
+    state: String(source.state ?? '').toUpperCase(),
+    merged: source.merged === true
+      || (typeof source.merged_at === 'string' && source.merged_at.length > 0),
+    ref: String(source.ref ?? ''),
+    base: String(source.base ?? ''),
+  }
+}
+
+// With the branch derived from the graph, matching is an EXACT lookup: the head
+// ref this run would create, on the base the graph says it targets. No suffix
+// preference, no ranking across bases, no pass ordering to get wrong.
+//
+// Returns { pr, note }. `pr` uses the sentinels the rest of this file
+// understands: an object (a real PR), null (no PR — unstarted work), the string
+// 'unknown' (doneness is unverifiable, which halts the run), or 'wrong-base' (a
+// PR exists on this branch but not on its stack parent, so it is not evidence
+// of doneness — #1133).
+function matchPr(number, expectedBranch, expectedBase, pulls) {
+  const all = (pulls ?? []).map(normalizePr)
+  // Merged work first, then the most recent. Only ever applied WITHIN a group
+  // that already agrees on branch and base, so it can never override either.
+  const rank = (a, b) => (a.merged !== b.merged ? (a.merged ? -1 : 1) : b.number - a.number)
+
+  const onBranch = all.filter(candidate => candidate.ref === expectedBranch)
+  if (onBranch.length > 0) {
+    const onBase = onBranch.filter(candidate => candidate.base === expectedBase).sort(rank)
+    if (onBase.length > 0) return { pr: onBase[0], note: null }
+
+    const unreported = onBranch.find(candidate => !candidate.base)
+    if (unreported) {
+      return { pr: 'unknown',
+        note: `detect: PR #${unreported.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
+    }
+    const best = [...onBranch].sort(rank)[0]
+    return { pr: 'wrong-base',
+      note: `detect: ignoring PR #${best.number} for subtask #${number} — base "${best.base}" is not its stack parent "${expectedBase}"` }
+  }
+
+  // Nothing on the derived branch. Before calling this unstarted, look for a PR
+  // sitting on some OTHER branch that ends with this subtask's number — the
+  // signature of a changed branchPrefix (#1050). Ignoring those silently is what
+  // re-dispatched finished work onto an empty diff.
+  const nearMiss = all.filter(candidate => prMatchesSubtask(candidate.ref, number)).sort(rank)
+  const mergedElsewhere = nearMiss.find(candidate => candidate.merged)
+  if (mergedElsewhere) {
+    // Halting costs one re-run with the right prefix. Guessing costs the work.
+    return { pr: 'unknown',
+      note: `detect: subtask #${number} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
+        + `but this run derives its branch as "${expectedBranch}". That is what a changed branchPrefix looks like `
+        + '(the default is now "m<milestone>/task-"; a milestone built under a bare "task-" predates it). '
+        + 'Re-run with the branchPrefix this milestone was built under, or the finished work will be re-implemented.' }
+  }
+  if (nearMiss.length > 0) {
+    // Unmerged and under another name: a human's branch, or an abandoned
+    // attempt. Worth saying out loud, not worth halting the milestone.
+    return { pr: null,
+      note: `detect: subtask #${number} — ignoring unmerged PR #${nearMiss[0].number} on "${nearMiss[0].ref}"; `
+        + `this run works "${expectedBranch}"` }
+  }
+  return { pr: null, note: null }
+}
+
+// One pass, because the geometry no longer depends on the PRs. Mutates each
+// subtask's `pr` in place and RETURNS the notes to log, so this stays free of
+// harness globals.
+function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, ordinalPattern, baseBranch) {
+  const storiesByNumber = new Map(stories.map(story => [story.number, story]))
+  const notes = []
+  for (const story of stories) {
+    // Computed even when the lookup failed: a multi-blocker shape is a human
+    // decision and must surface either way.
+    const expectedBases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+    for (const subtask of story.subtasks ?? []) {
+      if (prLookupFailed) { subtask.pr = 'unknown'; continue }
+      const { pr, note } = matchPr(
+        subtask.number,
+        subtaskBranch(subtask, branchPrefix),
+        expectedBases.get(subtask.number) || baseBranch,
+        pulls)
+      if (note) notes.push(note)
+      subtask.pr = pr
+    }
+  }
+  return notes
+}
+
+// ── dropping verification commands that cannot run at the base ref ──────────
+// Bugs two and three both lived in this one judgement. Reading commands from
+// the working tree named a test file absent from origin/<base>, which every
+// worktree is cut from (crash mid-milestone). The fix -- drop commands naming
+// absent paths -- was then handed to the agent as prose, and it dropped ALL of
+// them, leaving an empty suite that made every downstream gate vacuous while
+// reporting green.
+//
+// So the agent now REPORTS what it saw and decides nothing: which commands it
+// found, and which paths those commands name that are not present at the ref.
+// The drop happens here, where it is visible, testable, and cannot quietly
+// empty a suite.
+function dropCommandsNamingMissingPaths(commands, missingPaths) {
+  const missing = (missingPaths ?? [])
+    .map(path => String(path ?? '').trim())
+    .filter(path => path.length > 0)
+  const kept = []
+  const dropped = []
+  for (const command of commands ?? []) {
+    const text = String(command ?? '').trim()
+    if (text.length === 0) continue
+    // findIndex, not find: find returns the matched string, and an empty-string
+    // path would match every command while reading as falsy — the suite would
+    // be wiped and the guard would look like it had held.
+    const hit = missing.findIndex(path => text.includes(path))
+    if (hit >= 0) dropped.push({ command: text, path: missing[hit] })
+    else kept.push(text)
+  }
+  return { kept, dropped }
+}
+
 // PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
@@ -288,13 +504,37 @@ const DRY = opts.dryRun === true
 // merge queue) merges bottom-up afterwards. `autoMerge` is gone: there is no
 // merge to opt out of, and accepting it silently would let an old invocation
 // believe merging still happens.
+if (opts.state !== undefined) {
+  throw new Error(
+    'orchestrator: args.state is no longer supported. It let a caller hand over a census taken '
+    + 'earlier, which is a SNAPSHOT of what is merged and what is open — reuse it minutes later and '
+    + 'the run re-dispatches work that has since landed. Pass args.detectScript instead: the same '
+    + 'script produces the same deterministic census, but freshly, on every run.')
+}
+
 if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
   throw new Error(
     'orchestrator: args.autoMerge / args.maxResolveAttempts are no longer supported — this workflow opens '
     + 'stacked PRs and never merges, so there is nothing to auto-merge and no conflicts to resolve mid-run.')
 }
 const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
-const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
+// Branch names carry their milestone: subtask #13 of milestone 12 lives on
+// `m12/task-13`, worktree `.claude/worktrees/m12/task-13`.
+//
+// This is NOT collision avoidance — issue numbers are already unique per repo,
+// so two milestones can never claim the same subtask number, and two runs of
+// the SAME milestone would share this prefix anyway. It buys legibility and
+// bulk cleanup: `git branch --list "m12/*"` and `rm -rf .claude/worktrees/m12`
+// each address exactly one milestone, which matters once a repo has several in
+// flight.
+//
+// An explicit branchPrefix is used verbatim, milestone and all — explicit means
+// explicit. Whatever it is, it must stay CONSTANT for the life of a milestone:
+// names are derived from it, so changing it points the run at addresses where
+// nothing exists (matchPr halts on a merged PR found under the old name).
+const branchPrefix = typeof opts.branchPrefix === 'string'
+  ? opts.branchPrefix
+  : `m${milestoneNumber}/task-`
 const ordinalPattern = typeof opts.ordinalPattern === 'string' ? opts.ordinalPattern : DEFAULT_ORDINAL
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 // Caps how many stories within one DAG level are in flight at once — separate
@@ -313,6 +553,30 @@ const [owner, repoName] = repo.split('/')
 // path by anyone, so a baked-in absolute path here would be exactly the kind
 // of machine-specific hardcoding this plugin avoids everywhere else. Wrong or
 // missing path fails at launch, not mid-milestone.
+// Detect is a trigger, not a shell with opinions: it runs ONE command and
+// hands back its stdout. Same wiring as taskScript — an absolute path, no
+// default, because this repo can be checked out anywhere.
+//
+// There is no agent-census fallback. There used to be, and it was four
+// commands, a loop and a filter carried out by a model that could substitute a
+// tool, drop a result or tidy a branch name in transit — three of the four bugs
+// this pipeline has ever had came from that latitude. A fallback nobody
+// exercises is not a safety net; it is untested code waiting for the worst
+// possible moment. One path, and it is the deterministic one.
+const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.startsWith('/')
+  ? opts.detectScript
+  : (() => { throw new Error(
+      'orchestrator needs args.detectScript as an absolute path to this checkout\'s '
+      + 'scripts/detect.mjs (e.g. "<repo>/scripts/detect.mjs") — there is no default, since this '
+      + 'repo can be checked out anywhere, and no fallback: the census is deterministic or it does '
+      + 'not happen. It is run with `bun`.') })()
+
+// Only needed when the board is given as a NUMBER — resolved ids skip the
+// lookup entirely, and unlike a census those are stable config, not a snapshot.
+const projectScript = typeof opts.projectScript === 'string' && opts.projectScript.startsWith('/')
+  ? opts.projectScript
+  : null
+
 const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.startsWith('/')
   ? opts.taskScript
   : (() => { throw new Error(
@@ -351,57 +615,37 @@ async function callAgent(prompt, agentOpts) {
   }
 }
 
-// ── 1. Configure — board ids BY NAME ────────────────────────────────────────
-phase('Configure')
-let board = null
-if (projectArg && Number.isInteger(Number(projectArg.number))) {
-  const resolved = await callAgent(`Resolve GitHub Projects v2 ids for project number ${projectArg.number} owned by "${owner}" (repo ${repo}). Read only — do NOT create, edit, or delete anything, and do NOT create a missing field or option.
-
-1. Try the user-owned query first; if its data is null, try the org-owned one:
-gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
-gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projectV2(number:$n){id title fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}' -f o="${owner}" -F n=${projectArg.number}
-2. Find the single-select field named exactly "${statusField}" and inside it the options named exactly: ${Object.entries(optionNames).map(([key, value]) => `${key}="${value}"`).join(', ')}.
-3. Return the project id, field id, and the four option ids. If the field or ANY option is missing, return found=false naming exactly what is missing.
-
-[cache-buster, ignore: ${nonce}]`,
-    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', schema: {
-      type: 'object', required: ['found'],
-      properties: {
-        found: { type: 'boolean' }, missing: { type: 'string' }, title: { type: 'string' },
-        id: { type: 'string' }, fieldId: { type: 'string' },
-        optionIds: { type: 'object', properties: {
-          backlog: { type: 'string' }, inProgress: { type: 'string' },
-          inReview: { type: 'string' }, done: { type: 'string' } } },
-      },
-    } })
-  if (!resolved || !resolved.found) {
-    // Board bookkeeping is not worth failing a milestone over, but a silent
-    // downgrade is worse than a loud one.
-    log(`board DISABLED for this run: ${resolved ? resolved.missing : 'project resolver died'} (see the github-project-setup skill)`)
-  } else {
-    board = { id: resolved.id, fieldId: resolved.fieldId, optionIds: resolved.optionIds, optionNames, statusField, number: projectArg.number }
-    log(`board resolved: project ${projectArg.number} "${resolved.title || ''}" → ${resolved.id}`)
+// Same retry behaviour as callAgent, but a final failure returns null instead
+// of throwing — for work whose failure should degrade the run, not end it.
+async function callAgentSoftly(prompt, agentOpts) {
+  try {
+    return await callAgent(prompt, agentOpts)
+  } catch (err) {
+    log(`agent ${agentOpts.label} failed: ${err && err.message ? err.message : String(err)}`)
+    return null
   }
-} else {
-  log('boardless: true — running issues and PRs only, no card moves')
 }
 
+// ── 1. Configure — board ids BY NAME ────────────────────────────────────────
 // ── 2. Detect — raw GitHub state + verification commands; no judgement ──────
-phase('Detect')
-const detected = await callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+// Started BEFORE the board lookup and awaited after it. The two share no data —
+// nothing in this prompt refers to the board — so running them in sequence just
+// added the shorter call's latency to the longer one's. They stay separate
+// dispatches on purpose: a board failure must not be able to stop a milestone,
+// and merging them would put every board hiccup on the critical path.
+//
+// Each call passes its phase explicitly, so the progress grouping does not
+// depend on which one happens to be running when phase() was last called.
+// The census is ALWAYS taken fresh — see the args.state rejection above. What a
+// caller can skip is `verification`: the answer to "how does this repo run its
+// tests" changes about twice a year, and it is the one genuinely model-shaped
+// step in this stage.
+const providedVerification = opts.verification && typeof opts.verification === 'object'
+  && Array.isArray(opts.verification.fullSuite)
+  ? opts.verification
+  : null
 
-1. Resolve the milestone title: \`gh api repos/${repo}/milestones/${milestoneNumber} --jq .title\`. Then list its story issues:
-   \`gh issue list --repo ${repo} --milestone "<title>" --label ${labels.story} --state all --json number,title,state\`
-2. For each story, get its blockedBy edges via GraphQL (\`issue { blockedBy(first:50) { nodes { number } } }\`). Report ONLY the numbers — do NOT compute levels or interpret them; that happens in-script. If the repo uses no blockedBy relations, report empty arrays (that is normal, not an error).
-3. For each story, list its sub-issues via \`gh api repos/${repo}/issues/<story number>/sub_issues --jq '.[] | {number, title, state}'\` (the native sub-issue relation). Do NOT substitute \`gh issue list --label ${labels.subtask}\`, which returns every subtask in the milestone with no link back to its parent. Preserve the ORDER THE ENDPOINT RETURNS and report titles VERBATIM — ordering depends on both.
-4. For EACH SUBTASK, find its pull request by head branch, matching on the SUBTASK NUMBER and NOT on the branch prefix. Use the REST endpoint, NOT \`gh pr list\`:
-   \`gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}'\`
-   Accept a PR for subtask N only if its \`ref\` ENDS WITH N and the character immediately before N is a non-digit — so \`aq-1050\`, \`task-1050\` and \`wip/1050\` all match subtask 1050, while \`task-11050\` does NOT. If several qualify, prefer one whose \`base\` is exactly \`${baseBranch}\`, then the merged one, then the most recent.
-   MATCH ON THE NUMBER, NOT THE PREFIX — deliberate: prefix-exact matching once orphaned every PR merged under an earlier prefix, so finished work was re-dispatched and died on an empty diff (2026-08-18, #1050). Suffix matching makes doneness survive a prefix change; for the same reason NEVER randomise or timestamp \`branchPrefix\`.
-   \`gh pr list\` goes through GraphQL, which returned empty results for genuinely-merged PRs during the 2026-08-17 GitHub incident; REST kept answering. Do NOT use free-text search (\`--search "<n> in:body"\` matches unrelated PRs). Set that subtask's pr to {number, url, state, merged, ref, base} where merged is true ONLY if merged_at is non-null and ref is the head branch verbatim. Always report \`base\` VERBATIM (never blank, never guessed) — the script, not you, decides what a wrong base means. Never infer merged from the issue being closed.
-
-   **If that command ERRORS or times out** (non-zero exit, 5xx, "no server is currently available"), retry it up to 3 times with a short pause. If it still fails, set that subtask's pr to the string "unknown" — NOT null. null means "this subtask has no PR and is unstarted work"; an API failure is not evidence of that (reporting failures as null re-implemented merged subtasks, 2026-08-17). Report an empty result as null only when the command actually SUCCEEDED and returned nothing.
-5. Discover this repo's OWN verification commands — do not assume a toolchain.
+const detectVerificationStep = index => `${index}. Discover this repo's OWN verification commands — do not assume a toolchain.
 
    **Read them as they exist on \`origin/${baseBranch}\`, NOT from ${repoDir}'s working tree.** That checkout can sit on an unrelated branch, and every subtask worktree is cut from \`origin/${baseBranch}\` — so a command discovered from the working tree can name a test file that does not exist where it will actually run. That failure looks exactly like a broken test and stops the whole milestone (observed: a suite command naming a test file added on another branch).
    \`\`\`
@@ -411,32 +655,40 @@ const detected = await callAgent(`Detect the remaining work on ${repo} milestone
    \`\`\`
    Read whichever exist AT THAT REF: CLAUDE.md, the testing/standards doc it points to, .github/workflows/*, and the project manifest (pyproject.toml / package.json / Makefile / justfile).
 
-   Before returning any command, check every path it names against the \`ls-tree\` listing above. **Drop any command naming a path that is not on \`origin/${baseBranch}\`**, and say which you dropped and why in verificationSource — a command that cannot run there is worse than one fewer command.
-
    Return the exact full-suite command(s) (each separate invocation listed separately if the repo requires tiers to run apart), the typecheck command (empty if none), the lint/format commands (empty array if none), and which file(s) you took them from.
+
+   **Report what exists; decide nothing.** Do NOT drop, edit, or substitute any command. Instead, for every path named by any command you are returning, check it against the \`ls-tree\` listing and return \`missingPaths\`: the paths that are NOT present at \`origin/${baseBranch}\`, verbatim as the command spells them. The script drops the affected commands itself. An earlier version asked you to do the dropping and it dropped every command, leaving an empty suite that made every later check pass while testing nothing.`
+
+// One command, returned byte for byte. Everything the long version guards
+// against — substituting a tool, dropping a result, tidying a branch name in
+// transit — stops being possible when there is nothing to do but run it.
+const DETECT_TRIGGER_STEP = `1. Run EXACTLY this command and capture its stdout:
+   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --compact${labels.story === 'story' ? '' : ` --story-label ${labels.story}`}${labels.subtask === 'subtask' ? '' : ` --subtask-label ${labels.subtask}`}
+
+   Do NOT modify the command, add flags, substitute a different tool, or run anything else to
+   "check" its answer. Do NOT summarize, reformat, pretty-print, truncate or fix the output: it is
+   a single line of JSON that the pipeline parses itself, and any edit you make to it is a bug you
+   are introducing into a deterministic step.
+   - ok: true if the command exited zero.
+   - stdout: its stdout EXACTLY as printed, as one string. Empty if the command failed.
+   - error: its stderr, only when ok=false.`
+
+const detectSteps = [DETECT_TRIGGER_STEP]
+if (!providedVerification) detectSteps.push(detectVerificationStep(2))
+
+const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+
+${detectSteps.join('\n\n')}
 
 Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`,
   { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', schema: {
-    type: 'object', required: ['stories', 'verification'],
+    type: 'object',
+    required: ['ok', 'stdout', ...(providedVerification ? [] : ['verification'])],
     properties: {
-      milestoneTitle: { type: 'string' },
-      stories: { type: 'array', items: {
-        type: 'object', required: ['number', 'title', 'blockedBy', 'subtasks'],
-        properties: {
-          number: { type: 'integer' }, title: { type: 'string' }, state: { type: 'string' },
-          blockedBy: { type: 'array', items: { type: 'integer' } },
-          subtasks: { type: 'array', items: {
-            type: 'object', required: ['number', 'title', 'state'],
-            properties: {
-              number: { type: 'integer' }, title: { type: 'string' }, state: { type: 'string' },
-              // string is the "unknown" sentinel: the lookup itself failed,
-              // which is NOT the same as "there is no PR" (null).
-              pr: { type: ['object', 'null', 'string'], properties: {
-                number: { type: 'integer' }, url: { type: 'string' },
-                state: { type: 'string' }, merged: { type: 'boolean' },
-                ref: { type: 'string' }, base: { type: 'string' } } },
-            } } },
-        } } },
+      // The census is a string here on purpose: it is parsed by this script, so
+      // a mangled or truncated transcription fails at the boundary instead of
+      // arriving as a plausible-looking half-census.
+      ok: { type: 'boolean' }, stdout: { type: 'string' }, error: { type: 'string' },
       verification: {
         type: 'object', required: ['fullSuite'],
         properties: {
@@ -444,15 +696,112 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
           typecheck: { type: 'string' },
           lint: { type: 'array', items: { type: 'string' } },
           verificationSource: { type: 'string' },
+          missingPaths: { type: 'array', items: { type: 'string' } },
         } },
     },
   } })
-if (!detected) throw new Error('detect agent died')
+  .then(value => ({ value }), error => ({ error }))
 
-// The REST pulls API reports state lowercase ("open"); GitHub's GraphQL and
-// gh's --json report it uppercase. Normalize once so no comparison downstream
-// depends on which path the Detect agent took.
-//
+phase('Configure')
+
+let board = null
+const makeBoard = (id, fieldId, optionIds) =>
+  ({ id, fieldId, optionIds, optionNames, statusField, number: projectArg && projectArg.number })
+
+if (hasResolvedBoardIds(projectArg)) {
+  // Nothing to look up. Ids are stable for the life of a board, so a caller
+  // that has them (from a previous run's log, or the setup-project skill)
+  // skips this dispatch entirely.
+  board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
+  log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
+} else if (projectArg && Number.isInteger(Number(projectArg.number)) && !projectScript) {
+  log('board DISABLED for this run: `project` was given as a number but args.projectScript is missing, '
+    + 'so there is no deterministic way to resolve its ids (there is no agent fallback). Pass '
+    + 'projectScript as an absolute path to scripts/resolve.mjs, or pass the resolved '
+    + '{id, fieldId, optionIds} block instead.')
+} else if (projectArg && Number.isInteger(Number(projectArg.number))) {
+  // Softly, because "the board is best-effort" was only half true: a RETURNED
+  // failure was logged and the run survived, but a THROWN one (callAgent gives
+  // up after one retry) propagated and killed the milestone. Card bookkeeping
+  // must never be able to do that.
+  const resolved = await callAgentSoftly(`Run EXACTLY this command and capture its stdout:
+   bun ${projectScript} --owner ${owner} --number ${projectArg.number} --compact
+
+Do NOT modify the command, add flags, substitute a different tool, or run anything else. Do NOT summarize, reformat, pretty-print, truncate or fix the output: it is a single line of JSON that the pipeline parses itself, and any edit you make to it is a bug you are introducing into a deterministic step. The command exits non-zero when it finds no project; that is a normal answer, not a reason to retry or improvise.
+- stdout: its stdout EXACTLY as printed, as one string.
+- error: its stderr, if any.
+
+[cache-buster, ignore: ${nonce}]`,
+    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', schema: {
+      type: 'object', required: ['stdout'],
+      properties: { stdout: { type: 'string' }, error: { type: 'string' } },
+    } })
+
+  // Board bookkeeping is not worth failing a milestone over, but a silent
+  // downgrade is worse than a loud one.
+  let lookup = null
+  if (resolved) {
+    try {
+      lookup = JSON.parse(String(resolved.stdout ?? ''))
+    } catch (err) {
+      log(`board DISABLED for this run: ${projectScript} returned output that is not JSON (${err.message}). `
+        + `First 200 characters: ${String(resolved.stdout ?? '').slice(0, 200)}`)
+    }
+  }
+  if (!lookup || !lookup.found || !lookup.id) {
+    log(`board DISABLED for this run: ${(lookup && lookup.missing) || (resolved && resolved.error) || 'the project resolver returned no project'} (see the setup-project skill)`)
+  } else {
+    const ids = resolveBoardIds(lookup.fields, statusField, optionNames)
+    if (!ids.ok) {
+      log(`board DISABLED for this run: ${ids.missing} (see the setup-project skill)`)
+    } else {
+      board = makeBoard(lookup.id, ids.fieldId, ids.optionIds)
+      log(`board resolved: project ${projectArg.number} "${lookup.title || ''}" → ${lookup.id}`)
+      log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
+    }
+  }
+} else if (projectArg) {
+  // Reachable when `project` is present but is neither a resolvable number nor
+  // a complete id block. Previously this fell through to the boardless branch
+  // and logged "boardless: true" at someone who never asked for it.
+  log('board DISABLED for this run: `project` was passed without a usable `number` and without a complete '
+    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other, '
+    + 'or pass boardless: true to run without a board on purpose.')
+} else {
+  log('boardless: true — running issues and PRs only, no card moves')
+}
+
+// Detect was started before the board lookup; collect it now. A rejection is
+// rethrown with its original error — unlike the board, a failed census means
+// nothing can be dispatched safely.
+const detectOutcome = await detectPromise
+if (detectOutcome.error) throw detectOutcome.error
+if (!detectOutcome.value) throw new Error('detect agent died')
+const detected = detectOutcome.value
+
+// One name for each half, whoever produced it. Everything below reads these.
+// On the trigger path the agent hands back a string; parsing it HERE means a
+// mangled or truncated transcription fails loudly at the boundary instead of
+// arriving as a plausible-looking half-census.
+function parseTriggerOutput(result) {
+  if (!result || result.ok !== true) {
+    throw new Error(`orchestrator: ${detectScript} failed: ${(result && result.error) || 'no error reported'}`)
+  }
+  try {
+    return JSON.parse(String(result.stdout ?? ''))
+  } catch (err) {
+    throw new Error(`orchestrator: ${detectScript} returned output that is not JSON (${err.message}). `
+      + `First 200 characters: ${String(result.stdout ?? '').slice(0, 200)}`)
+  }
+}
+
+const census = parseTriggerOutput(detected)
+log(`detect: census produced deterministically by ${detectScript} (${(census.stories || []).length} stories)`)
+if (!Array.isArray(census.stories)) {
+  throw new Error('orchestrator: the census came back with no stories array — nothing can be dispatched')
+}
+
+
 // Suffix matching is base-blind: a PR opened by mistake against another branch
 // still matches by head ref, and treating it as this subtask's own work is the
 // #1133 bug (PR #1150, head task-1133, base main, rediscovered as done across
@@ -463,38 +812,24 @@ if (!detected) throw new Error('detect agent died')
 // The expected base is per-subtask, not the milestone base: subtask N stacks on
 // N-1, and only a story's FIRST subtask targets the story root. Computed from
 // the full ordered list, so an already-done predecessor still supplies the base.
-const storiesByNumber = new Map(detected.stories.map(story => [story.number, story]))
-assertNoBlockerCycles(detected.stories)
-for (const story of detected.stories) {
-  let expectedBases
-  try {
-    expectedBases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
-  } catch (err) {
-    // Multi-blocker or cyclic shapes are a human decision; surface the message
-    // as-is rather than dispatching against a guessed base.
-    throw err
-  }
-  for (const subtask of story.subtasks ?? []) {
-    if (subtask.pr && typeof subtask.pr === 'object' && subtask.pr.state) {
-      subtask.pr.state = String(subtask.pr.state).toUpperCase()
-    }
-    if (subtask.pr && typeof subtask.pr === 'object') {
-      const prBase = String(subtask.pr.base ?? '')
-      const wanted = expectedBases.get(subtask.number) || baseBranch
-      if (!prBase) {
-        subtask.pr = 'unknown'   // base unreported → doneness unverifiable, abort below
-      } else if (prBase !== wanted) {
-        log(`detect: ignoring PR #${subtask.pr.number} for subtask #${subtask.number} — base "${prBase}" is not its stack parent "${wanted}"`)
-        subtask.pr = 'wrong-base'   // rejected, NOT the same as "no PR ever existed" — see isSubtaskDone
-      }
-    }
-  }
+// matchPullRequest() needs it, which is why matching happens inside this loop
+// rather than up front.
+const pullRequests = Array.isArray(census.pullRequests) ? census.pullRequests : []
+const prLookupFailed = census.prLookupFailed === true
+if (prLookupFailed) {
+  log('detect: the PR lookup failed after retries — every subtask is treated as unverifiable rather than unstarted')
+}
+const storiesByNumber = new Map(census.stories.map(story => [story.number, story]))
+assertNoBlockerCycles(census.stories)
+for (const note of attachPullRequests(
+  census.stories, pullRequests, prLookupFailed, branchPrefix, ordinalPattern, baseBranch)) {
+  log(note)
 }
 
 // An "unknown" pr means the API did not answer, so doneness is genuinely
 // unknown — guessing either way is wrong (guess "pending" re-implemented
 // merged work twice on 2026-08-17). Stopping costs one re-run.
-const unknownPrs = detected.stories.flatMap(story =>
+const unknownPrs = census.stories.flatMap(story =>
   (story.subtasks ?? []).filter(subtask => subtask.pr === 'unknown')
     .map(subtask => `#${subtask.number} (story #${story.number})`))
 if (unknownPrs.length > 0) {
@@ -504,18 +839,41 @@ if (unknownPrs.length > 0) {
     + 'Re-run once the GitHub API is answering reliably.')
 }
 
-const verification = detected.verification
-const suiteCmds = (verification.fullSuite || []).filter(Boolean)
+// Detect reports which paths are absent at origin/<base>; the dropping happens
+// here, out loud. Silence is what made the empty-suite bug survive a whole run.
+const rawVerification = providedVerification || detected.verification || { fullSuite: [] }
+const missingPaths = rawVerification.missingPaths || []
+const suite = dropCommandsNamingMissingPaths(rawVerification.fullSuite, missingPaths)
+const typecheck = dropCommandsNamingMissingPaths(
+  rawVerification.typecheck ? [rawVerification.typecheck] : [], missingPaths)
+const lint = dropCommandsNamingMissingPaths(rawVerification.lint, missingPaths)
+for (const { command, path } of [...suite.dropped, ...typecheck.dropped, ...lint.dropped]) {
+  log(`detect: dropped verification command "${command}" — it names "${path}", which is not on origin/${baseBranch}`)
+}
+if (suite.kept.length === 0 && suite.dropped.length > 0) {
+  // Not fatal here: task.js refuses to run a subtask with no suite, and that is
+  // the right place to stop. Saying so here makes the cause legible instead of
+  // leaving someone to wonder why every subtask blocked at once.
+  log(`detect: WARNING — every full-suite command was dropped as unrunnable at origin/${baseBranch}. `
+    + 'Subtasks will refuse to run rather than verify nothing. Fix the base branch\'s documented test command.')
+}
+const verification = {
+  fullSuite: suite.kept,
+  typecheck: typecheck.kept[0] || '',
+  lint: lint.kept,
+  verificationSource: rawVerification.verificationSource,
+}
+const suiteCmds = verification.fullSuite
 const suiteBlock = suiteCmds.length
   ? suiteCmds.map(command => `  - ${command}`).join('\n')
   : '  (NOT DOCUMENTED — find this repo\'s real full-suite command before claiming anything passes)'
 
-const levels = computeLevels(detected.stories, ordinalPattern)
-log(`milestone #${milestoneNumber} "${detected.milestoneTitle || ''}": ${detected.stories.length} stories, ${levels.length} dependency level(s)`)
+const levels = computeLevels(census.stories, ordinalPattern)
+log(`milestone #${milestoneNumber} "${census.milestoneTitle || ''}": ${census.stories.length} stories, ${levels.length} dependency level(s)`)
 
 if (DRY) {
   return {
-    repo, milestone: milestoneNumber, milestoneTitle: detected.milestoneTitle, baseBranch,
+    repo, milestone: milestoneNumber, milestoneTitle: census.milestoneTitle, baseBranch,
     mode: 'dryRun',
     board: board ? { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds } : null,
     verification,
@@ -536,7 +894,7 @@ if (DRY) {
         }
       }),
     })),
-    alreadyDone: detected.stories.filter(story => remainingSubtasks(story, ordinalPattern).length === 0).map(story => story.number),
+    alreadyDone: census.stories.filter(story => remainingSubtasks(story, ordinalPattern).length === 0).map(story => story.number),
     note: 'dryRun: nothing was dispatched, no board or GitHub write happened. One worktree/branch/PR per SUBTASK, '
       + 'dispatched sequentially within each story. Each PR targets its stack parent (prTargets), NOT the milestone base — '
       + 'verify that column before a real run. Nothing is ever merged.',
@@ -569,9 +927,7 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
 
   // Detect matches PRs by number-suffix, so a resumed PR's real head ref can
   // carry an older prefix — prefer it over the freshly-derived name.
-  const branch = (subtask.pr && typeof subtask.pr === 'object' && subtask.pr.ref)
-    ? subtask.pr.ref
-    : `${branchPrefix}${subtask.number}`
+  const branch = subtaskBranch(subtask, branchPrefix)
 
   // A PR already exists against the right base, so this subtask is done for this
   // run — Detect verified the base, and isSubtaskDone accepts it. Nothing to

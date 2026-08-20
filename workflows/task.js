@@ -13,6 +13,113 @@ export const meta = {
   ],
 }
 
+// ── pure decision logic ──────────────────────────────────────────────────────
+// Everything between the PURE markers is a pure function of its arguments: no
+// harness globals, no module-level state, no logging. workflows/task.test.mjs
+// slices this region out of THIS file and imports it, so the gates are tested
+// against the same bytes the workflow runs.
+//
+// These two gates are the run's hard stops, and both live here rather than
+// inline because they are decisions about numbers and strings — deterministic,
+// and worth being able to prove without a live dispatch. A gate that reaches
+// for BRANCH or calls log() stops being testable, and load-pure.mjs will refuse
+// the whole region rather than let that pass quietly.
+// PURE:BEGIN
+
+// An empty suite makes every downstream gate vacuous: Ship runs nothing and
+// reports passed=true, Review has no red/green to work against, and the PR
+// opens unverified. Observed on a run whose base branch documented no commands
+// — the Ship agents happened to improvise and find the tests themselves, which
+// is luck, not design, and their prompt explicitly tells them NOT to substitute
+// commands. Fail loudly instead, with a deliberate opt-out for repos that
+// genuinely have no suite yet.
+function verificationGate(suiteCmds, allowNoVerification, callerProvided) {
+  if (suiteCmds.length > 0) return null
+  if (allowNoVerification === true) return null
+  return {
+    blocked: 'verification',
+    detail: 'no full-suite command is available for this repo, so nothing downstream could verify this subtask — '
+      + 'Ship would run zero commands and still report success. '
+      + (callerProvided
+          ? 'The caller passed an empty verification.fullSuite; the orchestrator discovers these from origin/<baseBranch>, so check that the base branch actually documents its test commands.'
+          : 'Intake found none in CLAUDE.md, the CI workflows, or the manifest.')
+      + ' Document the command, pass verification.fullSuite explicitly, or set allowNoVerification: true to proceed unverified on purpose.',
+  }
+}
+
+// Number() is too eager to be a validator here: Number(null) and Number('')
+// are both 0, so a Review that reported no count at all would be judged as
+// having found ZERO COMMITS and the run would stop claiming the implementation
+// produced nothing. That is a fabricated fact pinned on the wrong stage. An
+// absent count is unusable, not zero — only a real number, or a string holding
+// one, counts.
+function countOf(value) {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string' && value.trim() !== '') return Number(value)
+  return NaN
+}
+
+// A Plan-Hash is the first 8 hex characters of sha256sum(<plan file>).
+function isPlanHash(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}$/.test(value)
+}
+
+// Implement writes the trailers; Review recomputes the hash from the plan file
+// independently, which is deliberate — Review is the ground truth a FUTURE run
+// will reproduce, so it must never just echo what Implement claimed. Comparing
+// the two costs no command and catches the one thing neither stage can see on
+// its own: the plan file changing mid-run (ticked checkboxes are the usual
+// culprit), which silently invalidates every trailer already written.
+function planHashMismatch(implHash, reviewHash) {
+  if (!isPlanHash(implHash) || !isPlanHash(reviewHash)) return null
+  if (implHash === reviewHash) return null
+  return `plan hash CHANGED mid-run: implement committed trailers as ${implHash}, review recomputed ${reviewHash} from the same plan file. `
+    + 'The plan\'s bytes were modified after implementation, so every trailer on this branch is now stale and a future resume would hard-reset the work. '
+    + 'The Plan-Hash gate below will stop the run; this is why.'
+}
+
+// The Review -> Ship boundary. Review is asked to REPORT three facts and never
+// to interpret or act on them: an agent that both measures and judges can talk
+// itself out of the judgement. Review is also the last stage that writes, so
+// this is the earliest boundary at which the facts can be judged — and judging
+// here costs no dispatch, because Ship simply never boots.
+//
+// Returns null to proceed, {blocked, detail} to stop, or {warn} when Review's
+// numbers are unusable and the Plan-Hash half of the gate has to be skipped.
+function reviewGate(review, branch, baseBranch) {
+  const porcelain = String((review && review.porcelain) || '').trim()
+  if (porcelain.length > 0) {
+    return {
+      blocked: 'tests',
+      detail: `worktree still dirty after review, so the PR would not contain this work (nothing was pushed):\n${porcelain}`,
+    }
+  }
+
+  // Implement decides RESUME vs RESET by grepping for exactly this trailer, so
+  // an untagged commit reads as stale debris and a later run would
+  // `reset --hard` it away. Catching that here, before anything is pushed, is
+  // the whole point.
+  const commitCount = countOf(review && review.commitCount)
+  const taggedCount = countOf(review && review.taggedCount)
+  if (!Number.isInteger(commitCount) || !Number.isInteger(taggedCount)) {
+    return { warn: `review did not report usable commit/trailer counts (${review && review.commitCount}/${review && review.taggedCount}) — Plan-Hash gate skipped` }
+  }
+  if (commitCount === 0) {
+    return {
+      blocked: 'implement',
+      detail: `branch ${branch} has no commits on top of ${baseBranch} — implementation produced nothing to ship.`,
+    }
+  }
+  if (taggedCount < commitCount) {
+    return {
+      blocked: 'implement',
+      detail: `only ${taggedCount} of ${commitCount} commits on ${branch} carry their Plan-Hash trailer, so a future run would read this branch as stale and hard-reset it. Nothing was pushed. Do NOT re-run this subtask until the trailers are added (interactively, by a human) or the work is otherwise preserved.`,
+    }
+  }
+  return null
+}
+// PURE:END
+
 // ── args ─────────────────────────────────────────────────────────────────────
 let raw = args
 if (typeof raw === 'string') {
@@ -141,20 +248,57 @@ const optionNames = board ? board.optionNames : null
 // since that agent already has tool access and full context. Every call site
 // must frame this as best-effort and instruct the model not to let its failure
 // affect the stage's real return value.
-function boardMoveInstructions(optionKey) {
+const [repoOwner, repoShortName] = repo.split('/')
+
+function boardMoveInstructions(optionKey, cached) {
   if (!board) return ''
+  const known = cached && typeof cached === 'object' ? cached : {}
+  const id = value => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : null)
+  const itemId = id(known.itemId)
+  const parentItemId = id(known.parentItemId)
+
+  const findCard = number => `gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){projectItems(first:10){nodes{id project{id}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${number} --jq '.data.repository.issue.projectItems.nodes[] | select(.project.id=="${board.id}") | .id'`
+  const setStatus = (idRef, optionId) => `gh api graphql -f query='mutation($i:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:"${board.id}",itemId:$i,fieldId:"${board.fieldId}",value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' -f i="${idRef}" -f o="${optionId}"`
+
+  // A project item id is stable for the life of the card, so re-resolving it in
+  // a later stage is a round trip that buys nothing. Intake resolves both ids
+  // and reports them; every stage after it is handed them. The only way a
+  // cached id goes bad is a card removed and re-added mid-run, which the
+  // stale-id fallback below covers.
+  const step1 = itemId
+    ? `1. This card's id was already resolved during intake — use it as-is, do NOT look it up again:
+ITEM_ID="${itemId}"`
+    : `1. Find the card:
+ITEM_ID=$(${findCard(issue)})`
+
+  // The siblings' statuses are NOT cacheable: they are exactly what changes as
+  // the run progresses, which is the whole reason the parent gets re-mirrored.
+  const step3 = parentItemId
+    ? `3. Mirror the parent story. Its card id was also resolved during intake:
+PARENT_ITEM_ID="${parentItemId}"
+You still need the siblings' CURRENT statuses, which change as the run progresses:
+${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
+Among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target "${optionNames.done}"; otherwise (a mix) target "${optionNames.inProgress}". Then run the step-2 mutation against $PARENT_ITEM_ID with the matching option id from this map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.
+If a mutation fails with a not-found/invalid-id error the cached id is stale (card removed and re-added): look that card up by its issue number with the same projectItems query, then retry once.`
+    : `3. Mirror the parent story. Fetch:
+${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
+If there is no parent, stop here. Otherwise, among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target status by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target is "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target is "${optionNames.done}"; otherwise (a mix) target is "${optionNames.inProgress}". Then find the parent's card with the step-1-style query (its issue number) and set its Status with the step-2-style mutation using this option-id map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.`
+
+  const report = known.report === true
+    ? `
+
+Finally, return board.itemId, board.parentItemId (empty if no parent) and board.parentNumber (0 if none) — later stages reuse these instead of re-querying. Report them even if a mutation failed.`
+    : ''
+
   return `
 Move the board card for ${repo} issue #${issue} to Status "${optionNames[optionKey]}", then mirror its parent story. Use ONLY the Status-setting mutation below — never create, close, edit, or delete anything.
 
-1. Find the card:
-ITEM_ID=$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){projectItems(first:10){nodes{id project{id}}}}}}' -f o="${repo.split('/')[0]}" -f r="${repo.split('/')[1]}" -F n=${issue} --jq '.data.repository.issue.projectItems.nodes[] | select(.project.id=="${board.id}") | .id')
+${step1}
 
 2. Set its Status (pass the option id with -f, NOT -F — -F coerces numeric-looking strings to int and the mutation rejects it):
-gh api graphql -f query='mutation($i:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:"${board.id}",itemId:$i,fieldId:"${board.fieldId}",value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' -f i="$ITEM_ID" -f o="${board.optionIds[optionKey]}"
+${setStatus('$ITEM_ID', board.optionIds[optionKey])}
 
-3. Mirror the parent story. Fetch:
-gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repo.split('/')[0]}" -f r="${repo.split('/')[1]}" -F n=${issue}
-If there is no parent, stop here. Otherwise, among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target status by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target is "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target is "${optionNames.done}"; otherwise (a mix) target is "${optionNames.inProgress}". Then find the parent's card with the step-1-style query (its issue number) and set its Status with the step-2-style mutation using this option-id map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.`
+${step3}${report}`
 }
 
 // ── 1. intake ────────────────────────────────────────────────────────────────
@@ -173,13 +317,17 @@ const intake = await callAgent(`Intake for ${repo} subtask #${issue} in ${repoDi
 ${verificationStep}
 6. Find this repo's own test-tier PLACEMENT rules — do NOT assume a taxonomy. Its testing standards doc usually says which tier owns what kind of test (e.g. "unit owns pure combinations, integration owns paths, e2e owns wiring, conformance owns real-vs-fake equivalence" is one repo's version — another repo's tiers and rules will differ). Cite the doc path and summarize its placement rule in one or two lines inside your summary — every later stage that writes a test needs this to place it correctly, not default to a habitual tier out of habit.
 ${DRY || board === null ? '' : `
-7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress')}`}
+7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
 Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`,
   { label: `intake:#${issue}`, phase: 'Intake', model: 'sonnet', schema: {
     type: 'object', required: ['refused', 'summary', 'verification'],
     properties: {
       refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
+      // Resolved once here so Ship does not re-query for ids that cannot change.
+      board: { type: 'object', properties: {
+        itemId: { type: 'string' }, parentItemId: { type: 'string' },
+        parentNumber: { type: 'integer' } } },
       verification: { type: 'object', required: ['fullSuite'], properties: {
         fullSuite: { type: 'array', items: { type: 'string' } },
         typecheck: { type: 'string' }, lint: { type: 'array', items: { type: 'string' } },
@@ -188,24 +336,19 @@ Return: what #${issue} must deliver, exact constraints from the docs (invariants
   } })
 if (!intake || intake.refused) return { issue, refused: true, reason: intake ? intake.reason : 'intake agent died' }
 
+// Card ids are stable for the life of the card, so this is resolved once and
+// handed to every later stage instead of being looked up again per board move.
+const boardIds = (intake.board && typeof intake.board === 'object') ? intake.board : {}
+if (board && !boardIds.itemId) {
+  log('intake did not report a board item id — later card moves will resolve it themselves (one extra query per move)')
+}
+
 const verification = providedVerification || intake.verification
 const suiteCmds = (verification.fullSuite || []).filter(Boolean)
 
-// An empty suite makes every downstream gate vacuous: Ship runs nothing and
-// reports passed=true, Review has no red/green to work against, and the PR
-// opens unverified. Observed on a run whose base branch documented no commands
-// — the Ship agents happened to improvise and find the tests themselves, which
-// is luck, not design, and their prompt explicitly tells them NOT to substitute
-// commands. Fail loudly instead, with a deliberate opt-out for repos that
-// genuinely have no suite yet.
-if (suiteCmds.length === 0 && opts.allowNoVerification !== true) {
-  return { issue, blocked: 'verification', branch: BRANCH, worktree: WORKTREE,
-    detail: 'no full-suite command is available for this repo, so nothing downstream could verify this subtask — '
-      + 'Ship would run zero commands and still report success. '
-      + (providedVerification
-          ? 'The caller passed an empty verification.fullSuite; the orchestrator discovers these from origin/<baseBranch>, so check that the base branch actually documents its test commands.'
-          : 'Intake found none in CLAUDE.md, the CI workflows, or the manifest.')
-      + ' Document the command, pass verification.fullSuite explicitly, or set allowNoVerification: true to proceed unverified on purpose.' }
+const noSuite = verificationGate(suiteCmds, opts.allowNoVerification, Boolean(providedVerification))
+if (noSuite) {
+  return { issue, blocked: noSuite.blocked, branch: BRANCH, worktree: WORKTREE, detail: noSuite.detail }
 }
 
 const verifyBlock = [
@@ -314,17 +457,18 @@ Return blockers=true only if something unresolvable remains (spec contradiction 
 phase('Implement')
 const impl = await callAgent(`Implement ${repo} subtask #${issue} from the validated plan at ${plan}.
 
+First, compute the resume key ONCE and reuse that exact value everywhere below — both paths need it, and every commit must carry it:
+\`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\`
+If that command fails or \`$PLAN_HASH\` comes back empty, STOP and report it; never proceed with an empty hash. Do NOT modify \`${plan}\`'s content at any point in this workflow — its exact bytes are what the hash is derived from, for this run and for every future resume. If ticking off plan checkboxes as you go is a habit, resist it here: it changes the hash and orphans every commit you already made.
+
 Setup: from ${repoDir}, run \`git fetch origin && git worktree prune\` (prune clears stale worktree registrations whose directories are gone), then create the worktree IDEMPOTENTLY. The branch name is STABLE across runs, so a stopped or killed earlier run can leave \`${BRANCH}\` and/or \`${WORKTREE}\` behind and a plain \`-b\` would fail:
   a. If branch \`${BRANCH}\` does NOT exist: \`git worktree add ${WORKTREE} -b ${BRANCH} origin/${baseBranch}\`. Skip straight to the TDD steps below.
   b. Else the branch (and possibly its worktree) already exists. First rule out live work on it — this is the ONLY place that check happens, so do not skip it: \`gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '.[] | select(.head.ref=="${BRANCH}") | .number'\`. An OPEN PR here means STOP: report the PR number and change NOTHING — never reset, delete, or commit over it. (The caller established there was no live PR when it queued this subtask; one appearing since means something else is driving this branch, and that is a human's call, not yours.)
      No open PR: ensure the worktree exists (\`git worktree add ${WORKTREE} ${BRANCH}\` if ${WORKTREE} is missing), then decide RESUME vs RESET by whether the branch's own commits implement the CURRENT plan:
-     - Compute \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\`. Do NOT modify \`${plan}\`'s content at any point in this workflow — its exact bytes are the resume key this hash is derived from, for this run and every future resume attempt. If ticking off plan checkboxes as you go is a habit, resist it here.
-     - If the \`sha256sum\` command fails, or \`$PLAN_HASH\` ends up empty, STOP and report the failure. Never proceed with an empty/missing hash — not for the resume-check below, and not for committing later.
      - Check for a matching trailer, scoped to this branch's own commits (not inherited history from origin/${baseBranch}): \`git -C ${WORKTREE} log origin/${baseBranch}..HEAD --grep="^Plan-Hash: $PLAN_HASH" --format=%H\`.
      - If that returns any commit: RESUME. These commits genuinely implement the plan you were just given (a killed earlier run, not stale debris). Do NOT reset. Run \`git -C ${WORKTREE} log --oneline origin/${baseBranch}..HEAD\` and read the plan's step list to see which steps are already committed, then continue STRICT TDD from the next uncompleted step — do not re-do committed steps.
      - If it returns nothing (empty, or the branch predates this convention): RESET. This branch is stale relative to the current plan (an earlier attempt under a different/no plan). \`git -C ${WORKTREE} reset --hard origin/${baseBranch}\` and start the TDD steps below from scratch. A hard reset over genuinely stale debris is deliberate: this plan-driven run re-derives the work deterministically, while building on unrelated partial state does not.
   This keeps the branch prefix STABLE — which is what lets already-merged subtasks stay detectable — while making leftovers self-healing instead of either a hard stop or blind data loss. NEVER work around a collision by inventing a different branch name: the caller decides whether a subtask is already done by finding the PR whose head ref carries this issue's number, and a name you invented is invisible to that lookup.
-Whichever path above you took, you need \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\` from here on — path (b) already computed it for the resume check above; if you took path (a), compute it now (and apply the same STOP-if-empty/failed rule if you're computing it here). Every commit you make below, on either path, must carry this same value as a trailer.
 Work ONLY inside ${WORKTREE}. Sync dependencies per this repo's own convention, then a baseline full-suite run (skip this if you just RESUMED and the suite was already green as of the last commit — re-run it anyway if unsure):
 ${verifyBlock}
 If baseline is ALREADY red before you change anything (and you are not resuming known-green work), stop and report it — do not fix someone else's failure inside this subtask.
@@ -344,6 +488,7 @@ Return a structured result. This stage has THREE stop conditions, all above: an 
 - blocked: true if ANY stop condition fired, or anything else made implementation impossible. false only if you completed the TDD work.
 - blockedReason: when blocked, ONE line naming which condition fired plus the concrete detail (the PR number, the command that failed, the tests already red). Empty when blocked=false.
 - existingPr: ONLY when an open PR on \`${BRANCH}\` is what stopped you — its number. Omit otherwise.
+- planHash: the exact 8-character lowercase-hex PLAN_HASH you computed above and used in every commit trailer.
 - resumed: true if you continued from existing Plan-Hash commits; false if you started fresh (path (a), or after a RESET).
 - report: the normal implementation report — commits made (oneline), test count added, deviations from the plan with reasons. The reviewer reads this next, so keep it factual and scoped to what you changed. Empty when blocked=true.
 
@@ -353,6 +498,7 @@ Do not set blocked=true for a difficulty you worked through and solved.`,
     properties: {
       blocked: { type: 'boolean' }, blockedReason: { type: 'string' },
       existingPr: { type: 'integer' }, resumed: { type: 'boolean' },
+      planHash: { type: 'string' },
       report: { type: 'string' },
     },
   } })
@@ -399,7 +545,8 @@ Return:
 - fixSummary: what you fixed vs skipped and why (empty string if findings was empty).
 - porcelain: the FIRST command's output exactly as printed — empty string if it printed nothing.
 - commitCount: the SECOND command's number.
-- taggedCount: the THIRD command's number.`,
+- taggedCount: the THIRD command's number.
+- planHash: the value \`$PLAN_HASH\` held when you ran that third command — the 8 characters, not the command.`,
   { label: `review:#${issue}`, phase: 'Review', model: 'opus', schema: {
     type: 'object', required: ['findings'],
     properties: {
@@ -409,8 +556,17 @@ Return:
       porcelain: { type: 'string' },
       commitCount: { type: 'integer' },
       taggedCount: { type: 'integer' },
+      planHash: { type: 'string' },
     },
   } })
+// agent() returns null when a stage dies terminally. Every other stage stops on
+// that; Review had no such check, so a dead reviewer read as "no unresolved
+// blockers" and the run walked on with nothing actually reviewed.
+if (!review) {
+  return { issue, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `the review stage returned nothing, so this branch has not been reviewed and its worktree state is unknown. Nothing was pushed. ${WORKTREE} is intact — re-run this subtask to review it.` }
+}
+
 // Review both raises AND fixes, so a blocker in `findings` may well have been
 // resolved in the same pass — only what the reviewer says is STILL standing
 // gates the PR. Previously nothing read this at all: a blocker-severity
@@ -428,27 +584,17 @@ if (unresolvedBlockers.length > 0) {
 // boundary at which they can be judged, and gating here costs no dispatch:
 // Ship simply never boots.
 //
-// Review is asked to REPORT these, never to interpret or act on them. An agent
-// that both measures and judges can talk itself out of the judgement.
-const porcelain = String((review && review.porcelain) || '').trim()
-if (porcelain.length > 0) {
-  return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `worktree still dirty after review, so the PR would not contain this work (nothing was pushed):\n${porcelain}` }
-}
+// Diagnosis before the verdict: the gate can tell that trailers are missing,
+// but only this comparison can say WHY.
+const hashDrift = planHashMismatch(impl.planHash, review.planHash)
+if (hashDrift) log(hashDrift)
 
-// Implement decides RESUME vs RESET by grepping for exactly this trailer, so an
-// untagged commit reads as stale debris and a later run would `reset --hard` it
-// away. Catching that here, before anything is pushed, is the whole point.
-const commitCount = Number(review && review.commitCount)
-const taggedCount = Number(review && review.taggedCount)
-if (!Number.isInteger(commitCount) || !Number.isInteger(taggedCount)) {
-  log(`review did not report usable commit/trailer counts (${review && review.commitCount}/${review && review.taggedCount}) — Plan-Hash gate skipped`)
-} else if (commitCount === 0) {
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `branch ${BRANCH} has no commits on top of ${baseBranch} — implementation produced nothing to ship.` }
-} else if (taggedCount < commitCount) {
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `only ${taggedCount} of ${commitCount} commits on ${BRANCH} carry their Plan-Hash trailer, so a future run would read this branch as stale and hard-reset it. Nothing was pushed. Do NOT re-run this subtask until the trailers are added (interactively, by a human) or the work is otherwise preserved.` }
+// The gate itself is reviewGate(), up in the PURE region, where it can be
+// tested without a dispatch. All that is left here is doing what it says.
+const gate = reviewGate(review, BRANCH, baseBranch)
+if (gate && gate.warn) log(gate.warn)
+if (gate && gate.blocked) {
+  return { issue, blocked: gate.blocked, branch: BRANCH, worktree: WORKTREE, plan, detail: gate.detail }
 }
 
 // ── 6. ship — verify, then push and open the PR (never merge) ───────────────
@@ -483,7 +629,7 @@ Implementer's report:
 ${clip(impl.report, 6000, 'implementer report')}
 ${board ? `
 4. Once the PR is open, as a final best-effort step (do NOT let its failure change anything you return):
-${boardMoveInstructions('inReview')}` : ''}
+${boardMoveInstructions('inReview', boardIds)}` : ''}
 
 Return:
 - passed: true only if EVERY command in step 1 exited green.

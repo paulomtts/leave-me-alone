@@ -57,7 +57,28 @@ Docs, config, scaffolding and pure-refactor cards are legitimate and must NOT be
 
 The common failure is a docs card written from the spec instead of the code, describing an interface that got built differently. Its body should name the files to read.
 
-**Order is stack order.** Subtask N+1 branches off N, so the sequence you create them in (or tag with ordinals) is the order they build in. Put the thing others rest on first. Reordering after the fact is expensive.
+### Order is stack order, and it must be reproducible
+
+Every branch name and every PR target is **derived**, not discovered:
+
+```
+milestone 12, subtask #14  ->  branch m12/task-14   (branchPrefix + issue number)
+                               base   m12/task-13   (the branch of the subtask before it)
+```
+
+The `m12/` prefix keeps one milestone's branches and worktrees together, so several can be in flight
+in one checkout without becoming an unreadable pile. It is not what makes them unique — the issue
+number already does that.
+
+So the ordering you give subtasks *is* the stack geometry. The workflow re-derives it from scratch on every run and looks for each PR at exactly that address — nothing is remembered between runs.
+
+Two consequences, both load-bearing:
+
+**Give every subtask an ordinal prefix in its title** (`11.1 `, `L2.3.1 `, `1.2 `). Without one, order falls back to the order the sub-issues endpoint returns, which is creation order — and creation order is not stable: detaching and re-attaching a sub-issue moves it. A milestone ordered only by creation order can silently re-shape its own stack between runs. With ordinals, the order is written down in the titles and survives anything.
+
+**Do not reorder subtasks once their PRs exist.** Reordering re-points the bases, so PRs opened against the old geometry no longer sit on their stack parent. The run does not guess: it reports them as `wrong-base` and treats that work as not done. If you must reorder, expect to re-target the open PRs by hand.
+
+Put the thing others rest on first.
 
 **Keep stories in the same level file-disjoint.** Stories with no dependency between them run in parallel, as separate stacks off the same base. If two of them edit the same files, nothing fails during the run — the conflict lands on whoever merges the stacks. Either give them disjoint footprints, or make one `blockedBy` the other so they stack instead.
 
@@ -145,4 +166,7 @@ What would make this breakdown wrong: putting #15 in level 0 (it would root at `
 | Folding in a docs/config/refactor card because "it has no tests" | That rule is for behavior-changing subtasks only. Judge these on their own terms — see "Subtasks that ship no behavior". |
 | A docs card written from the spec | It must read the actual implementation, which means it has to sit *after* that work in the stack. Name the files to read in its body. |
 | Expecting the run to merge anything | It does not. Each story becomes a stack of open PRs; a human merges bottom-up. Subtask issues stay open and cards sit at "In review" until then. |
+| Subtasks with no ordinal prefix in the title | Order falls back to the sub-issues endpoint's creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always prefix. |
+| Reordering subtasks after their PRs are open | The bases are derived from order, so reordering re-points them and the existing PRs read as `wrong-base` — i.e. not done. Re-target by hand or don't reorder. |
+| Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for PRs at a new address. It detects a merged PR under the old name and HALTS rather than re-implementing it, but only a re-run with the original prefix actually fixes it. |
 | Fixing the edges, then resuming the orchestrator run | Detect's result is cached on its prompt; a resume replays the stale empty snapshot. Relaunch as a NEW run with a fresh `nonce`. |
