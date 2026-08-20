@@ -454,7 +454,8 @@ ${verifyBlock}
 2. ONLY if every command in step 1 exited green: \`git push -u origin ${BRANCH}\`.
    (This branch was created by the /task pipeline for issue #${issue}; pushing it is the pipeline's expected final step. A branch of this name may have been reset earlier in this pipeline — that was deliberate debris reclamation, not resurrecting someone's work.)
 
-3. Then \`gh pr create --repo ${repo} --base ${baseBranch}\` with:
+3. Then open the PR. Pass \`--head\` EXPLICITLY — without it \`gh\` infers the head branch from whatever is checked out in the current directory, and if that is not this worktree it will open a PR from an unrelated branch under this subtask's title (observed: a PR carrying 5 commits of someone else's work, titled as this subtask):
+   \`gh pr create --repo ${repo} --base ${baseBranch} --head ${BRANCH}\` with:
    - a title: one conventional-commit-style line describing the branch's work.
    - a body: what changed and why, plus the test count, taken from the implementer's report below — do not re-derive it from the diff. It MUST contain the line "Closes #${issue}" and end with:
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
