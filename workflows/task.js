@@ -279,7 +279,7 @@ PARENT_ITEM_ID="${parentItemId}"
 You still need the siblings' CURRENT statuses, which change as the run progresses:
 ${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
 Among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target "${optionNames.done}"; otherwise (a mix) target "${optionNames.inProgress}". Then run the step-2 mutation against $PARENT_ITEM_ID with the matching option id from this map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.
-If either mutation fails with a not-found or invalid-id error, the cached id is stale (the card was removed and re-added): re-resolve it with \`${findCard('<that issue number>')}\` and retry once.`
+If a mutation fails with a not-found/invalid-id error the cached id is stale (card removed and re-added): look that card up by its issue number with the same projectItems query, then retry once.`
     : `3. Mirror the parent story. Fetch:
 ${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
 If there is no parent, stop here. Otherwise, among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target status by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target is "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target is "${optionNames.done}"; otherwise (a mix) target is "${optionNames.inProgress}". Then find the parent's card with the step-1-style query (its issue number) and set its Status with the step-2-style mutation using this option-id map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.`
@@ -287,7 +287,7 @@ If there is no parent, stop here. Otherwise, among the sub-issues' Status names 
   const report = known.report === true
     ? `
 
-Finally, report what you resolved so no later stage has to look it up again: board.itemId = the ITEM_ID above, board.parentItemId = the parent's item id (empty string if there is no parent), board.parentNumber = the parent issue number (0 if none). Report these even if a mutation failed — the ids are useful either way.`
+Finally, return board.itemId, board.parentItemId (empty if no parent) and board.parentNumber (0 if none) — later stages reuse these instead of re-querying. Report them even if a mutation failed.`
     : ''
 
   return `
