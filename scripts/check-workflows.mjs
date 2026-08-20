@@ -176,6 +176,15 @@ export async function checkWorkflows(targets, report = (line) => console.error(l
   return results
 }
 
+export function toJsonReport(results) {
+  const mapped = results.map((result) => ({
+    path: result.file,
+    ok: result.ok,
+    violations: result.errors,
+  }))
+  return { ok: mapped.every((entry) => entry.ok), results: mapped }
+}
+
 const invokedDirectly =
   process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 

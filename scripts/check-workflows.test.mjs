@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { checkFile } from './check-workflows.mjs'
+import { checkFile, toJsonReport } from './check-workflows.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -381,4 +381,43 @@ test('a plain (uninterpolated) template literal in meta is still accepted', asyn
   const file = await fixture('plain-template-meta.js', PLAIN_TEMPLATE_META_WORKFLOW)
   const result = await runChecker([file])
   assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+})
+
+test('toJsonReport maps checkFile results onto the JSON contract shape', () => {
+  const doc = toJsonReport([
+    { file: '/tmp/a.js', ok: true, error: null, errors: [] },
+    { file: '/tmp/b.js', ok: false, error: 'Unexpected token ;', errors: ['Unexpected token ;'] },
+  ])
+  assert.deepEqual(doc, {
+    ok: false,
+    results: [
+      { path: '/tmp/a.js', ok: true, violations: [] },
+      { path: '/tmp/b.js', ok: false, violations: ['Unexpected token ;'] },
+    ],
+  })
+})
+
+test('toJsonReport reports ok:true when every entry passes', () => {
+  const doc = toJsonReport([{ file: '/tmp/a.js', ok: true, error: null, errors: [] }])
+  assert.equal(doc.ok, true)
+  assert.deepEqual(doc.results[0].violations, [])
+})
+
+test('toJsonReport preserves multiple violations on one entry instead of collapsing them', () => {
+  const doc = toJsonReport([
+    {
+      file: '/tmp/c.js',
+      ok: false,
+      error: 'meta.name must be a non-empty string; meta.description must be a non-empty string',
+      errors: ['meta.name must be a non-empty string', 'meta.description must be a non-empty string'],
+    },
+  ])
+  assert.deepEqual(doc.results[0].violations, [
+    'meta.name must be a non-empty string',
+    'meta.description must be a non-empty string',
+  ])
+})
+
+test('toJsonReport on an empty result list is ok with no results', () => {
+  assert.deepEqual(toJsonReport([]), { ok: true, results: [] })
 })
