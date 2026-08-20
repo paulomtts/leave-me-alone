@@ -164,10 +164,18 @@ function assertNoBlockerCycles(stories) {
   for (const story of stories) walk(story.number, [])
 }
 
+// A subtask's branch is DERIVED, never discovered. The issue number is
+// immutable, unique within the repo, and already the identity everything else
+// uses, so branch = prefix + number is reproducible from the graph alone and
+// needs no lookup.
+//
+// An earlier version preferred a PR's real head ref, to survive a run whose
+// branchPrefix had changed. That made the geometry depend on the PRs and the
+// PR matching depend on the geometry — a circularity that produced two separate
+// bugs in one afternoon. Determinism is worth more than that resilience, so the
+// prefix is now treated as part of the milestone's identity: matchPr() reports
+// a merged PR under some OTHER name rather than silently ignoring it.
 function subtaskBranch(subtask, branchPrefix) {
-  // Prefer a PR's real head ref: a resumed stack may carry an older prefix, and
-  // the branch that actually exists is the one the next subtask must target.
-  if (subtask.pr && typeof subtask.pr === 'object' && subtask.pr.ref) return subtask.pr.ref
   return `${branchPrefix}${subtask.number}`
 }
 
@@ -260,10 +268,14 @@ function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }
 // Detect now fetches the PR list ONCE for the whole milestone and returns it
 // raw; the matching happens here, per subtask.
 
-// Match on the NUMBER, never the prefix: `aq-1050`, `task-1050`, `wip/1050`
-// and a bare `1050` all belong to subtask 1050, while `task-11050` does not.
-// Suffix matching is what makes doneness survive a prefix change — which is
-// also why branchPrefix must never be randomised or timestamped.
+// Not the matcher any more — the DIAGNOSTIC. Branches are derived, so a PR is
+// this subtask's only if its head ref is exactly the derived name. This answers
+// the narrower question "does some other branch end with this subtask's
+// number?", which is what a changed branchPrefix looks like: `aq-1050`,
+// `wip/1050` and a bare `1050` are all near misses for 1050, while `task-11050`
+// belongs to a different subtask entirely. matchPr() halts on a MERGED near
+// miss rather than re-implementing finished work (#1050); randomising or
+// timestamping branchPrefix would make every run one big near miss.
 function prMatchesSubtask(ref, number) {
   const text = String(ref ?? '')
   const suffix = String(number)
@@ -288,93 +300,78 @@ function normalizePr(raw) {
   }
 }
 
-// Matching runs in TWO passes, and the split is load-bearing.
+// With the branch derived from the graph, matching is an EXACT lookup: the head
+// ref this run would create, on the base the graph says it targets. No suffix
+// preference, no ranking across bases, no pass ordering to get wrong.
 //
-// The stack geometry is fully determined by the dependency graph: subtask N
-// targets N-1, and a story's first subtask targets its blocker's tip. So the
-// base is a FACT this run computes, never something to infer from whatever PRs
-// happen to exist. But the geometry is computed from BRANCH NAMES, and
-// subtaskBranch() prefers a PR's real head ref precisely because a resumed
-// stack may carry an older branchPrefix (#1050). Geometry therefore needs the
-// candidate refs, and base-checking needs the geometry.
-//
-// Pass 1 (candidatePrs) is base-blind: it answers "which PRs could be this
-// subtask's?" from the head ref alone. That is enough to give the geometry the
-// real branch names.
-// Pass 2 (selectPr) runs once the bases are known and uses the expected base as
-// a FILTER, not a preference — a PR on the wrong base is not weaker evidence of
-// doneness, it is not evidence at all (#1133).
-function candidatePrs(number, pulls) {
-  const candidates = (pulls ?? [])
-    .filter(raw => prMatchesSubtask(raw && raw.ref, number))
-    .map(normalizePr)
-  // Base-blind ordering only: merged work first, then the most recent.
-  candidates.sort((a, b) => {
-    if (a.merged !== b.merged) return a.merged ? -1 : 1
-    return b.number - a.number
-  })
-  return candidates
-}
+// Returns { pr, note }. `pr` uses the sentinels the rest of this file
+// understands: an object (a real PR), null (no PR — unstarted work), the string
+// 'unknown' (doneness is unverifiable, which halts the run), or 'wrong-base' (a
+// PR exists on this branch but not on its stack parent, so it is not evidence
+// of doneness — #1133).
+function matchPr(number, expectedBranch, expectedBase, pulls) {
+  const all = (pulls ?? []).map(normalizePr)
+  // Merged work first, then the most recent. Only ever applied WITHIN a group
+  // that already agrees on branch and base, so it can never override either.
+  const rank = (a, b) => (a.merged !== b.merged ? (a.merged ? -1 : 1) : b.number - a.number)
 
-// Returns { pr, note }. `pr` uses the same sentinels the rest of this file
-// understands: an object (a real PR), null (no PR — unstarted work), the
-// string 'unknown' (the lookup could not answer, which is NOT the same as
-// "none" and halts the run), or 'wrong-base' (a PR exists but is not on this
-// subtask's stack parent, so it says nothing about whether this work is done).
-function selectPr(candidates, wantedBase, number) {
-  const list = candidates ?? []
-  if (list.length === 0) return { pr: null, note: null }
+  const onBranch = all.filter(candidate => candidate.ref === expectedBranch)
+  if (onBranch.length > 0) {
+    const onBase = onBranch.filter(candidate => candidate.base === expectedBase).sort(rank)
+    if (onBase.length > 0) return { pr: onBase[0], note: null }
 
-  const onBase = list.filter(candidate => candidate.base === wantedBase)
-  if (onBase.length > 0) return { pr: onBase[0], note: null }
-
-  // A candidate whose base was not reported cannot be ruled in OR out, and
-  // guessing either way is what re-implemented merged work on 2026-08-17.
-  const unreported = list.find(candidate => !candidate.base)
-  if (unreported) {
-    return { pr: 'unknown',
-      note: `detect: PR #${unreported.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
+    const unreported = onBranch.find(candidate => !candidate.base)
+    if (unreported) {
+      return { pr: 'unknown',
+        note: `detect: PR #${unreported.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
+    }
+    const best = [...onBranch].sort(rank)[0]
+    return { pr: 'wrong-base',
+      note: `detect: ignoring PR #${best.number} for subtask #${number} — base "${best.base}" is not its stack parent "${expectedBase}"` }
   }
 
-  const best = list[0]
-  return { pr: 'wrong-base',
-    note: `detect: ignoring PR #${best.number} for subtask #${number} (head "${best.ref}") — base "${best.base}" is not its stack parent "${wantedBase}"` }
+  // Nothing on the derived branch. Before calling this unstarted, look for a PR
+  // sitting on some OTHER branch that ends with this subtask's number — the
+  // signature of a changed branchPrefix (#1050). Ignoring those silently is what
+  // re-dispatched finished work onto an empty diff.
+  const nearMiss = all.filter(candidate => prMatchesSubtask(candidate.ref, number)).sort(rank)
+  const mergedElsewhere = nearMiss.find(candidate => candidate.merged)
+  if (mergedElsewhere) {
+    // Halting costs one re-run with the right prefix. Guessing costs the work.
+    return { pr: 'unknown',
+      note: `detect: subtask #${number} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
+        + `but this run derives its branch as "${expectedBranch}". That is what a changed branchPrefix looks like. `
+        + 'Re-run with the branchPrefix this milestone was built under, or the finished work will be re-implemented.' }
+  }
+  if (nearMiss.length > 0) {
+    // Unmerged and under another name: a human's branch, or an abandoned
+    // attempt. Worth saying out loud, not worth halting the milestone.
+    return { pr: null,
+      note: `detect: subtask #${number} — ignoring unmerged PR #${nearMiss[0].number} on "${nearMiss[0].ref}"; `
+        + `this run works "${expectedBranch}"` }
+  }
+  return { pr: null, note: null }
 }
 
-// Both passes, in the one order that works — a function so the ORDER itself is
-// testable. It is not: an earlier version computed the geometry first and every
-// base quietly fell back to prefix+number, losing the drift resilience
-// subtaskBranch() exists to provide. Nothing in the pure functions was wrong;
-// the bug was entirely in the sequence, which is exactly the kind of defect
-// unit tests on the pieces cannot see.
-//
-// Mutates each subtask's `pr` in place (the shape the rest of this file reads)
-// and RETURNS the notes to log, so this stays free of harness globals.
+// One pass, because the geometry no longer depends on the PRs. Mutates each
+// subtask's `pr` in place and RETURNS the notes to log, so this stays free of
+// harness globals.
 function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, ordinalPattern, baseBranch) {
   const storiesByNumber = new Map(stories.map(story => [story.number, story]))
-
-  // PASS 1 — base-blind. stackBases() derives every base from subtaskBranch(),
-  // which prefers a PR's real head ref, so the refs must be attached first.
-  for (const story of stories) {
-    for (const subtask of story.subtasks ?? []) {
-      if (prLookupFailed) { subtask.pr = 'unknown'; continue }
-      subtask.candidates = candidatePrs(subtask.number, pulls)
-      subtask.pr = subtask.candidates[0] ?? null
-    }
-  }
-  if (prLookupFailed) return []
-
-  // PASS 2 — the graph now yields each subtask's real base, so the base
-  // FILTERS rather than ranks. stackBases() throws on multi-blocker or cyclic
-  // shapes; that is a human decision and is deliberately left to propagate.
   const notes = []
   for (const story of stories) {
+    // Computed even when the lookup failed: a multi-blocker shape is a human
+    // decision and must surface either way.
     const expectedBases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
     for (const subtask of story.subtasks ?? []) {
-      const { pr, note } = selectPr(subtask.candidates, expectedBases.get(subtask.number) || baseBranch, subtask.number)
+      if (prLookupFailed) { subtask.pr = 'unknown'; continue }
+      const { pr, note } = matchPr(
+        subtask.number,
+        subtaskBranch(subtask, branchPrefix),
+        expectedBases.get(subtask.number) || baseBranch,
+        pulls)
       if (note) notes.push(note)
       subtask.pr = pr
-      delete subtask.candidates
     }
   }
   return notes
@@ -740,9 +737,7 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
 
   // Detect matches PRs by number-suffix, so a resumed PR's real head ref can
   // carry an older prefix — prefer it over the freshly-derived name.
-  const branch = (subtask.pr && typeof subtask.pr === 'object' && subtask.pr.ref)
-    ? subtask.pr.ref
-    : `${branchPrefix}${subtask.number}`
+  const branch = subtaskBranch(subtask, branchPrefix)
 
   // A PR already exists against the right base, so this subtask is done for this
   // run — Detect verified the base, and isSubtaskDone accepts it. Nothing to

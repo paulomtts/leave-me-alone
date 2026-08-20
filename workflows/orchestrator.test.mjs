@@ -18,11 +18,11 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const {
   orderSubtasks, isSubtaskDone, remainingSubtasks, computeLevels,
   assertNoBlockerCycles, storyRoot, stackBases, escalation,
-  prMatchesSubtask, candidatePrs, selectPr, attachPullRequests, dropCommandsNamingMissingPaths,
+  prMatchesSubtask, matchPr, attachPullRequests, dropCommandsNamingMissingPaths,
 } = await loadPure(join(HERE, 'orchestrator.js'), [
   'orderSubtasks', 'isSubtaskDone', 'remainingSubtasks', 'computeLevels',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
-  'prMatchesSubtask', 'normalizePr', 'candidatePrs', 'selectPr', 'attachPullRequests',
+  'prMatchesSubtask', 'normalizePr', 'matchPr', 'attachPullRequests',
   'dropCommandsNamingMissingPaths',
 ])
 
@@ -157,9 +157,15 @@ test('a DONE blocker still supplies its tip — done does not mean landed', () =
   assert.equal(storyRoot(B, mk([A, B]), PREFIX, PAT, BASE), 'task-1')
 })
 
-test("a PR's real head ref wins over the derived name (prefix drift)", () => {
+test('the geometry is derived from the graph, never from a PR head ref', () => {
+  // A PR under a different name does NOT bend the stack toward itself. The
+  // geometry has to be reproducible from the graph alone -- when it read head
+  // refs instead, the bases depended on the PRs and the PR matching depended on
+  // the bases, and that circularity produced two bugs in one afternoon.
+  // matchPr() is where a stray branch gets noticed, and it halts rather than
+  // quietly re-shaping the stack.
   const A = { number: 100, blockedBy: [], subtasks: [sub(1, '1.1 a', openPr(9, 'aq-1')), sub(2, '1.2 b')] }
-  assert.equal(stackBases(A, mk([A]), PREFIX, PAT, BASE).get(2), 'aq-1')
+  assert.equal(stackBases(A, mk([A]), PREFIX, PAT, BASE).get(2), 'task-1')
 })
 
 test('a chain of three stories roots transitively', () => {
@@ -226,86 +232,78 @@ test('a missing or empty ref never matches', () => {
   for (const ref of [null, undefined, '']) assert.equal(prMatchesSubtask(ref, 1050), false)
 })
 
-// ── candidatePrs (pass 1: base-blind) ───────────────────────────────────────
+// ── matchPr: exact branch, exact base ───────────────────────────────────────
 
 const pr = (number, ref, base, over = {}) => ({ number, ref, base, url: `u/${number}`, state: 'open', ...over })
 
-test('pass 1 selects by head ref alone, so the geometry can see real branches', () => {
-  // Base is deliberately NOT consulted here: stackBases() derives every base
-  // from these refs, so consulting it now would be circular.
-  const found = candidatePrs(14, [pr(7, 'task-14', 'anything-at-all'), pr(1, 'task-99', 'main')])
-  assert.equal(found.length, 1)
-  assert.equal(found[0].number, 7)
-  assert.equal(found[0].state, 'OPEN')   // REST says "open"; downstream compares uppercase
+test('the PR on the derived branch and the graph-derived base is the match', () => {
+  const { pr: found, note } = matchPr(14, 'task-14', 'task-13', [pr(7, 'task-14', 'task-13')])
+  assert.equal(found.number, 7)
+  assert.equal(found.state, 'OPEN')   // REST says "open"; downstream compares uppercase
+  assert.equal(note, null)
 })
 
 test('merged_at is what makes a PR merged, not the issue being closed', () => {
-  assert.equal(candidatePrs(14, [pr(7, 'task-14', 'main', { merged_at: '2026-08-19T00:00:00Z' })])[0].merged, true)
-  assert.equal(candidatePrs(14, [pr(8, 'task-14', 'main', { merged_at: null })])[0].merged, false)
+  assert.equal(matchPr(14, 'task-14', 'main', [pr(7, 'task-14', 'main', { merged_at: '2026-08-19T00:00:00Z' })]).pr.merged, true)
+  assert.equal(matchPr(14, 'task-14', 'main', [pr(8, 'task-14', 'main', { merged_at: null })]).pr.merged, false)
 })
 
-test('pass 1 ranks merged first, then most recent', () => {
-  const ranked = candidatePrs(14, [
-    pr(4, 'task-14', 'main'),
-    pr(9, 'task-14', 'main'),
-    pr(3, 'task-14', 'main', { merged_at: '2026-08-01T00:00:00Z' }),
-  ])
-  assert.deepEqual(ranked.map(candidate => candidate.number), [3, 9, 4])
+test('nothing matching means unstarted work, silently', () => {
+  assert.deepEqual(matchPr(13, 'task-13', 'main', [pr(1, 'task-99', 'main')]), { pr: null, note: null })
+  assert.deepEqual(matchPr(13, 'task-13', 'main', []), { pr: null, note: null })
+  assert.deepEqual(matchPr(13, 'task-13', 'main', null), { pr: null, note: null })
 })
 
-test('no candidates at all', () => {
-  assert.deepEqual(candidatePrs(13, [pr(1, 'task-99', 'main')]), [])
-  assert.deepEqual(candidatePrs(13, []), [])
-  assert.deepEqual(candidatePrs(13, null), [])
-})
-
-// ── selectPr (pass 2: the graph's base is a FILTER) ──────────────────────────
-
-test('no candidates means no PR — unstarted work, not a failure', () => {
-  assert.deepEqual(selectPr([], 'main', 13), { pr: null, note: null })
-  assert.deepEqual(selectPr(null, 'main', 13), { pr: null, note: null })
-})
-
-test('the PR on the expected stack parent is chosen, whatever its rank was', () => {
-  // This is the whole point of the two passes. The merged PR on main outranks
-  // the open one in pass 1, but the graph says #14 targets task-13, so the
-  // ranking does not get a vote.
-  const candidates = candidatePrs(14, [
-    pr(9, 'task-14', 'main', { merged_at: '2026-08-01T00:00:00Z' }),
-    pr(4, 'task-14', 'task-13'),
-  ])
-  assert.equal(candidates[0].number, 9)                    // pass 1 ranked the merged one first
-  assert.equal(selectPr(candidates, 'task-13', 14).pr.number, 4)   // pass 2 filters by the known base
-})
-
-test('a PR against the wrong base is rejected, and is NOT the same as no PR', () => {
+test('a PR on the right branch but the wrong base is rejected, and is NOT no-PR', () => {
   // The #1133 bug: head task-1133, base main instead of its stack parent,
   // counted as done across many runs. 'wrong-base' is a distinct sentinel from
   // null precisely so isSubtaskDone cannot read it as finished work.
-  const { pr: found, note } = selectPr(candidatePrs(14, [pr(7, 'task-14', 'main')]), 'task-13', 14)
+  const { pr: found, note } = matchPr(14, 'task-14', 'task-13', [pr(7, 'task-14', 'main')])
   assert.equal(found, 'wrong-base')
   assert.match(note, /base "main" is not its stack parent "task-13"/)
 })
 
 test('an unreported base is unverifiable — it halts rather than guesses', () => {
-  const { pr: found, note } = selectPr(candidatePrs(14, [pr(7, 'task-14', '')]), 'task-13', 14)
+  const { pr: found, note } = matchPr(14, 'task-14', 'task-13', [pr(7, 'task-14', '')])
   assert.equal(found, 'unknown')
-  assert.match(note, /subtask #14 reported no base branch/)
+  assert.match(note, /reported no base branch/)
 })
 
-test('a correct PR outweighs a sibling with an unreported base', () => {
-  // "unknown" halts the whole run, so it must only fire when the answer really
-  // is unobtainable — not when a valid PR is sitting right there.
-  const candidates = candidatePrs(14, [pr(7, 'task-14', ''), pr(8, 'task-14', 'task-13')])
-  assert.equal(selectPr(candidates, 'task-13', 14).pr.number, 8)
+test('ranking applies only WITHIN the right branch and base', () => {
+  // It can never override either, so a merged PR on the wrong base cannot win.
+  const pulls = [pr(9, 'task-14', 'main', { merged_at: '2026-08-01T00:00:00Z' }), pr(4, 'task-14', 'task-13')]
+  assert.equal(matchPr(14, 'task-14', 'task-13', pulls).pr.number, 4)
+
+  const both = [pr(4, 'task-14', 'task-13'), pr(3, 'task-14', 'task-13', { merged_at: '2026-08-01T00:00:00Z' })]
+  assert.equal(matchPr(14, 'task-14', 'task-13', both).pr.number, 3)
 })
 
-test('among several PRs on the CORRECT base, pass 1 order decides', () => {
-  const candidates = candidatePrs(14, [
-    pr(4, 'task-14', 'task-13'),
-    pr(3, 'task-14', 'task-13', { merged_at: '2026-08-01T00:00:00Z' }),
-  ])
-  assert.equal(selectPr(candidates, 'task-13', 14).pr.number, 3)
+// ── near misses: the branchPrefix changed ────────────────────────────────────
+
+test('a MERGED PR under another name halts instead of re-implementing it', () => {
+  // #1050: the prefix changed between runs, exact matching found nothing, and
+  // finished work was re-dispatched onto an empty diff. Derived naming brings
+  // that risk back, so it is met head-on: stop and name the likely cause.
+  const { pr: found, note } = matchPr(13, 'task-13', 'main',
+    [pr(20, 'aq-13', 'main', { merged_at: '2026-08-01T00:00:00Z' })])
+  assert.equal(found, 'unknown')
+  assert.match(note, /MERGED PR #20 on branch "aq-13"/)
+  assert.match(note, /branchPrefix/)
+})
+
+test('an UNMERGED near miss is reported but does not halt the milestone', () => {
+  // A human branch that happens to end in the number, or an abandoned attempt.
+  // Loud, but not worth stopping a milestone for.
+  const { pr: found, note } = matchPr(13, 'task-13', 'main', [pr(21, 'wip/13', 'main')])
+  assert.equal(found, null)
+  assert.match(note, /ignoring unmerged PR #21 on "wip\/13"/)
+})
+
+test('a longer number is not a near miss', () => {
+  // task-113 belongs to subtask 113, not 13. Treating it as a near miss would
+  // halt milestones over unrelated work.
+  assert.deepEqual(matchPr(13, 'task-13', 'main',
+    [pr(20, 'task-113', 'main', { merged_at: '2026-08-01T00:00:00Z' })]), { pr: null, note: null })
 })
 
 // ── dropCommandsNamingMissingPaths ───────────────────────────────────────────
@@ -352,46 +350,36 @@ test('missing/absent inputs are handled without throwing', () => {
   assert.deepEqual(dropCommandsNamingMissingPaths(null, null), { kept: [], dropped: [] })
 })
 
-// ── attachPullRequests: the ORDER of the two passes ──────────────────────────
+// ── attachPullRequests ──────────────────────────────────────────────────────
 
 const attach = (stories, pulls, failed = false) =>
   attachPullRequests(stories, pulls, failed, PREFIX, PAT, BASE)
 
-test('a stack resumed under an OLDER prefix still lines up (the ordering bug)', () => {
-  // #13 was built in a previous run when the prefix was "aq-", so its PR's head
-  // ref is aq-13 and #14's PR correctly targets aq-13 -- not task-13.
-  //
-  // This only works if pass 1 attaches the refs BEFORE the geometry is
-  // computed: stackBases() derives #14's base from subtaskBranch(#13), which
-  // prefers the PR's real head ref. Compute the geometry first and #14's
-  // expected base is "task-13", the real PR gets rejected as wrong-base, and
-  // finished work is re-dispatched onto an empty diff.
+test('every branch and base comes from the graph, with no PR consulted', () => {
   const story = { number: 1, blockedBy: [], subtasks: [
     { number: 13, title: '1.1 first', state: 'OPEN' },
     { number: 14, title: '1.2 second', state: 'OPEN' },
   ] }
   const notes = attach([story], [
-    { number: 20, ref: 'aq-13', base: 'main', merged_at: null, state: 'open' },
-    { number: 21, ref: 'aq-14', base: 'aq-13', merged_at: null, state: 'open' },
+    { number: 20, ref: 'task-13', base: 'main', merged_at: null, state: 'open' },
+    { number: 21, ref: 'task-14', base: 'task-13', merged_at: null, state: 'open' },
   ])
-  assert.deepEqual(notes, [], 'nothing should have been rejected')
+  assert.deepEqual(notes, [])
   assert.equal(story.subtasks[0].pr.number, 20)
   assert.equal(story.subtasks[1].pr.number, 21)
 })
 
-test('a PR on the derived name is still rejected when the stack actually drifted', () => {
-  // The mirror image: #14 targets task-13, but #13's real branch is aq-13. That
-  // PR is NOT this subtask's stack member, and saying so is the point.
+test('a whole stack built under an older prefix halts on its first merged PR', () => {
   const story = { number: 1, blockedBy: [], subtasks: [
-    { number: 13, title: '1.1 first', state: 'OPEN' },
+    { number: 13, title: '1.1 first', state: 'CLOSED' },
     { number: 14, title: '1.2 second', state: 'OPEN' },
   ] }
   const notes = attach([story], [
-    { number: 20, ref: 'aq-13', base: 'main', merged_at: null, state: 'open' },
-    { number: 21, ref: 'task-14', base: 'task-13', merged_at: null, state: 'open' },
+    { number: 20, ref: 'aq-13', base: 'main', merged_at: '2026-08-01T00:00:00Z', state: 'closed' },
+    { number: 21, ref: 'aq-14', base: 'aq-13', merged_at: null, state: 'open' },
   ])
-  assert.equal(story.subtasks[1].pr, 'wrong-base')
-  assert.match(notes[0], /is not its stack parent "aq-13"/)
+  assert.equal(story.subtasks[0].pr, 'unknown')
+  assert.match(notes[0], /branchPrefix/)
 })
 
 test('the first subtask of a blocked story roots on its blocker tip', () => {
@@ -413,17 +401,10 @@ test('a failed lookup marks every subtask unknown and rejects nothing', () => {
   assert.deepEqual(story.subtasks.map(s => s.pr), ['unknown', 'unknown'])
 })
 
-test('the scratch field never survives into the result', () => {
-  // Pass 1 parks candidates on the subtask; anything left behind would ride
-  // into the dry-run output and the dispatch payload.
-  const story = { number: 1, blockedBy: [], subtasks: [{ number: 13, title: '1.1 a', state: 'OPEN' }] }
-  attach([story], [{ number: 20, ref: 'task-13', base: 'main', merged_at: null, state: 'open' }])
-  assert.equal('candidates' in story.subtasks[0], false)
-})
-
-test('multi-blocker shapes still throw from inside the passes', () => {
+test('multi-blocker shapes throw even when the PR lookup failed', () => {
+  // The shape is a human decision and must surface regardless of API health.
   const a = { number: 1, blockedBy: [], subtasks: [{ number: 13, title: '1.1 a', state: 'OPEN' }] }
   const b = { number: 2, blockedBy: [], subtasks: [{ number: 14, title: '2.1 b', state: 'OPEN' }] }
   const c = { number: 3, blockedBy: [1, 2], subtasks: [{ number: 15, title: '3.1 c', state: 'OPEN' }] }
-  assert.throws(() => attach([a, b, c], []), /blocked by 2 stories/)
+  assert.throws(() => attach([a, b, c], [], true), /blocked by 2 stories/)
 })
