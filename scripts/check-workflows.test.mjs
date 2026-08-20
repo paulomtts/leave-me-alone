@@ -48,3 +48,41 @@ test('valid workflow-shaped script passes', async () => {
   const result = await runChecker([file])
   assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
 })
+
+test('real workflows/*.js scripts pass with no arguments', async () => {
+  const result = await runChecker([])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+  assert.match(result.stdout, /checked 2 workflow script\(s\); 0 failed/)
+})
+
+test('real workflow scripts pass when named explicitly', async () => {
+  const result = await runChecker([
+    path.join(repoRoot, 'workflows', 'orchestrator.js'),
+    path.join(repoRoot, 'workflows', 'task.js'),
+  ])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+})
+
+const BROKEN_WORKFLOW = `export const meta = { name: 'broken' }
+
+const value = ;
+
+return { ok: true }
+`
+
+test('script with a real syntax error fails and names the file', async () => {
+  const file = await fixture('broken.js', BROKEN_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  const output = result.stdout + result.stderr
+  assert.ok(output.includes(file), `expected output to name ${file}\n${output}`)
+  assert.match(output, /Unexpected token/)
+})
+
+test('a broken file does not stop later files from being checked', async () => {
+  const broken = await fixture('broken.js', BROKEN_WORKFLOW)
+  const valid = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker([broken, valid])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
+})
