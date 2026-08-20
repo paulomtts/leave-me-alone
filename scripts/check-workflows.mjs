@@ -76,14 +76,17 @@ export function resolveMetaLiteral(literal) {
 }
 
 // Beyond free-identifier references (caught by resolveMetaLiteral throwing), a
-// pure object literal never legitimately needs `(` or `...`: reject both
-// syntactically, since a call to a built-in (String(), Math.max(), ...) would
-// otherwise resolve silently in the empty vm context instead of throwing.
+// pure object literal never legitimately needs `(`, `...` or a `${}` template
+// substitution: reject all three syntactically, since a call to a built-in
+// (String(), Math.max(), ...) or an interpolation of a constant would otherwise
+// resolve silently in the empty vm context instead of throwing.
 export function hasImpureSyntax(literal) {
   for (let i = 0; i < literal.length; i += 1) {
     const ch = literal[i]
     if (ch === '"' || ch === "'" || ch === '`') {
-      i = skipQuoted(literal, i)
+      const end = skipQuoted(literal, i)
+      if (ch === '`' && literal.slice(i, end).includes('${')) return true
+      i = end
       continue
     }
     if (ch === '/' && literal[i + 1] === '/') {

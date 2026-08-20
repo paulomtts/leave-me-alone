@@ -353,3 +353,32 @@ test('checkFile reports a passing file with no violations and a null error', asy
   assert.deepEqual(result.errors, [])
   assert.equal(result.error, null)
 })
+
+const INTERPOLATED_META_WORKFLOW = `export const meta = {
+  name: \`pre\${'fix'}\`,
+  description: 'built from an interpolated template',
+}
+
+return { ok: true }
+`
+
+test('meta built from an interpolated template is rejected as impure', async () => {
+  const file = await fixture('interpolated-meta.js', INTERPOLATED_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, IMPURE_MESSAGE)
+})
+
+const PLAIN_TEMPLATE_META_WORKFLOW = `export const meta = {
+  name: \`plain\`,
+  description: 'a template literal with nothing interpolated',
+}
+
+return { ok: true }
+`
+
+test('a plain (uninterpolated) template literal in meta is still accepted', async () => {
+  const file = await fixture('plain-template-meta.js', PLAIN_TEMPLATE_META_WORKFLOW)
+  const result = await runChecker([file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+})
