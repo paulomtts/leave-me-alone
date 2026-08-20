@@ -571,19 +571,22 @@ const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.
       + 'repo can be checked out anywhere, and no fallback: the census is deterministic or it does '
       + 'not happen. It is run with `bun`.') })()
 
-// Both setup agents run one command and read nothing else, but they are still
-// handed the default subagent's context: 5.8KB listing every deferred tool and
-// 10.7KB describing every skill, measured — 16KB of catalogue for a 451-char
-// prompt about `bun`. A custom agent type with `tools: Bash` and a one-line
-// body should carry neither.
+// Both setup agents run one command and read nothing else. The DEFAULT
+// subagent hands them 16,424 characters of context anyway — 5.8KB listing every
+// deferred tool name, 10.7KB describing every skill — measured, for a 451-char
+// prompt about `bun`. A custom agent type carries neither: the same run with a
+// restricted-tool type attached ZERO attachments.
 //
-// Opt-in, because the agent registry is read when a session starts: a
-// definition added mid-session is not found, and a missing one is a hard error
-// rather than a fallback. Create ~/.claude/agents/<name>.md, restart, then pass
-// the name here.
-const triggerAgent = typeof opts.triggerAgentType === 'string' && opts.triggerAgentType.length > 0
-  ? { agentType: opts.triggerAgentType }
-  : {}
+// So both triggers use `command-runner`: `tools: Bash`, a one-line body, and
+// nothing else to read. Its definition is version-controlled at
+// agents/command-runner.md and must be installed at ~/.claude/agents/ — the
+// registry is read when a session STARTS, so installing it mid-session is not
+// enough, and a missing type is a hard error rather than a silent fallback.
+// Override with args.triggerAgentType, or pass '' to use the default subagent.
+const triggerAgentType = typeof opts.triggerAgentType === 'string'
+  ? opts.triggerAgentType
+  : 'command-runner'
+const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
 // Only needed when the board is given as a NUMBER — resolved ids skip the
 // lookup entirely, and unlike a census those are stable config, not a snapshot.

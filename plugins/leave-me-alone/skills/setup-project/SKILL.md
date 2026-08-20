@@ -253,18 +253,29 @@ and no lookup happens at all. Without either, the board is disabled and the run 
 
 `bun` must be on PATH.
 
-Both trigger agents are still handed the default subagent context — measured at 16KB per call: 5.8KB
-listing every deferred tool and 10.7KB describing every skill, none of it relevant to running one
-command. (Project `CLAUDE.md` is *not* injected into workflow subagents; that was measured too.) To
-strip it, create an agent definition with `tools: Bash` and a one-line body, restart the session so
-the registry picks it up, then pass its name:
+### Install the trigger agent — required
 
-```jsonc
-"triggerAgentType": "command-runner"
+Both trigger agents run one command and read nothing else, but the DEFAULT subagent hands them
+16,424 characters of context anyway: 5.8KB listing every deferred tool name, 10.7KB describing every
+skill. (Project `CLAUDE.md` is *not* among it — that was measured separately.) So the orchestrator
+uses a lean agent type instead, and it must be installed:
+
+```bash
+cp agents/command-runner.md ~/.claude/agents/     # then RESTART the session
 ```
 
-The registry is read at session start, so a definition added mid-session is not found — and a missing
-one is a hard error, not a fallback. Omit the argument to use the default subagent.
+Measured on the same dry run, before and after:
+
+| | default subagent | `command-runner` |
+|---|---|---|
+| injected attachments | 16,424 chars | **0** |
+| first-call context | ~16,500 tokens | **~5,100** |
+| whole run (2 agents) | 35,097 tokens | **11,702** |
+| payload fidelity | 993 bytes, exact | 993 bytes, exact |
+
+The agent registry is read when a session **starts**, so installing it mid-session is not enough, and
+a missing type is a hard error rather than a silent fallback to the expensive agent. Override with
+`triggerAgentType`, or pass `""` to deliberately use the default subagent.
 
 The census is also always taken **fresh**. There is deliberately no way to hand over one you took
 earlier: a census is a snapshot of what is merged, and a stale one re-dispatches work that has since
