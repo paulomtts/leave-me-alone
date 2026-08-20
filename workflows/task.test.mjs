@@ -16,8 +16,8 @@ import { loadPure } from './load-pure.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-const { verificationGate, reviewGate } = await loadPure(join(HERE, 'task.js'), [
-  'verificationGate', 'reviewGate',
+const { verificationGate, reviewGate, isPlanHash, planHashMismatch } = await loadPure(join(HERE, 'task.js'), [
+  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch',
 ])
 
 const BRANCH = 'task-42'
@@ -135,4 +135,37 @@ test('a numeric string count is still usable', () => {
   // would skip the gate on a branch that could have been checked.
   assert.equal(reviewGate(clean({ commitCount: '3', taggedCount: '3' }), BRANCH, BASE), null)
   assert.equal(reviewGate(clean({ commitCount: '3', taggedCount: '2' }), BRANCH, BASE).blocked, 'implement')
+})
+
+// ── isPlanHash / planHashMismatch ────────────────────────────────────────────
+
+test('a Plan-Hash is exactly 8 lowercase hex characters', () => {
+  assert.equal(isPlanHash('a1b2c3d4'), true)
+  assert.equal(isPlanHash('00000000'), true)
+  for (const bad of ['A1B2C3D4', 'a1b2c3d', 'a1b2c3d4e', 'a1b2c3g4', '', '  a1b2c3d4', null, undefined, 12345678]) {
+    assert.equal(isPlanHash(bad), false, `${JSON.stringify(bad)} is not a plan hash`)
+  }
+})
+
+test('matching hashes report no drift', () => {
+  assert.equal(planHashMismatch('a1b2c3d4', 'a1b2c3d4'), null)
+})
+
+test('a hash that changed mid-run is named as a MODIFIED PLAN, not a bad commit', () => {
+  // The gate downstream will say "0 of 3 commits carry their trailer", which
+  // reads as an implementation failure. It is not: the plan moved underneath
+  // commits that were correct when written. Only this comparison can say so.
+  const drift = planHashMismatch('a1b2c3d4', 'ffffffff')
+  assert.match(drift, /a1b2c3d4/)
+  assert.match(drift, /ffffffff/)
+  assert.match(drift, /modified after implementation/)
+})
+
+test('drift is not claimed when either hash is unusable', () => {
+  // A stage that failed to report its hash tells us nothing about the other
+  // one; inventing a mismatch there would send someone after a phantom.
+  assert.equal(planHashMismatch(undefined, 'a1b2c3d4'), null)
+  assert.equal(planHashMismatch('a1b2c3d4', ''), null)
+  assert.equal(planHashMismatch('not-a-hash', 'a1b2c3d4'), null)
+  assert.equal(planHashMismatch(null, null), null)
 })
