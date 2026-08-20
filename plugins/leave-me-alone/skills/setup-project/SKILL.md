@@ -148,8 +148,12 @@ order — which detaching and re-attaching a child will change. That silently re
 between runs, and PRs opened against the old shape then read as `wrong-base`. It works, but only for
 a milestone nobody ever touches.
 
-**`branchPrefix` is part of the milestone's identity.** Branch names are derived from it, so changing
-it mid-milestone points the run at addresses where nothing exists. It will not quietly re-implement
+**`branchPrefix` is part of the milestone's identity.** It defaults to `m<milestone>/task-`, so
+subtask #13 of milestone 12 builds on `m12/task-13` in worktree `.claude/worktrees/m12/task-13`.
+That grouping is for legibility and cleanup — `git branch --list "m12/*"`, `rm -rf
+.claude/worktrees/m12` — not for avoiding collisions, since issue numbers are already unique per
+repo. Branch names are derived from the prefix, so changing it mid-milestone points the run at
+addresses where nothing exists. It will not quietly re-implement
 finished work — a merged PR found under the old name halts the run and names the prefix as the
 cause — but the only real fix is re-running with the prefix the milestone was built under. Never
 randomise or timestamp it.
@@ -238,5 +242,7 @@ If the levels, the subtask order, or the targets look wrong, fix the board — n
 | Adding cards to the board later | Cards missing at resolve time are reported, never auto-added. |
 | Expecting a card per PR | One PR per **subtask**. Each subtask's card goes "In review" when its own PR opens. |
 | Expecting cards to reach "Done" | The run never merges, so nothing closes. Cards stop at "In review" and issues stay open until a human merges the stack. "Done" is still required to exist — the board resolver checks all four option names. |
+| Expecting flat branch names | The default prefix is `m<milestone>/task-`, so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme — it is used verbatim. |
+| Adopting the milestone prefix on a milestone that already has merged PRs | Those PRs sit at the old addresses. The run finds them as near misses and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
 | Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A merged PR under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
 | No `project` arg at all | Legal: the run is boardless and only touches issues and PRs. |

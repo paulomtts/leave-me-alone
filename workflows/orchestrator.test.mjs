@@ -408,3 +408,40 @@ test('multi-blocker shapes throw even when the PR lookup failed', () => {
   const c = { number: 3, blockedBy: [1, 2], subtasks: [{ number: 15, title: '3.1 c', state: 'OPEN' }] }
   assert.throws(() => attach([a, b, c], [], true), /blocked by 2 stories/)
 })
+
+// ── milestone-scoped branch prefixes ─────────────────────────────────────────
+
+const MPREFIX = 'm12/task-'
+
+test('a slash prefix groups a milestone without disturbing the geometry', () => {
+  const story = { number: 1, blockedBy: [], subtasks: [
+    { number: 13, title: '1.1 first', state: 'OPEN' },
+    { number: 14, title: '1.2 second', state: 'OPEN' },
+  ] }
+  const bases = stackBases(story, mk([story]), MPREFIX, PAT, BASE)
+  assert.equal(bases.get(13), 'main')
+  assert.equal(bases.get(14), 'm12/task-13')
+})
+
+test('the number rule survives slashes in the branch name', () => {
+  assert.equal(prMatchesSubtask('m12/task-13', 13), true)
+  assert.equal(prMatchesSubtask('m1/task-213', 13), false)   // 213 is a different subtask
+  assert.equal(prMatchesSubtask('m12/task-13', 3), false)    // preceded by a digit
+})
+
+test('PRs match against the milestone-scoped branch', () => {
+  const { pr: found } = matchPr(14, 'm12/task-14', 'm12/task-13',
+    [pr(7, 'm12/task-14', 'm12/task-13')])
+  assert.equal(found.number, 7)
+})
+
+test('adopting the prefix on a milestone with merged work HALTS, it does not redo it', () => {
+  // The migration case, and the reason this is not a free rename: a milestone
+  // built under a bare "task-" has its finished PRs at the old addresses. The
+  // run finds them as near misses and stops rather than re-implementing them.
+  const { pr: found, note } = matchPr(13, 'm12/task-13', 'main',
+    [pr(20, 'task-13', 'main', { merged_at: '2026-08-01T00:00:00Z' })])
+  assert.equal(found, 'unknown')
+  assert.match(note, /MERGED PR #20 on branch "task-13"/)
+  assert.match(note, /m<milestone>\/task-/)
+})

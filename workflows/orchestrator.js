@@ -340,7 +340,8 @@ function matchPr(number, expectedBranch, expectedBase, pulls) {
     // Halting costs one re-run with the right prefix. Guessing costs the work.
     return { pr: 'unknown',
       note: `detect: subtask #${number} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
-        + `but this run derives its branch as "${expectedBranch}". That is what a changed branchPrefix looks like. `
+        + `but this run derives its branch as "${expectedBranch}". That is what a changed branchPrefix looks like `
+        + '(the default is now "m<milestone>/task-"; a milestone built under a bare "task-" predates it). '
         + 'Re-run with the branchPrefix this milestone was built under, or the finished work will be re-implemented.' }
   }
   if (nearMiss.length > 0) {
@@ -454,7 +455,23 @@ if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
     + 'stacked PRs and never merges, so there is nothing to auto-merge and no conflicts to resolve mid-run.')
 }
 const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
-const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
+// Branch names carry their milestone: subtask #13 of milestone 12 lives on
+// `m12/task-13`, worktree `.claude/worktrees/m12/task-13`.
+//
+// This is NOT collision avoidance — issue numbers are already unique per repo,
+// so two milestones can never claim the same subtask number, and two runs of
+// the SAME milestone would share this prefix anyway. It buys legibility and
+// bulk cleanup: `git branch --list "m12/*"` and `rm -rf .claude/worktrees/m12`
+// each address exactly one milestone, which matters once a repo has several in
+// flight.
+//
+// An explicit branchPrefix is used verbatim, milestone and all — explicit means
+// explicit. Whatever it is, it must stay CONSTANT for the life of a milestone:
+// names are derived from it, so changing it points the run at addresses where
+// nothing exists (matchPr halts on a merged PR found under the old name).
+const branchPrefix = typeof opts.branchPrefix === 'string'
+  ? opts.branchPrefix
+  : `m${milestoneNumber}/task-`
 const ordinalPattern = typeof opts.ordinalPattern === 'string' ? opts.ordinalPattern : DEFAULT_ORDINAL
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 // Caps how many stories within one DAG level are in flight at once — separate
