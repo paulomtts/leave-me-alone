@@ -243,3 +243,74 @@ test('a meta-invalid file does not stop later files or inflate the failure count
   assert.notEqual(result.code, 0, 'expected a non-zero exit code')
   assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
 })
+
+test('meta without a phases key passes', async () => {
+  const file = await fixture('no-phases.js', metaOnly(`  name: 'ok',\n  description: 'no phases',`))
+  const result = await runChecker([file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+})
+
+test('meta with an empty phases array passes', async () => {
+  const file = await fixture(
+    'empty-phases.js',
+    metaOnly(`  name: 'ok',\n  description: 'empty phases',\n  phases: [],`),
+  )
+  const result = await runChecker([file])
+  assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
+})
+
+test('meta with non-array phases fails', async () => {
+  for (const value of [`{ title: 'One' }`, `'One'`]) {
+    const file = await fixture(
+      'bad-phases.js',
+      metaOnly(`  name: 'ok',\n  description: 'bad phases',\n  phases: ${value},`),
+    )
+    const result = await runChecker([file])
+    assert.notEqual(result.code, 0, `expected a non-zero exit code for phases ${value}`)
+    assert.match(result.stdout + result.stderr, /meta\.phases must be an array/)
+  }
+})
+
+test('a phase entry with no title is reported by index', async () => {
+  const file = await fixture(
+    'untitled-phase.js',
+    metaOnly(
+      `  name: 'ok',\n  description: 'one untitled phase',\n  phases: [{ title: 'One' }, { detail: 'no title' }],`,
+    ),
+  )
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout + result.stderr, /meta\.phases\[1\]\.title must be a non-empty string/)
+})
+
+test('a phase title that is blank or non-string is reported by index', async () => {
+  for (const value of [`''`, `'   '`, `7`]) {
+    const file = await fixture(
+      'blank-phase-title.js',
+      metaOnly(
+        `  name: 'ok',\n  description: 'blank phase title',\n  phases: [{ title: ${value} }],`,
+      ),
+    )
+    const result = await runChecker([file])
+    assert.notEqual(result.code, 0, `expected a non-zero exit code for title ${value}`)
+    assert.match(
+      result.stdout + result.stderr,
+      /meta\.phases\[0\]\.title must be a non-empty string/,
+    )
+  }
+})
+
+test('every offending phase entry is reported, not just the first', async () => {
+  const file = await fixture(
+    'two-bad-phases.js',
+    metaOnly(
+      `  name: 'ok',\n  description: 'two bad phases',\n  phases: [{ title: '' }, { title: 'Fine' }, { detail: 'no title' }],`,
+    ),
+  )
+  const result = await runChecker([file])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  const output = result.stdout + result.stderr
+  assert.match(output, /meta\.phases\[0\]\.title must be a non-empty string/)
+  assert.match(output, /meta\.phases\[2\]\.title must be a non-empty string/)
+  assert.doesNotMatch(output, /meta\.phases\[1\]\.title/)
+})

@@ -124,6 +124,18 @@ export function validateMeta(source) {
   if (!isNonEmptyString(meta.description)) {
     errors.push('meta.description must be a non-empty string')
   }
+  if ('phases' in meta) {
+    if (!Array.isArray(meta.phases)) {
+      errors.push('meta.phases must be an array')
+    } else {
+      meta.phases.forEach((phase, index) => {
+        const isObject = typeof phase === 'object' && phase !== null && !Array.isArray(phase)
+        if (!isObject || !isNonEmptyString(phase.title)) {
+          errors.push(`meta.phases[${index}].title must be a non-empty string`)
+        }
+      })
+    }
+  }
   return errors
 }
 
