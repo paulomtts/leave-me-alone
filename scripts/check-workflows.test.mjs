@@ -54,6 +54,10 @@ test('real workflows/*.js scripts pass with no arguments', async () => {
   const result = await runChecker([])
   assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
   assert.match(result.stdout, /checked 2 workflow script\(s\); 0 failed/)
+  assert.throws(
+    () => JSON.parse(result.stdout),
+    'default mode must not emit a JSON document',
+  )
 })
 
 test('real workflow scripts pass when named explicitly', async () => {
