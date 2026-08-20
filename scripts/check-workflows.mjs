@@ -52,7 +52,7 @@ if (invokedDirectly) {
   const targets = args.length ? args : await listWorkflowScripts(path.join(repoRoot, 'workflows'))
   const results = await checkWorkflows(targets)
   const failed = results.filter((r) => !r.ok)
-  if (!quiet) {
+  if (!quiet || failed.length > 0) {
     console.log(`checked ${results.length} workflow script(s); ${failed.length} failed`)
   }
   process.exit(failed.length > 0 ? 1 : 0)

@@ -108,3 +108,11 @@ test('--quiet is not treated as a target path', async () => {
   assert.equal(result.code, 0, `expected exit 0, got ${result.code}\n${result.stderr}`)
   assert.equal(result.stdout, '', `expected empty stdout, got ${JSON.stringify(result.stdout)}`)
 })
+
+test('--quiet still prints the summary when something failed', async () => {
+  const broken = await fixture('broken.js', BROKEN_WORKFLOW)
+  const valid = await fixture('valid.js', VALID_WORKFLOW)
+  const result = await runChecker(['--quiet', broken, valid])
+  assert.notEqual(result.code, 0, 'expected a non-zero exit code')
+  assert.match(result.stdout, /checked 2 workflow script\(s\); 1 failed/)
+})
