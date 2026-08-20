@@ -581,6 +581,11 @@ const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.
       + 'repo can be checked out anywhere, and no fallback: the census is deterministic or it does '
       + 'not happen. It is run with `bun`.') })()
 
+// Namespaced, because these types ship WITH this workflow in the same plugin:
+// an installed plugin registers its agents as `<plugin>:<name>`, and the bare
+// name only resolves if a copy also happens to sit in ~/.claude/agents/. Relying
+// on that meant the workflows worked for the wrong reason — deleting the local
+// copies would have turned a passing run into a hard error mid-milestone.
 // Both setup agents run one command and read nothing else. The DEFAULT
 // subagent hands them 16,424 characters of context anyway — 5.8KB listing every
 // deferred tool name, 10.7KB describing every skill — measured, for a 451-char
@@ -595,7 +600,7 @@ const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.
 // Override with args.triggerAgentType, or pass '' to use the default subagent.
 const triggerAgentType = typeof opts.triggerAgentType === 'string'
   ? opts.triggerAgentType
-  : 'command-runner'
+  : 'leave-me-alone:command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
 // Only needed when the board is given as a NUMBER — resolved ids skip the

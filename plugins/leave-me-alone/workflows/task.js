@@ -156,13 +156,18 @@ const scriptsDir = typeof opts.scriptsDir === 'string' && opts.scriptsDir.starts
       'task workflow needs args.scriptsDir as an absolute path to this checkout\'s scripts/ '
       + '(e.g. "<repo>/scripts") — plan-check and ship are run from there with `bun`.') })()
 
+// Namespaced, because these types ship WITH this workflow in the same plugin:
+// an installed plugin registers its agents as `<plugin>:<name>`, and the bare
+// name only resolves if a copy also happens to sit in ~/.claude/agents/. Relying
+// on that meant the workflows worked for the wrong reason — deleting the local
+// copies would have turned a passing run into a hard error mid-milestone.
 // The stages that only run a command get a lean agent type: tools: Bash and a
 // one-line body, which drops ~16KB of tool and skill catalogue per dispatch.
 // Measured on the orchestrator's triggers: 35,097 tokens -> 11,702 for the same
 // work, byte-identical output. Pass '' to use the default subagent.
 const triggerAgentType = typeof opts.triggerAgentType === 'string'
   ? opts.triggerAgentType
-  : 'command-runner'
+  : 'leave-me-alone:command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
 const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
@@ -391,7 +396,7 @@ ${DRY ? '' : `
 7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
 Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`,
-  { label: `explore:#${issue}`, phase: 'Explore', model: 'sonnet', agentType: 'repo-reader', schema: {
+  { label: `explore:#${issue}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: {
     type: 'object', required: ['refused', 'summary', 'verification'],
     properties: {
       refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
@@ -528,7 +533,7 @@ Save it to EXACTLY \`${SPEC_PATH}\`, creating the directory if needed and overwr
 The design decisions were already argued out when this milestone was broken down — you are NARROWING an agreed design to one subtask, not authoring a new one. Do not invent scope the exploration findings do not support.
 
 Return a one-paragraph summary of what you specified — the file itself is the artifact, and every later stage reads it from disk.`,
-    { label: `spec:#${issue}`, phase: 'Spec', model: 'opus', agentType: 'spec-author' })
+    { label: `spec:#${issue}`, phase: 'Spec', model: 'opus', agentType: 'leave-me-alone:spec-author' })
   if (!spec) throw new Error('spec agent died')
 
   // ── 2b. validate the SPEC, before anything is planned on top of it ─────────
@@ -553,7 +558,7 @@ Verify every suspicion against the actual files before reporting. Fold every CON
 Calibration: only flag what would cause a real problem when planning or implementing. Minor wording and stylistic preference are not issues; this stage gates a run.
 
 Return blockers=true ONLY if something unresolvable remains (a contradiction needing a human decision), with the reason.`,
-    { label: `validate-spec:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'plan-critic', schema: {
+    { label: `validate-spec:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'leave-me-alone:plan-critic', schema: {
       type: 'object', required: ['blockers', 'summary'],
       properties: { blockers: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' } },
     } })
@@ -590,7 +595,7 @@ Return:
 - skillInvoked: true ONLY if you actually invoked \`superpowers:writing-plans\` and followed it. False if the skill was unavailable or you wrote the plan from memory instead — say which in note.
 - selfReviewed: true if you ran that skill's Self-Review checklist.
 - note: one line, only when something above is false.`,
-    { label: `plan:#${issue}`, phase: 'Plan', model: 'opus', agentType: 'plan-author', schema: {
+    { label: `plan:#${issue}`, phase: 'Plan', model: 'opus', agentType: 'leave-me-alone:plan-author', schema: {
       type: 'object', required: ['path', 'skillInvoked'],
       properties: {
         path: { type: 'string' }, skillInvoked: { type: 'boolean' },
@@ -641,7 +646,7 @@ Fold every CONFIRMED fix directly into the plan file (edit it), keeping its stru
 Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. Explore moves the card to "${optionNames.inProgress}" on a best-effort basis; do not touch the board here either way.
 
 Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
-    { label: `validate-plan:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'plan-critic', schema: {
+    { label: `validate-plan:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'leave-me-alone:plan-critic', schema: {
       type: 'object', required: ['blockers', 'summary'],
       properties: { blockers: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' } },
     } })
@@ -706,7 +711,7 @@ Return a structured result. This stage has THREE stop conditions, all above: an 
 - report: the normal implementation report — commits made (oneline), test count added, deviations from the plan with reasons. The reviewer reads this next, so keep it factual and scoped to what you changed. Empty when blocked=true.
 
 Do not set blocked=true for a difficulty you worked through and solved.`,
-  { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet', agentType: 'code-worker', schema: {
+  { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet', agentType: 'leave-me-alone:code-worker', schema: {
     type: 'object', required: ['blocked', 'report'],
     properties: {
       blocked: { type: 'boolean' }, blockedReason: { type: 'string' },
@@ -760,7 +765,7 @@ Return:
 - commitCount: the SECOND command's number.
 - taggedCount: the THIRD command's number.
 - planHash: the value \`$PLAN_HASH\` held when you ran that third command — the 8 characters, not the command.`,
-  { label: `review:#${issue}`, phase: 'Review', model: 'opus', agentType: 'code-worker', schema: {
+  { label: `review:#${issue}`, phase: 'Review', model: 'opus', agentType: 'leave-me-alone:code-worker', schema: {
     type: 'object', required: ['findings'],
     properties: {
       findings: { type: 'array', items: { type: 'string' } },

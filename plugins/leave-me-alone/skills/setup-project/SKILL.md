@@ -263,7 +263,8 @@ and no lookup happens at all. Without either, the board is disabled and the run 
 Every stage runs as a purpose-built agent type with only the tools it needs. They are
 version-controlled in `agents/` and must be installed before the session starts:
 
-Installing the `leave-me-alone` plugin is enough. Agent types are a native plugin component, so the
+Installing the `leave-me-alone` plugin is enough — the types register as `leave-me-alone:<name>`,
+which is what the workflows ask for. Agent types are a native plugin component, so the
 six below register themselves; the Workflow scripts are not, so a SessionStart hook copies them (and
 their helper scripts) into `~/.claude/workflows/` on the first session after install.
 
@@ -272,12 +273,12 @@ is a hard error rather than a silent fallback to the default subagent.
 
 | type | tools | used by |
 |---|---|---|
-| `command-runner` | Bash | the trigger steps: detect, resolve, plan-check, ship |
-| `repo-reader` | Bash, Read, Grep, Glob | Explore — never writes |
-| `spec-author` | Read, Write, Grep, Glob | Spec — no shell |
-| `plan-author` | Read, Write, Edit, Grep, Glob, Skill | Plan — invokes `superpowers:writing-plans` |
-| `plan-critic` | Bash, Read, Edit, Grep, Glob | the two Validate passes — never creates files |
-| `code-worker` | Bash, Read, Write, Edit, Grep, Glob, Skill | Implement, Review |
+| `leave-me-alone:command-runner` | Bash | the trigger steps: detect, resolve, plan-check, ship |
+| `leave-me-alone:repo-reader` | Bash, Read, Grep, Glob | Explore — never writes |
+| `leave-me-alone:spec-author` | Read, Write, Grep, Glob | Spec — no shell |
+| `leave-me-alone:plan-author` | Read, Write, Edit, Grep, Glob, Skill | Plan — invokes `superpowers:writing-plans` |
+| `leave-me-alone:plan-critic` | Bash, Read, Edit, Grep, Glob | the two Validate passes — never creates files |
+| `leave-me-alone:code-worker` | Bash, Read, Write, Edit, Grep, Glob, Skill | Implement, Review |
 
 Only the three with `Skill` pay for the skill catalogue; the rest save the full 16KB. A missing
 type is a hard error rather than a silent fallback to the fat default.

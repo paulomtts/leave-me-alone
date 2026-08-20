@@ -74,7 +74,7 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 | `verification` | no | supply it and Detect becomes a pure trigger |
 | `branchPrefix` | no | defaults to `m<milestone>/task-`. **Constant for a milestone's life** |
 | `maxConcurrentStories` | no | default 4 |
-| `triggerAgentType` | no | default `command-runner`; `""` for the default subagent |
+| `triggerAgentType` | no | default `leave-me-alone:command-runner`; `""` for the default subagent |
 | `dryRun` | no | returns the plan and writes nothing |
 
 ### Phases
@@ -117,16 +117,16 @@ milestone base.
 
 | # | phase | agent type | skill | what |
 |---|---|---|---|---|
-| 1 | Explore | `repo-reader` | — | issue, parent story, repo docs, the code it touches. Never writes |
-| 2 | Worktree | `command-runner` | — | `worktree.mjs`. Must precede anything that writes |
-| 3 | plan-check | `command-runner` | — | `plan-check.mjs`. A validated plan skips 4–7 |
-| 4 | Spec | `spec-author` | — | writes `docs/superpowers/specs/issue-N-design.md`. No shell |
-| 5 | ValidateSpec | `plan-critic` | — | corrects the spec **in place**, before anything is planned on it |
-| 6 | Plan | `plan-author` | `writing-plans` | writes `docs/superpowers/plans/issue-N.md` from the spec **on disk** |
-| 7 | ValidatePlan | `plan-critic` | — | corrects the plan; adds `<!-- task-pipeline: validated -->` |
-| 8 | Implement | `code-worker` | TDD | commits spec+plan first, then strict TDD with `Plan-Hash` trailers |
-| 9 | Review | `code-worker` | TDD, debugging | reviews the diff, fixes, reports three raw numbers |
-| 10 | Ship | `command-runner` | — | `ship.mjs` → verify, push, PR |
+| 1 | Explore | `leave-me-alone:repo-reader` | — | issue, parent story, repo docs, the code it touches. Never writes |
+| 2 | Worktree | `leave-me-alone:command-runner` | — | `worktree.mjs`. Must precede anything that writes |
+| 3 | plan-check | `leave-me-alone:command-runner` | — | `plan-check.mjs`. A validated plan skips 4–7 |
+| 4 | Spec | `leave-me-alone:spec-author` | — | writes `docs/superpowers/specs/issue-N-design.md`. No shell |
+| 5 | ValidateSpec | `leave-me-alone:plan-critic` | — | corrects the spec **in place**, before anything is planned on it |
+| 6 | Plan | `leave-me-alone:plan-author` | `writing-plans` | writes `docs/superpowers/plans/issue-N.md` from the spec **on disk** |
+| 7 | ValidatePlan | `leave-me-alone:plan-critic` | — | corrects the plan; adds `<!-- task-pipeline: validated -->` |
+| 8 | Implement | `leave-me-alone:code-worker` | TDD | commits spec+plan first, then strict TDD with `Plan-Hash` trailers |
+| 9 | Review | `leave-me-alone:code-worker` | TDD, debugging | reviews the diff, fixes, reports three raw numbers |
+| 10 | Ship | `leave-me-alone:command-runner` | — | `ship.mjs` → verify, push, PR |
 
 Spec and plan are written **inside the worktree**, so each PR carries the spec and plan it was built
 from, and a worktree deleted between runs is recreated from the branch with the plan still on it.
