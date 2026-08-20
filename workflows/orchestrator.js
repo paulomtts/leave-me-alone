@@ -44,11 +44,17 @@ function orderSubtasks(subtasks, pattern) {
 
 // ── DAG / lock / escalation core ─────────────────────────────────────────────
 
-// Done needs BOTH: issue closed AND PR merged. A closed issue with no merged
-// PR (closed by hand, or task.js died mid-close) must read as remaining work.
+// Done needs EITHER a merged PR, OR a closed issue with NO PR EVER FOUND —
+// the latter covers a subtask closed as already-delivered/duplicate work
+// (task.js's own Intake can determine this and close without opening a PR;
+// #1145 on paulomtts/refactor-nori milestone 21, delivered incidentally by
+// #1141). A closed issue whose PR was found but rejected for the WRONG base
+// (the 'wrong-base' sentinel, not real null) must NOT read as done — that
+// silently resurrects the #1133 bug this same file already fixed once.
 function isSubtaskDone(subtask) {
-  return String(subtask.state ?? '').toUpperCase() === 'CLOSED'
-    && Boolean(subtask.pr && subtask.pr.merged === true)
+  if (String(subtask.state ?? '').toUpperCase() !== 'CLOSED') return false
+  if (subtask.pr && subtask.pr.merged === true) return true
+  return subtask.pr === null
 }
 
 // A CLOSED story is finished, full stop — never re-dispatch its subtasks.
@@ -250,10 +256,10 @@ const detected = await callAgent(`Detect the remaining work on ${repo} milestone
 2. For each story, get its blockedBy edges via GraphQL (\`issue { blockedBy(first:50) { nodes { number } } }\`). Report ONLY the numbers — do NOT compute levels or interpret them; that happens in-script. If the repo uses no blockedBy relations, report empty arrays (that is normal, not an error).
 3. For each story, list its sub-issues via \`gh api repos/${repo}/issues/<story number>/sub_issues --jq '.[] | {number, title, state}'\` (the native sub-issue relation). Do NOT substitute \`gh issue list --label ${labels.subtask}\`, which returns every subtask in the milestone with no link back to its parent. Preserve the ORDER THE ENDPOINT RETURNS and report titles VERBATIM — ordering depends on both.
 4. For EACH SUBTASK, find its pull request by head branch, matching on the SUBTASK NUMBER and NOT on the branch prefix. Use the REST endpoint, NOT \`gh pr list\`:
-   \`gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref}'\`
-   Accept a PR for subtask N only if its \`ref\` ENDS WITH N and the character immediately before N is a non-digit — so \`aq-1050\`, \`task-1050\` and \`wip/1050\` all match subtask 1050, while \`task-11050\` does NOT. If several qualify, prefer the merged one, then the most recent.
+   \`gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}'\`
+   Accept a PR for subtask N only if its \`ref\` ENDS WITH N and the character immediately before N is a non-digit — so \`aq-1050\`, \`task-1050\` and \`wip/1050\` all match subtask 1050, while \`task-11050\` does NOT. If several qualify, prefer one whose \`base\` is exactly \`${baseBranch}\`, then the merged one, then the most recent.
    MATCH ON THE NUMBER, NOT THE PREFIX — deliberate: prefix-exact matching once orphaned every PR merged under an earlier prefix, so finished work was re-dispatched and died on an empty diff (2026-08-18, #1050). Suffix matching makes doneness survive a prefix change; for the same reason NEVER randomise or timestamp \`branchPrefix\`.
-   \`gh pr list\` goes through GraphQL, which returned empty results for genuinely-merged PRs during the 2026-08-17 GitHub incident; REST kept answering. Do NOT use free-text search (\`--search "<n> in:body"\` matches unrelated PRs). Set that subtask's pr to {number, url, state, merged, ref} where merged is true ONLY if merged_at is non-null and ref is the head branch verbatim. Never infer merged from the issue being closed.
+   \`gh pr list\` goes through GraphQL, which returned empty results for genuinely-merged PRs during the 2026-08-17 GitHub incident; REST kept answering. Do NOT use free-text search (\`--search "<n> in:body"\` matches unrelated PRs). Set that subtask's pr to {number, url, state, merged, ref, base} where merged is true ONLY if merged_at is non-null and ref is the head branch verbatim. Always report \`base\` VERBATIM (never blank, never guessed) — the script, not you, decides what a wrong base means. Never infer merged from the issue being closed.
 
    **If that command ERRORS or times out** (non-zero exit, 5xx, "no server is currently available"), retry it up to 3 times with a short pause. If it still fails, set that subtask's pr to the string "unknown" — NOT null. null means "this subtask has no PR and is unstarted work"; an API failure is not evidence of that (reporting failures as null re-implemented merged subtasks, 2026-08-17). Report an empty result as null only when the command actually SUCCEEDED and returned nothing.
 5. Discover this repo's OWN verification commands — do not assume a toolchain. Read whichever exist: ${repoDir}/CLAUDE.md, the testing/standards doc it points to, .github/workflows/*, and the project manifest (pyproject.toml / package.json / Makefile / justfile). Return the exact full-suite command(s) (each separate invocation listed separately if the repo requires tiers to run apart), the typecheck command (empty if none), the lint/format commands (empty array if none), and which file(s) you took them from.
@@ -277,7 +283,7 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
               pr: { type: ['object', 'null', 'string'], properties: {
                 number: { type: 'integer' }, url: { type: 'string' },
                 state: { type: 'string' }, merged: { type: 'boolean' },
-                ref: { type: 'string' } } },
+                ref: { type: 'string' }, base: { type: 'string' } } },
             } } },
         } } },
       verification: {
@@ -295,10 +301,26 @@ if (!detected) throw new Error('detect agent died')
 // The REST pulls API reports state lowercase ("open"); GitHub's GraphQL and
 // gh's --json report it uppercase. Normalize once so no comparison downstream
 // depends on which path the Detect agent took.
+//
+// Suffix matching is base-blind: a PR opened by mistake against another
+// branch still matches by head ref, and "merged" then meant merged into the
+// WRONG branch — that closed #1133 repeatedly across many runs on
+// paulomtts/refactor-nori (PR #1150, head task-1133, base main) despite the
+// work never reaching analysis-milestone-dev. Only work merged into THIS
+// run's baseBranch counts as done.
 for (const story of detected.stories) {
   for (const subtask of story.subtasks ?? []) {
     if (subtask.pr && typeof subtask.pr === 'object' && subtask.pr.state) {
       subtask.pr.state = String(subtask.pr.state).toUpperCase()
+    }
+    if (subtask.pr && typeof subtask.pr === 'object') {
+      const prBase = String(subtask.pr.base ?? '')
+      if (!prBase) {
+        subtask.pr = 'unknown'   // base unreported → doneness unverifiable, abort below
+      } else if (prBase !== baseBranch) {
+        log(`detect: ignoring PR #${subtask.pr.number} for subtask #${subtask.number} — base "${prBase}" is not "${baseBranch}"`)
+        subtask.pr = 'wrong-base'   // rejected, NOT the same as "no PR ever existed" — see isSubtaskDone
+      }
     }
   }
 }
@@ -307,7 +329,7 @@ for (const story of detected.stories) {
 // unknown — guessing either way is wrong (guess "pending" re-implemented
 // merged work twice on 2026-08-17). Stopping costs one re-run.
 const unknownPrs = detected.stories.flatMap(story =>
-  (story.subtasks ?? []).filter(subtask => typeof subtask.pr === 'string')
+  (story.subtasks ?? []).filter(subtask => subtask.pr === 'unknown')
     .map(subtask => `#${subtask.number} (story #${story.number})`))
 if (unknownPrs.length > 0) {
   throw new Error(
