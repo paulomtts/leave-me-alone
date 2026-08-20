@@ -137,10 +137,22 @@ id=$(gh api repos/OWNER/REPO/issues/<CHILD> --jq .id)
 gh api -X POST repos/OWNER/REPO/issues/<STORY>/sub_issues -F sub_issue_id=$id
 ```
 
-**Ordering.** The endpoint's natural order (creation order) *is* the execution order unless titles
-carry an ordinal prefix like `L2.3.1 …` / `1.2 …`, which the workflows detect automatically. A repo
-with plain descriptive titles needs no configuration; a repo with a different convention passes
-`ordinalPattern` (a JS regex string whose **first capture group** is the ordinal).
+**Ordering — give every subtask an ordinal prefix.** Order decides the stack geometry: branch names
+are derived (`branchPrefix` + issue number) and each subtask's PR targets the previous subtask's
+branch, so the order *is* the set of PR targets. The workflows detect an ordinal prefix like
+`L2.3.1 …` / `1.2 …` automatically; a repo with a different convention passes `ordinalPattern` (a JS
+regex string whose **first capture group** is the ordinal).
+
+Without any ordinal, order falls back to the order the `sub_issues` endpoint returns — creation
+order — which detaching and re-attaching a child will change. That silently re-shapes the stack
+between runs, and PRs opened against the old shape then read as `wrong-base`. It works, but only for
+a milestone nobody ever touches.
+
+**`branchPrefix` is part of the milestone's identity.** Branch names are derived from it, so changing
+it mid-milestone points the run at addresses where nothing exists. It will not quietly re-implement
+finished work — a merged PR found under the old name halts the run and names the prefix as the
+cause — but the only real fix is re-running with the prefix the milestone was built under. Never
+randomise or timestamp it.
 
 **Dependencies between stories** must be GitHub's native `blockedBy` relation (Development →
 "blocked by"), which the orchestrator reads via GraphQL. They do two jobs: they order the dispatch
@@ -226,4 +238,5 @@ If the levels, the subtask order, or the targets look wrong, fix the board — n
 | Adding cards to the board later | Cards missing at resolve time are reported, never auto-added. |
 | Expecting a card per PR | One PR per **subtask**. Each subtask's card goes "In review" when its own PR opens. |
 | Expecting cards to reach "Done" | The run never merges, so nothing closes. Cards stop at "In review" and issues stay open until a human merges the stack. "Done" is still required to exist — the board resolver checks all four option names. |
+| Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A merged PR under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
 | No `project` arg at all | Legal: the run is boardless and only touches issues and PRs. |
