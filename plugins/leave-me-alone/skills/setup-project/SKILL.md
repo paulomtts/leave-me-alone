@@ -253,7 +253,28 @@ and no lookup happens at all. Without either, the board is disabled and the run 
 
 `bun` must be on PATH.
 
-### Install the trigger agent — required
+### Install the agent definitions — required
+
+Every stage runs as a purpose-built agent type with only the tools it needs. They are
+version-controlled in `agents/` and must be installed before the session starts:
+
+```bash
+cp agents/*.md ~/.claude/agents/     # then RESTART the session
+```
+
+| type | tools | used by |
+|---|---|---|
+| `command-runner` | Bash | the trigger steps: detect, resolve, plan-check, ship |
+| `repo-reader` | Bash, Read, Grep, Glob | Intake — never writes |
+| `spec-author` | Read, Write, Grep, Glob | Spec — no shell |
+| `plan-author` | Read, Write, Edit, Grep, Glob, Skill | Plan — invokes `superpowers:writing-plans` |
+| `plan-critic` | Bash, Read, Edit, Grep, Glob | the two Validate passes — never creates files |
+| `code-worker` | Bash, Read, Write, Edit, Grep, Glob, Skill | Implement, Review |
+
+Only the three with `Skill` pay for the skill catalogue; the rest save the full 16KB. A missing
+type is a hard error rather than a silent fallback to the fat default.
+
+### The trigger agent
 
 Both trigger agents run one command and read nothing else, but the DEFAULT subagent hands them
 16,424 characters of context anyway: 5.8KB listing every deferred tool name, 10.7KB describing every

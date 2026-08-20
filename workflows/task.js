@@ -4,9 +4,9 @@ export const meta = {
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
     { title: 'Intake', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
-    { title: 'Spec', detail: 'scope, behavior, error paths, test list', model: 'opus' },
-    { title: 'Plan', detail: 'TDD implementation plan from the spec', model: 'opus' },
-    { title: 'Validate', detail: 'adversarial plan review, fixes folded in', model: 'sonnet' },
+    { title: 'Spec', detail: 'scope, behavior, error paths, test list -> docs/superpowers/specs/, then adversarially reviewed BEFORE anything is planned on it', model: 'opus' },
+    { title: 'Plan', detail: 'TDD implementation plan from the reviewed spec, via superpowers:writing-plans', model: 'opus' },
+    { title: 'Validate', detail: 'adversarial plan review against the spec, fixes folded into the plan file', model: 'sonnet' },
     { title: 'Implement', detail: 'worktree + strict TDD, granular commits', model: 'sonnet' },
     { title: 'Review', detail: 'branch diff review, test-integrity gate, lint; fixes committed here; unresolved blockers stop the run', model: 'opus' },
     { title: 'Ship', detail: 'clean-tree check + full verification, then push and open the PR (no merge); card -> In review', model: 'haiku' },
@@ -163,6 +163,27 @@ const triggerAgentType = typeof opts.triggerAgentType === 'string'
   ? opts.triggerAgentType
   : 'command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
+
+// Plans and specs live in the superpowers folders, with a DETERMINISTIC
+// filename. superpowers names files YYYY-MM-DD-<topic>.md, which a resumed run
+// cannot predict — and finding the same file again is the whole point of the
+// plan-check step, so the date is dropped and the issue number carries the
+// identity.
+//
+// One source of truth, deliberately: Plan is told exactly where to save, and
+// plan-check.mjs is told exactly where to look. They used to decide separately
+// (Plan discovered a directory from CLAUDE.md; plan-check hardcoded
+// .claude/plans), so on any repo not using that exact path the plan was written
+// where nothing looked for it, every run re-planned, and the validated
+// checkpoint never fired once.
+const plansDir = typeof opts.plansDir === 'string' && opts.plansDir.startsWith('/')
+  ? opts.plansDir.replace(/\/+$/, '')
+  : `${repoDir}/docs/superpowers/plans`
+const specsDir = typeof opts.specsDir === 'string' && opts.specsDir.startsWith('/')
+  ? opts.specsDir.replace(/\/+$/, '')
+  : `${repoDir}/docs/superpowers/specs`
+const PLAN_PATH = `${plansDir}/issue-${issue}.md`
+const SPEC_PATH = `${specsDir}/issue-${issue}-design.md`
 
 const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
 const BRANCH = `${branchPrefix}${issue}`
@@ -342,7 +363,7 @@ ${DRY ? '' : `
 7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
 Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`,
-  { label: `intake:#${issue}`, phase: 'Intake', model: 'sonnet', schema: {
+  { label: `intake:#${issue}`, phase: 'Intake', model: 'sonnet', agentType: 'repo-reader', schema: {
     type: 'object', required: ['refused', 'summary', 'verification'],
     properties: {
       refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
@@ -397,7 +418,7 @@ const planCheck = await (async () => {
   // cannot touch a disk, so the agent is now a trigger and the rules live in
   // scripts/plan-check.mjs, where they are tested.
   const out = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/plan-check.mjs --repo-dir ${repoDir} --issue ${issue} --compact
+   bun ${scriptsDir}/plan-check.mjs --repo-dir ${repoDir} --issue ${issue} --plans-dir ${plansDir} --compact
 
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
     { label: `plan-check:#${issue}`, phase: 'Spec', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
@@ -435,46 +456,125 @@ Rules:
 - For every test in the list, name which tier it belongs in per the test-placement rule cited in the intake findings above — never default to a habitual tier without checking that rule.
 - No hard-wrapped prose. No implementation plan yet — that's the next stage.
 
-Return the spec as plain text (not saved to a file yet).`,
-    { label: `spec:#${issue}`, phase: 'Spec', model: 'opus' })
+Save it to EXACTLY \`${SPEC_PATH}\`, creating the directory if needed and overwriting any existing file. That is the superpowers specs location, so it sits beside the milestone's own design docs.
+
+The design decisions were already argued out when this milestone was broken down — you are NARROWING an agreed design to one subtask, not authoring a new one. Do not invent scope the intake findings do not support.
+
+Return a one-paragraph summary of what you specified — the file itself is the artifact, and every later stage reads it from disk.`,
+    { label: `spec:#${issue}`, phase: 'Spec', model: 'opus', agentType: 'spec-author' })
   if (!spec) throw new Error('spec agent died')
+
+  // ── 2b. validate the SPEC, before anything is planned on top of it ─────────
+  // Split from the plan review deliberately. A spec defect found after planning
+  // does not just cost the plan — the plan has already encoded the defect, and
+  // patching the plan papers over it. superpowers dispatches its two reviewer
+  // templates at exactly these two points for the same reason.
+  phase('Validate')
+  const specVerdict = await callAgent(`Adversarial review of the SPEC at ${SPEC_PATH} — ${repo} subtask #${issue} in ${repoDir}. No plan exists yet; do not write one.
+
+Check it against superpowers' spec reviewer criteria:
+- completeness — TODOs, placeholders, "TBD", missing sections
+- consistency — internal contradictions, conflicting requirements
+- clarity — anything ambiguous enough that someone would build the wrong thing
+- scope — focused enough for ONE implementation plan, not several subsystems
+- YAGNI — unrequested features, over-engineering
+
+Also check it against this repo's own architecture/standards docs (the intake findings cite them; read them) and against what sibling subtasks own, so this spec does not drift into their work.
+
+Verify every suspicion against the actual files before reporting. Fold every CONFIRMED fix directly into ${SPEC_PATH}, keeping its structure — the next stage plans from that file, so an unfixed spec becomes an unfixable plan.
+
+Calibration: only flag what would cause a real problem when planning or implementing. Minor wording and stylistic preference are not issues; this stage gates a run.
+
+Return blockers=true ONLY if something unresolvable remains (a contradiction needing a human decision), with the reason.`,
+    { label: `validate-spec:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'plan-critic', schema: {
+      type: 'object', required: ['blockers', 'summary'],
+      properties: { blockers: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' } },
+    } })
+  if (!specVerdict || specVerdict.blockers) {
+    return { issue, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
+      reason: specVerdict ? specVerdict.reason : 'spec validator died',
+      detail: `stopped before planning: ${specVerdict ? (specVerdict.reason || 'spec has unresolvable blockers') : 'the spec validator returned nothing'}. The spec is at ${SPEC_PATH}; nothing was planned or implemented.` }
+  }
 
   // ── 2b. plan (Opus) ────────────────────────────────────────────────────────
   phase('Plan')
-  const planPath = await callAgent(`Write the TDD implementation plan for ${repo} subtask #${issue} in ${repoDir}, from the spec below.
+  const planPath = await callAgent(`Write the TDD implementation plan for ${repo} subtask #${issue} in ${repoDir}.
 
-Spec:
-${clip(spec, 16000, 'spec')}
+Read the spec at ${SPEC_PATH} — read it from disk, do not work from any summary. It was adversarially reviewed and CORRECTED in place after it was written, so any copy of it in this prompt would be the pre-review version.
+
+Spec author's summary, for orientation only:
+${clip(spec, 2000, 'spec summary')}
 
 Intake findings:
 ${clip(intake.summary, 8000, 'intake summary')}
 
 Rules:
-- superpowers:writing-plans format: bite-sized tasks, each step one action with real code blocks, RED before GREEN, no placeholders.
+- INVOKE the \`superpowers:writing-plans\` skill and follow it: bite-sized tasks, each step one action with real code blocks, RED before GREEN, no placeholders. That skill defines the format this pipeline expects; do not approximate it from memory.
+- Run that skill's own Self-Review checklist before returning (spec coverage, placeholder scan, type consistency) and fix what it finds inline.
 - Every test step must land in the tier its spec entry named (per the test-placement rule in the intake findings) — the file path in each RED step should already reflect that tier's own directory convention (check sibling files in that tier first, don't invent one).
 - Prepend the spec verbatim to the top of the saved file, then the plan.
 - Branch will be ${BRANCH}, worktree ${WORKTREE} (fresh, cut from origin/${baseBranch} — the plan must NOT assume any other subtask's code already exists on this branch).
 - Verification commands for this repo:
 ${verifyBlock}
-- Save the plan under whatever plans directory this repo already uses (check ${repoDir}/CLAUDE.md and existing plan files; fall back to ${repoDir}/.claude/plans/). Filename MUST be exactly issue-${issue}.md — no date prefix, so a resumed run can find the same file. If ${planCheck && planCheck.path ? planCheck.path : 'such a file'} already exists, OVERWRITE it. No hard-wrapped prose.
+- Save the plan to EXACTLY \`${PLAN_PATH}\` — create the directory if needed, and OVERWRITE the file if it exists. Do not add a date prefix and do not choose a different directory: a resumed run looks for this exact path, and a plan saved anywhere else is invisible to it. No hard-wrapped prose.
 
-Return ONLY the absolute path of the saved plan file.`,
-    { label: `plan:#${issue}`, phase: 'Plan', model: 'opus' })
+Return:
+- path: the absolute path of the saved plan file.
+- skillInvoked: true ONLY if you actually invoked \`superpowers:writing-plans\` and followed it. False if the skill was unavailable or you wrote the plan from memory instead — say which in note.
+- selfReviewed: true if you ran that skill's Self-Review checklist.
+- note: one line, only when something above is false.`,
+    { label: `plan:#${issue}`, phase: 'Plan', model: 'opus', agentType: 'plan-author', schema: {
+      type: 'object', required: ['path', 'skillInvoked'],
+      properties: {
+        path: { type: 'string' }, skillInvoked: { type: 'boolean' },
+        selfReviewed: { type: 'boolean' }, note: { type: 'string' },
+      },
+    } })
   if (!planPath) throw new Error('plan agent died')
-  plan = String(planPath).trim()
+
+  // Pinning the superpowers coupling: this pipeline's plan format IS
+  // writing-plans, so a plan written from memory because the skill was
+  // unavailable is a different artifact wearing the same name. The plugin is a
+  // cached version on disk and can move; without this check that would degrade
+  // silently, which is the failure mode this whole file exists to avoid. Stop
+  // instead — re-running once the skill resolves costs one plan.
+  if (planPath.skillInvoked !== true) {
+    return { issue, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
+      detail: `the plan was written WITHOUT the superpowers:writing-plans skill (${planPath.note || 'no reason given'}). `
+        + 'That skill defines the format Implement and Review both assume, so a plan written from memory is not the '
+        + 'same artifact. Check the superpowers plugin is installed and resolvable, then re-run.' }
+  }
+  if (planPath.selfReviewed !== true) {
+    log(`plan: writing-plans self-review was not run (${planPath.note || 'no reason given'}) — Validate is now the only check on this plan`)
+  }
+  plan = String(planPath.path || '').trim()
+  if (!plan.startsWith('/')) {
+    return { issue, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
+      detail: `plan returned "${plan.slice(0, 120)}" instead of an absolute path; nothing downstream can find the plan file.` }
+  }
 
   // ── 3. adversarial validation ──────────────────────────────────────────────
   phase('Validate')
-  const verdict = await callAgent(`Adversarial review (kind:spec) of ${plan} — spec+plan for ${repo} subtask #${issue} in ${repoDir}.
+  const verdict = await callAgent(`Adversarial review of the PLAN at ${plan} — ${repo} subtask #${issue} in ${repoDir}. Its spec is at ${SPEC_PATH} and was already reviewed and corrected; treat it as settled and review the plan AGAINST it rather than re-litigating it.
 
 Try to BREAK it before implementation: contradictions with this repo's architecture/standards docs (read them; the intake cites them), decisions that bite sibling subtasks, dishonest or tautological tests, config side-effects, steps not executable verbatim. Verify every suspicion against the actual files/tools before reporting (run commands if needed).
+
+Check it against superpowers' plan reviewer criteria:
+- completeness — TODOs, placeholders, incomplete tasks, missing steps
+- spec alignment — every spec requirement has a task, and no major scope creep beyond it
+- task decomposition — clear boundaries, each step one actionable thing
+- buildability — could an engineer follow this without getting stuck?
+
+Calibration: only flag what would cause a real problem during implementation. An implementer building the wrong thing, or getting stuck, is an issue. Minor wording, stylistic preference and nice-to-haves are not — this stage gates a run, so treat it as a gate and not a critique.
+
+If a plan defect traces back to the SPEC being wrong, say so in reason and set blockers=true rather than patching the plan around it: a plan that compensates for a bad spec hides the real problem from every later stage.
 
 Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust.
 
 Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. Intake moves the card to "${optionNames.inProgress}" on a best-effort basis; do not touch the board here either way.
 
 Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
-    { label: `validate:#${issue}`, phase: 'Validate', model: 'sonnet', schema: {
+    { label: `validate-plan:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'plan-critic', schema: {
       type: 'object', required: ['blockers', 'summary'],
       properties: { blockers: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' } },
     } })
@@ -537,7 +637,7 @@ Return a structured result. This stage has THREE stop conditions, all above: an 
 - report: the normal implementation report — commits made (oneline), test count added, deviations from the plan with reasons. The reviewer reads this next, so keep it factual and scoped to what you changed. Empty when blocked=true.
 
 Do not set blocked=true for a difficulty you worked through and solved.`,
-  { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet', schema: {
+  { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet', agentType: 'code-worker', schema: {
     type: 'object', required: ['blocked', 'report'],
     properties: {
       blocked: { type: 'boolean' }, blockedReason: { type: 'string' },
@@ -591,7 +691,7 @@ Return:
 - commitCount: the SECOND command's number.
 - taggedCount: the THIRD command's number.
 - planHash: the value \`$PLAN_HASH\` held when you ran that third command — the 8 characters, not the command.`,
-  { label: `review:#${issue}`, phase: 'Review', model: 'opus', schema: {
+  { label: `review:#${issue}`, phase: 'Review', model: 'opus', agentType: 'code-worker', schema: {
     type: 'object', required: ['findings'],
     properties: {
       findings: { type: 'array', items: { type: 'string' } },
