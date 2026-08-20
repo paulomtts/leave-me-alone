@@ -504,6 +504,14 @@ const DRY = opts.dryRun === true
 // merge queue) merges bottom-up afterwards. `autoMerge` is gone: there is no
 // merge to opt out of, and accepting it silently would let an old invocation
 // believe merging still happens.
+if (opts.state !== undefined) {
+  throw new Error(
+    'orchestrator: args.state is no longer supported. It let a caller hand over a census taken '
+    + 'earlier, which is a SNAPSHOT of what is merged and what is open — reuse it minutes later and '
+    + 'the run re-dispatches work that has since landed. Pass args.detectScript instead: the same '
+    + 'script produces the same deterministic census, but freshly, on every run.')
+}
+
 if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
   throw new Error(
     'orchestrator: args.autoMerge / args.maxResolveAttempts are no longer supported — this workflow opens '
@@ -614,14 +622,10 @@ async function callAgentSoftly(prompt, agentOpts) {
 //
 // Each call passes its phase explicitly, so the progress grouping does not
 // depend on which one happens to be running when phase() was last called.
-// A caller can supply either half and skip that part of the prompt entirely.
-// `state` is what scripts/detect.mjs prints — steps 1-4 done deterministically,
-// no model involved. `verification` is the answer to "how does this repo run
-// its tests", which changes about twice a year and is the one genuinely
-// model-shaped step here. Supply both and this stage makes no call at all.
-const providedState = opts.state && typeof opts.state === 'object' && Array.isArray(opts.state.stories)
-  ? opts.state
-  : null
+// The census is ALWAYS taken fresh — see the args.state rejection above. What a
+// caller can skip is `verification`: the answer to "how does this repo run its
+// tests" changes about twice a year, and it is the one genuinely model-shaped
+// step in this stage.
 const providedVerification = opts.verification && typeof opts.verification === 'object'
   && Array.isArray(opts.verification.fullSuite)
   ? opts.verification
@@ -666,11 +670,10 @@ const DETECT_TRIGGER_STEP = `1. Run EXACTLY this command and capture its stdout:
    - stdout: its stdout EXACTLY as printed, as one string. Empty if the command failed.
    - error: its stderr, only when ok=false.`
 
-const detectSteps = []
-if (!providedState) detectSteps.push(detectScript ? DETECT_TRIGGER_STEP : DETECT_STATE_STEPS)
-if (!providedVerification) detectSteps.push(detectVerificationStep(providedState ? 1 : (detectScript ? 2 : 5)))
+const detectSteps = [detectScript ? DETECT_TRIGGER_STEP : DETECT_STATE_STEPS]
+if (!providedVerification) detectSteps.push(detectVerificationStep(detectScript ? 2 : 5))
 
-const detectPromise = detectSteps.length === 0 ? null : callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
 
 ${detectSteps.join('\n\n')}
 
@@ -678,7 +681,7 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
   { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', schema: {
     type: 'object',
     required: [
-      ...(providedState ? [] : (detectScript ? ['ok', 'stdout'] : ['stories'])),
+      ...(detectScript ? ['ok', 'stdout'] : ['stories']),
       ...(providedVerification ? [] : ['verification']),
     ],
     properties: {
@@ -796,15 +799,10 @@ If neither query returned a project, set found=false and say which errors you sa
 // Detect was started before the board lookup; collect it now. A rejection is
 // rethrown with its original error — unlike the board, a failed census means
 // nothing can be dispatched safely.
-let detected = {}
-if (detectPromise) {
-  const detectOutcome = await detectPromise
-  if (detectOutcome.error) throw detectOutcome.error
-  if (!detectOutcome.value) throw new Error('detect agent died')
-  detected = detectOutcome.value
-} else {
-  log('detect: state and verification both supplied — no census dispatched')
-}
+const detectOutcome = await detectPromise
+if (detectOutcome.error) throw detectOutcome.error
+if (!detectOutcome.value) throw new Error('detect agent died')
+const detected = detectOutcome.value
 
 // One name for each half, whoever produced it. Everything below reads these.
 // On the trigger path the agent hands back a string; parsing it HERE means a
@@ -822,14 +820,12 @@ function parseTriggerOutput(result) {
   }
 }
 
-const census = providedState || (detectScript ? parseTriggerOutput(detected) : detected)
-if (providedState) {
-  log(`detect: using the state supplied by the caller (${(census.stories || []).length} stories) — no census dispatched`)
-} else if (detectScript) {
+const census = detectScript ? parseTriggerOutput(detected) : detected
+if (detectScript) {
   log(`detect: census produced deterministically by ${detectScript} (${(census.stories || []).length} stories)`)
 }
 if (!Array.isArray(census.stories)) {
-  throw new Error('orchestrator: no stories to work from — detect returned none and args.state supplied none')
+  throw new Error('orchestrator: the census came back with no stories array — nothing can be dispatched')
 }
 
 

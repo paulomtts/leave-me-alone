@@ -231,40 +231,34 @@ against a base that has never seen the code it depends on.
 
 If the levels, the subtask order, or the targets look wrong, fix the board — not the workflow.
 
-## Skipping the agents entirely
+## Making Detect deterministic
 
 The orchestrator's two agents exist because a Workflow script cannot execute a command — not because
-either decides anything. Both can be handed their answers instead:
-
-**Either** point the run at the census script, so its agent is reduced to a trigger:
+either decides anything. Point the run at the census script and its Detect agent stops being a shell
+with opinions and becomes a trigger:
 
 ```jsonc
 "detectScript": "/abs/path/to/leave-me-alone/scripts/detect.mjs"
 ```
 
-The Detect prompt becomes one command (~890 characters instead of ~4,300), run via `bun`, whose
-stdout the orchestrator parses itself. Same wiring as `taskScript`: an absolute path, no default.
+Detect's prompt becomes one command (~880 characters instead of ~4,300), run via `bun`, whose stdout
+the orchestrator parses itself. Same wiring as `taskScript`: an absolute path, no default. The census
+is always taken fresh — there is deliberately no way to hand over one you took earlier, because a
+census is a snapshot of what is merged, and a stale one re-dispatches work that has since landed.
 
-**Or** run it yourself and hand over the result:
-
-```bash
-# steps 1-4 of Detect, deterministically. No model involved.
-bun scripts/detect.mjs --repo OWNER/REPO --milestone 12 --compact > state.json
-```
+`verification` is the other half, and the only genuinely model-shaped step in the stage. Supply it
+and Detect's prompt drops to the one trigger line:
 
 ```jsonc
-"state":        { /* the contents of state.json */ },
-"verification": { "fullSuite": ["npm test"], "typecheck": "", "lint": [] },
-"project":      { "id": "PVT_…", "fieldId": "PVTSSF_…", "optionIds": { … } }
+"verification": { "fullSuite": ["bun test"], "typecheck": "", "lint": [] }
 ```
 
-Supply all three and the orchestrator dispatches **no agents at all** before it starts work. With
-`detectScript` instead of `state`, it dispatches one agent that runs one command. Supply
-some and it asks only for what is missing — `verification` alone removes about 40% of Detect's
-prompt, and it is the only part of that stage that involves real judgement.
+To inspect a board by hand — or to debug a run that came back wrong — the same script runs standalone:
 
-`state` must be freshly generated: it is a snapshot of what is merged and what is open, and a stale
-one will re-dispatch finished work. Regenerate it per run, or omit it and let the agent look.
+```bash
+bun scripts/detect.mjs --repo OWNER/REPO --milestone 12          # human-readable
+bun scripts/detect.mjs --repo OWNER/REPO --milestone 12 --compact
+```
 
 ## Skipping the id lookup
 
