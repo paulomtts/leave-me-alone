@@ -169,6 +169,50 @@ only after a whole story lands. The cost is running the full verification gate o
 instead of once per story — more total suite runs, but each subtask gets the same full rigor on its
 own, not a shared one.
 
+## check-workflows
+
+`scripts/check-workflows.mjs` is this repo's own guard on the workflow scripts: it catches a script
+that no longer parses, or whose `meta` block the Workflow tool would reject, before anyone tries to
+run it.
+
+```
+node scripts/check-workflows.mjs            # every workflows/*.js in this repo
+node scripts/check-workflows.mjs a.js b.js  # only these paths
+```
+
+With no path arguments it checks every `*.js` file in this repo's `workflows/` directory, sorted by
+name — resolved from the script's own location, so it does not matter what directory you invoke it
+from. Each target is compiled with `vm.Script` (wrapped the way the Workflow harness wraps it), so a
+syntax error is reported as the V8 parse error itself (`Unexpected token …`). Then the meta block is
+checked: a top-level `export const meta` must exist; its object literal must be statically
+resolvable — calls, spreads and other non-literal syntax are rejected as an impure `meta`;
+`meta.name` and `meta.description` must each be a non-empty string; and if `meta.phases` is present
+it must be an array whose every entry is an object with a non-empty string `title`, reported per
+index (`meta.phases[0].title must be a non-empty string`). One file can collect several meta
+violations in a single run.
+
+By default each violation prints as `FAIL <path>: <message>` on **stderr**, followed by
+`checked N workflow script(s); M failed` on **stdout**. Exit status is 0 when every file passes and
+1 when any file fails, in every mode below.
+
+- **`--json`** — prints one pretty-printed (2-space) JSON document to stdout *instead of* the human
+  output: `{ "ok": <bool>, "results": [{ "path", "ok", "violations": [<string>, …] }, …] }`. `ok` is
+  true only when every entry is. `results` follows **argv order**, not sorted order; `violations` is
+  empty for a passing file and otherwise holds exactly the messages the `FAIL` lines would have
+  carried. Both the `FAIL` lines and the summary line are suppressed — stdout is the document and
+  nothing else, stderr is empty — and the exit code is unchanged, so a failing run still emits a
+  complete document.
+- **`--quiet`** — drops the per-file `FAIL` diagnostics (stderr is empty) but still prints the
+  summary line to stdout. Useful for hooks and CI steps that only want the count and the exit code.
+- **Precedence: `--json` wins.** Passing both is the same as passing `--json` alone, byte for byte
+  on stdout and stderr, in either order — JSON mode is already strictly quieter (it drops the `FAIL`
+  lines *and* the summary), and its document is the payload the caller asked for, so silencing it
+  would leave nothing but an exit code.
+
+Both flags are position-independent (before or after the paths), are never mistaken for target
+paths, and repeat harmlessly. There are no other flags: any other `--`-prefixed argument is treated
+as a target path and fails as an unreadable file.
+
 ## Notes
 
 - **Verification commands are never assumed.** Both workflows read the target repo's own
