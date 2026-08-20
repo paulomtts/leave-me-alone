@@ -27,6 +27,12 @@ export function ghError(err) {
   return String((err && err.message) || err || 'unknown error').split('\n')[0]
 }
 
+// Same shape for git, so the scripts that touch a checkout are injectable too.
+export async function gitRunner(args) {
+  const { stdout } = await execFileAsync('git', args, { maxBuffer: 64 * 1024 * 1024 })
+  return stdout
+}
+
 // Tool managers print activation banners into stdout the first time they
 // resolve a binary — `mise ~/.config/mise/config.toml tools: gh@2.97.0` broke
 // the very first real run of detect.mjs. That text is not our output, and it is

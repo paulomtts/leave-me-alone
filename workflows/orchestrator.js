@@ -694,7 +694,7 @@ const detectVerificationStep = index => `${index}. Discover this repo's OWN veri
 // What remains is the one instruction a model still needs against its own
 // reflexes: hand the bytes back untouched rather than tidying them.
 const DETECT_TRIGGER_STEP = `Run this command and return its stdout EXACTLY as printed:
-   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --compact
+   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --repo-dir ${repoDir} --compact
 
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — report it, do not retry or work around it.`
 

@@ -18,14 +18,14 @@
 // genuinely model-shaped task in the stage. Configure it once via
 // `args.verification` instead, or let the agent fall back to discovering it.
 
-import { ghRunner, jsonFrom, lastLine, parseNdjson, withRetries, readFlags } from './gh.mjs'
+import { ghRunner, gitRunner, jsonFrom, lastLine, parseNdjson, withRetries, readFlags } from './gh.mjs'
 
 export { jsonFrom, lastLine, parseNdjson } from './gh.mjs'
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
     '--repo': 'value', '--milestone': 'value', '--compact': 'boolean',
-    '--story-label': 'value', '--subtask-label': 'value',
+    '--story-label': 'value', '--subtask-label': 'value', '--repo-dir': 'value',
   })
   const out = {
     repo: flags['--repo'],
@@ -42,7 +42,37 @@ export function parseArgs(argv) {
   if (!Number.isInteger(out.milestone) || out.milestone <= 0) {
     throw new Error('detect needs --milestone <positive integer>')
   }
+  const repoDir = flags['--repo-dir']
+  if (repoDir !== undefined) {
+    if (typeof repoDir !== 'string' || !repoDir.startsWith('/')) {
+      throw new Error('detect: --repo-dir must be an absolute path')
+    }
+    out.repoDir = repoDir
+  }
   return out
+}
+
+// Refresh the shared checkout ONCE, here, because this runs before any subtask
+// is dispatched.
+//
+// It used to happen inside every Implement stage, which is a problem the moment
+// more than one story runs at a time: up to maxConcurrentStories task.js runs
+// share one .git, and `worktree prune` is a GLOBAL sweep that removes
+// registrations whose directories are missing. One lane can prune another
+// lane's worktree in the window between `worktree add` registering it and the
+// directory appearing. Narrow, destructive, and it would present as "the
+// worktree vanished mid-run".
+//
+// Hoisting the fetch is safe because a stack parent needs no fetch: ship.mjs
+// pushes with `git push -u origin <branch>`, which updates this checkout's own
+// refs/remotes/origin/<branch> as a side effect. Only the milestone base comes
+// from the network, and freezing it here is a feature — every story in the run
+// then builds on the same base rather than on whatever landed mid-run.
+export async function prepareCheckout(repoDir, git = gitRunner) {
+  if (!repoDir) return false
+  await git(['-C', repoDir, 'fetch', 'origin'])
+  await git(['-C', repoDir, 'worktree', 'prune'])
+  return true
 }
 
 // Deliberately LOOSE — anything whose branch name contains any subtask number.
@@ -57,8 +87,9 @@ export function filterPullRequests(pulls, subtaskNumbers) {
   })
 }
 
-export async function detect({ repo, milestone, labels, run = ghRunner }) {
+export async function detect({ repo, milestone, labels, repoDir, run = ghRunner, git = gitRunner }) {
   const [owner, name] = repo.split('/')
+  const prepared = await prepareCheckout(repoDir, git)
 
   const milestoneTitle = lastLine(await run(['api', `repos/${repo}/milestones/${milestone}`, '--jq', '.title']))
   if (!milestoneTitle) throw new Error(`detect: milestone #${milestone} on ${repo} has no title — wrong number or wrong repo?`)
@@ -109,7 +140,7 @@ export async function detect({ repo, milestone, labels, run = ghRunner }) {
     process.stderr.write(`${err.message}\n`)
   }
 
-  return { milestoneTitle, stories, pullRequests, prLookupFailed }
+  return { milestoneTitle, stories, pullRequests, prLookupFailed, prepared }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

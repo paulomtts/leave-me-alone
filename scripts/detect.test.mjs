@@ -195,3 +195,41 @@ test('a full census survives a banner on every single call', async () => {
   assert.equal(got.stories[0].subtasks.length, 2)
   assert.equal(got.pullRequests[0].ref, 'm12/task-41')
 })
+
+// ── prepareCheckout ──────────────────────────────────────────────────────────
+
+test('the shared checkout is refreshed ONCE, here, not inside every subtask', async () => {
+  // `worktree prune` is a global sweep: it removes registrations whose
+  // directories are missing. Run from inside Implement, with several stories in
+  // flight against one .git, one lane can prune another lane's worktree in the
+  // window between `worktree add` registering it and the directory appearing.
+  const log = []
+  const got = await detect({ ...opts(fakeGh(BASE_ROUTES)), repoDir: '/abs/repo',
+    git: async (args) => { log.push(args.join(' ')); return '' } })
+  assert.equal(got.prepared, true)
+  assert.deepEqual(log, ['-C /abs/repo fetch origin', '-C /abs/repo worktree prune'])
+})
+
+test('the fetch happens BEFORE the census, not after', async () => {
+  const order = []
+  await detect({
+    repo: 'you/thing', milestone: 12, labels: { story: 'story', subtask: 'subtask' }, repoDir: '/abs/repo',
+    run: async (args) => { order.push('gh'); return fakeGh(BASE_ROUTES)(args) },
+    git: async () => { order.push('git'); return '' },
+  })
+  assert.equal(order[0], 'git', 'the checkout must be current before anything is read')
+})
+
+test('without --repo-dir nothing touches the checkout', async () => {
+  // Standalone use: inspecting a board should never mutate a working copy.
+  const log = []
+  const got = await detect({ ...opts(fakeGh(BASE_ROUTES)), git: async (a) => { log.push(a); return '' } })
+  assert.equal(got.prepared, false)
+  assert.deepEqual(log, [])
+})
+
+test('--repo-dir must be absolute', () => {
+  assert.equal(parseArgs(['--repo=a/b', '--milestone=1', '--repo-dir=/r']).repoDir, '/r')
+  assert.equal(parseArgs(['--repo=a/b', '--milestone=1']).repoDir, undefined)
+  assert.throws(() => parseArgs(['--repo=a/b', '--milestone=1', '--repo-dir=rel']), /absolute/)
+})
