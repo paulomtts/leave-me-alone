@@ -190,6 +190,24 @@ if (!intake || intake.refused) return { issue, refused: true, reason: intake ? i
 
 const verification = providedVerification || intake.verification
 const suiteCmds = (verification.fullSuite || []).filter(Boolean)
+
+// An empty suite makes every downstream gate vacuous: Ship runs nothing and
+// reports passed=true, Review has no red/green to work against, and the PR
+// opens unverified. Observed on a run whose base branch documented no commands
+// — the Ship agents happened to improvise and find the tests themselves, which
+// is luck, not design, and their prompt explicitly tells them NOT to substitute
+// commands. Fail loudly instead, with a deliberate opt-out for repos that
+// genuinely have no suite yet.
+if (suiteCmds.length === 0 && opts.allowNoVerification !== true) {
+  return { issue, blocked: 'verification', branch: BRANCH, worktree: WORKTREE,
+    detail: 'no full-suite command is available for this repo, so nothing downstream could verify this subtask — '
+      + 'Ship would run zero commands and still report success. '
+      + (providedVerification
+          ? 'The caller passed an empty verification.fullSuite; the orchestrator discovers these from origin/<baseBranch>, so check that the base branch actually documents its test commands.'
+          : 'Intake found none in CLAUDE.md, the CI workflows, or the manifest.')
+      + ' Document the command, pass verification.fullSuite explicitly, or set allowNoVerification: true to proceed unverified on purpose.' }
+}
+
 const verifyBlock = [
   ...suiteCmds.map((command, index) => `   - ${suiteCmds.length > 1 ? `(tier ${index + 1}, own invocation, do NOT combine with &&) ` : ''}${command}`),
   verification.typecheck ? `   - ${verification.typecheck}` : null,
