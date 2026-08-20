@@ -218,6 +218,8 @@ Then the real pre-flight — a dry run that writes nothing:
 Workflow({ name: "orchestrator" }, args: {
   repo: "OWNER/REPO", repoDir: "/abs/path", milestone: MS, baseBranch: "main",
   nonce: "<current timestamp>", dryRun: true,
+  taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
+  detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
   project: { number: PROJ }
 })
 ```
@@ -234,17 +236,19 @@ If the levels, the subtask order, or the targets look wrong, fix the board — n
 ## Making Detect deterministic
 
 The orchestrator's two agents exist because a Workflow script cannot execute a command — not because
-either decides anything. Point the run at the census script and its Detect agent stops being a shell
-with opinions and becomes a trigger:
+either decides anything. Detect is a **trigger**: it runs one command and hands back its stdout.
 
 ```jsonc
 "detectScript": "/abs/path/to/leave-me-alone/scripts/detect.mjs"
 ```
 
-Detect's prompt becomes one command (~880 characters instead of ~4,300), run via `bun`, whose stdout
-the orchestrator parses itself. Same wiring as `taskScript`: an absolute path, no default. The census
-is always taken fresh — there is deliberately no way to hand over one you took earlier, because a
-census is a snapshot of what is merged, and a stale one re-dispatches work that has since landed.
+**Required**, like `taskScript`, and for the same reason: this repo can be checked out anywhere. A
+missing or relative path fails at launch. There is no agent-census fallback — the census is
+deterministic or it does not happen. `bun` must be on PATH.
+
+The census is also always taken **fresh**. There is deliberately no way to hand over one you took
+earlier: a census is a snapshot of what is merged, and a stale one re-dispatches work that has since
+landed.
 
 `verification` is the other half, and the only genuinely model-shaped step in the stage. Supply it
 and Detect's prompt drops to the one trigger line:

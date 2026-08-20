@@ -553,15 +553,23 @@ const [owner, repoName] = repo.split('/')
 // path by anyone, so a baked-in absolute path here would be exactly the kind
 // of machine-specific hardcoding this plugin avoids everywhere else. Wrong or
 // missing path fails at launch, not mid-milestone.
-// When given, Detect stops being a shell with opinions and becomes a pure
-// trigger: one command, no loop, no filtering, no per-result transcription.
-// Same wiring as taskScript — an absolute path, because this repo can be
-// checked out anywhere — but optional, since the agent path still works and
-// deleting a path that has run live in favour of one that has not is exactly
-// the swap that keeps biting.
+// Detect is a trigger, not a shell with opinions: it runs ONE command and
+// hands back its stdout. Same wiring as taskScript — an absolute path, no
+// default, because this repo can be checked out anywhere.
+//
+// There is no agent-census fallback. There used to be, and it was four
+// commands, a loop and a filter carried out by a model that could substitute a
+// tool, drop a result or tidy a branch name in transit — three of the four bugs
+// this pipeline has ever had came from that latitude. A fallback nobody
+// exercises is not a safety net; it is untested code waiting for the worst
+// possible moment. One path, and it is the deterministic one.
 const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.startsWith('/')
   ? opts.detectScript
-  : null
+  : (() => { throw new Error(
+      'orchestrator needs args.detectScript as an absolute path to this checkout\'s '
+      + 'scripts/detect.mjs (e.g. "<repo>/scripts/detect.mjs") — there is no default, since this '
+      + 'repo can be checked out anywhere, and no fallback: the census is deterministic or it does '
+      + 'not happen. It is run with `bun`.') })()
 
 const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.startsWith('/')
   ? opts.taskScript
@@ -631,17 +639,6 @@ const providedVerification = opts.verification && typeof opts.verification === '
   ? opts.verification
   : null
 
-const DETECT_STATE_STEPS = `1. Resolve the milestone title: \`gh api repos/${repo}/milestones/${milestoneNumber} --jq .title\`. Then list its story issues:
-   \`gh issue list --repo ${repo} --milestone "<title>" --label ${labels.story} --state all --json number,title,state\`
-2. For each story, get its blockedBy edges via GraphQL (\`issue { blockedBy(first:50) { nodes { number } } }\`). Report ONLY the numbers — do NOT compute levels or interpret them; that happens in-script. If the repo uses no blockedBy relations, report empty arrays (that is normal, not an error).
-3. For each story, list its sub-issues via \`gh api repos/${repo}/issues/<story number>/sub_issues --jq '.[] | {number, title, state}'\` (the native sub-issue relation). Do NOT substitute \`gh issue list --label ${labels.subtask}\`, which returns every subtask in the milestone with no link back to its parent. Preserve the ORDER THE ENDPOINT RETURNS and report titles VERBATIM — ordering depends on both.
-4. List the repo's pull requests ONCE — not per subtask. Use the REST endpoint, NOT \`gh pr list\`:
-   \`gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}'\`
-   Return every PR whose \`ref\` contains ANY of the subtask numbers you listed in step 3, as \`pullRequests\`. That is a LOOSE filter and it is meant to be — report a few extras rather than dropping a real one. Do NOT decide which PR belongs to which subtask, do NOT compare bases, do NOT judge merged-ness: the script does all of that, because getting it subtly wrong once orphaned finished work and re-dispatched it onto an empty diff (2026-08-18, #1050). Copy \`ref\` and \`base\` VERBATIM — never blank, never guessed.
-   \`gh pr list\` goes through GraphQL, which returned empty results for genuinely-merged PRs during the 2026-08-17 GitHub incident; REST kept answering. Do NOT use free-text search (\`--search "<n> in:body"\` matches unrelated PRs).
-
-   **If that command ERRORS or times out** (non-zero exit, 5xx, "no server is currently available"), retry it up to 3 times with a short pause. If it still fails, set \`prLookupFailed: true\` and return \`pullRequests: []\`. Do NOT return an empty list with prLookupFailed false to mean "the API broke" — an empty list means the command SUCCEEDED and this repo genuinely has no matching PRs, and reporting a failure that way re-implemented merged subtasks once (2026-08-17).`
-
 const detectVerificationStep = index => `${index}. Discover this repo's OWN verification commands — do not assume a toolchain.
 
    **Read them as they exist on \`origin/${baseBranch}\`, NOT from ${repoDir}'s working tree.** That checkout can sit on an unrelated branch, and every subtask worktree is cut from \`origin/${baseBranch}\` — so a command discovered from the working tree can name a test file that does not exist where it will actually run. That failure looks exactly like a broken test and stops the whole milestone (observed: a suite command naming a test file added on another branch).
@@ -670,8 +667,8 @@ const DETECT_TRIGGER_STEP = `1. Run EXACTLY this command and capture its stdout:
    - stdout: its stdout EXACTLY as printed, as one string. Empty if the command failed.
    - error: its stderr, only when ok=false.`
 
-const detectSteps = [detectScript ? DETECT_TRIGGER_STEP : DETECT_STATE_STEPS]
-if (!providedVerification) detectSteps.push(detectVerificationStep(detectScript ? 2 : 5))
+const detectSteps = [DETECT_TRIGGER_STEP]
+if (!providedVerification) detectSteps.push(detectVerificationStep(2))
 
 const detectPromise = callAgent(`Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
 
@@ -680,33 +677,12 @@ ${detectSteps.join('\n\n')}
 Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`,
   { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', schema: {
     type: 'object',
-    required: [
-      ...(detectScript ? ['ok', 'stdout'] : ['stories']),
-      ...(providedVerification ? [] : ['verification']),
-    ],
+    required: ['ok', 'stdout', ...(providedVerification ? [] : ['verification'])],
     properties: {
-      // trigger path: the script's stdout, parsed by this script, not by the agent.
+      // The census is a string here on purpose: it is parsed by this script, so
+      // a mangled or truncated transcription fails at the boundary instead of
+      // arriving as a plausible-looking half-census.
       ok: { type: 'boolean' }, stdout: { type: 'string' }, error: { type: 'string' },
-      milestoneTitle: { type: 'string' },
-      stories: { type: 'array', items: {
-        type: 'object', required: ['number', 'title', 'blockedBy', 'subtasks'],
-        properties: {
-          number: { type: 'integer' }, title: { type: 'string' }, state: { type: 'string' },
-          blockedBy: { type: 'array', items: { type: 'integer' } },
-          subtasks: { type: 'array', items: {
-            type: 'object', required: ['number', 'title', 'state'],
-            properties: {
-              number: { type: 'integer' }, title: { type: 'string' }, state: { type: 'string' },
-            } } },
-        } } },
-      // The raw list, matched to subtasks in-script by matchPr().
-      prLookupFailed: { type: 'boolean' },
-      pullRequests: { type: 'array', items: {
-        type: 'object', required: ['number', 'ref', 'base'],
-        properties: {
-          number: { type: 'integer' }, url: { type: 'string' }, state: { type: 'string' },
-          merged_at: { type: ['string', 'null'] }, merged: { type: 'boolean' },
-          ref: { type: 'string' }, base: { type: 'string' } } } },
       verification: {
         type: 'object', required: ['fullSuite'],
         properties: {
@@ -718,9 +694,6 @@ Return the raw structure. No summarizing, no judging what is "done". [cache-bust
         } },
     },
   } })
-  // Settled, never raw: this promise is created here but awaited far below, and
-  // an un-awaited rejection in between is an unhandled rejection. Wrapping it
-  // keeps the real error intact for the await site.
   .then(value => ({ value }), error => ({ error }))
 
 phase('Configure')
@@ -820,10 +793,8 @@ function parseTriggerOutput(result) {
   }
 }
 
-const census = detectScript ? parseTriggerOutput(detected) : detected
-if (detectScript) {
-  log(`detect: census produced deterministically by ${detectScript} (${(census.stories || []).length} stories)`)
-}
+const census = parseTriggerOutput(detected)
+log(`detect: census produced deterministically by ${detectScript} (${(census.stories || []).length} stories)`)
 if (!Array.isArray(census.stories)) {
   throw new Error('orchestrator: the census came back with no stories array — nothing can be dispatched')
 }
