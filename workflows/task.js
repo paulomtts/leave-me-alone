@@ -3,7 +3,6 @@ export const meta = {
   description: 'Drive ONE subtask issue end-to-end in its own worktree/branch: intake, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo, board, and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
-    { title: 'Resume', detail: 'check for an existing PR on this issue\'s branch — short-circuit if merged or open', model: 'haiku' },
     { title: 'Intake', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
     { title: 'Spec', detail: 'scope, behavior, error paths, test list', model: 'sonnet' },
     { title: 'Plan', detail: 'TDD implementation plan from the spec', model: 'opus' },
@@ -47,48 +46,26 @@ const WORKTREE = `${repoDir}/.claude/worktrees/${BRANCH}`
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 const DRY = opts.dryRun === true
 
-// ── 0. resume-check — read-only PR lookup, short-circuits everything below ──
-// Branch names are deterministic per issue (`${branchPrefix}${issue}`), so any
-// PR whose head ref carries this issue's number IS this pipeline's own prior
-// attempt — never foreign work. Mirrors orchestrator.js's Detect step, kept as
-// its own cheap Haiku call so a resumed/rerun task never pays for Intake's
-// Sonnet-tier exploration just to rediscover work that already happened.
-phase('Resume')
-const resumeCheck = await callAgent(`Find any pull request on ${repo} (any state) whose head ref ends with a non-digit followed by "${issue}" — so branches like "${BRANCH}" and "wip/${issue}" match, but one ending in a longer number (e.g. "${issue}0") must NOT. Use the REST endpoint, not gh pr list or search:
-gh api "repos/${repo}/pulls?state=all&per_page=100" --paginate --jq '.[] | {number, state, merged: (.merged_at != null), ref: .head.ref, base: .base.ref}'
-Read only — do NOT create, edit, merge, or comment on anything. If the command errors or times out, retry up to 3 times with a short pause; if it still fails, return found=false, unknown=true (an API failure is not evidence there is no PR — never guess). Otherwise return found=true with the PR's number/state/merged/base, preferring a merged match, then the most recently opened one, if several qualify. Always report base VERBATIM (never blank, never guessed).`,
-  { label: `resume-check:#${issue}`, phase: 'Resume', model: 'haiku', effort: 'low', schema: {
-    type: 'object', required: ['found'],
-    properties: {
-      found: { type: 'boolean' }, unknown: { type: 'boolean' },
-      number: { type: 'integer' }, state: { type: 'string' }, merged: { type: 'boolean' }, base: { type: 'string' },
-    },
-  } })
-if (resumeCheck && resumeCheck.unknown) {
-  throw new Error(`task workflow: PR lookup for #${issue} failed after retries — cannot safely determine resume state`)
-}
-// A PR matched by branch-suffix is only this pipeline's own prior attempt if
-// it also targets THIS run's baseBranch — a PR opened by mistake against the
-// wrong branch is foreign work as far as this run is concerned, merged or not
-// (this is what silently "resumed" #1133's dead-end merge into main
-// repeatedly on paulomtts/refactor-nori: PR #1150, head task-1133, base
-// main, kept getting rediscovered as done). Fall through to a fresh dispatch
-// instead of trusting it.
-const resumeBase = resumeCheck && typeof resumeCheck.base === 'string' ? resumeCheck.base : ''
-const resumeBaseMismatch = resumeCheck && resumeCheck.found && resumeBase && resumeBase !== baseBranch
-if (resumeBaseMismatch) {
-  log(`resume-check: ignoring PR #${resumeCheck.number} for #${issue} — base "${resumeBase}" is not "${baseBranch}"`)
-}
-if (resumeCheck && resumeCheck.found && resumeCheck.merged && !resumeBaseMismatch) {
-  return { issue, pr: resumeCheck.number, branch: BRANCH, worktree: WORKTREE, note: 'resumed: PR already merged' }
-}
-if (resumeCheck && resumeCheck.found && String(resumeCheck.state).toUpperCase() === 'OPEN' && !resumeBaseMismatch) {
-  return { issue, pr: resumeCheck.number, branch: BRANCH, worktree: WORKTREE, note: 'resumed: PR already open from a prior run' }
-}
+// ── doneness is the CALLER's question, not this workflow's ──────────────────
+// This file assumes it was handed work that still needs doing, and it does not
+// check. Deciding whether #${issue} is already merged, already has an open PR,
+// or targets the wrong base is orchestrator.js's job: its Detect step
+// suffix-matches every subtask's PR, drops any whose base is not this run's
+// baseBranch, and aborts outright when the API will not answer; runSubtask then
+// routes merged subtasks to bookkeeping and open-PR subtasks straight to merge,
+// so task.js is only ever invoked for work with no live PR.
+//
+// An earlier version re-asked that same question here, as its own dispatch. It
+// could only ever answer "nothing found" under the orchestrator, and having two
+// files decide doneness meant two places to keep the base-branch rule correct —
+// the #1133 bug (PR #1150, head task-1133, base main, rediscovered as done for
+// many runs) had to be fixed in both. One owner, one rule.
+//
+// The time gap between Detect and this run is covered where it actually
+// matters: Implement re-checks for a live PR on the branch before touching it.
 
-// project: fully resolved ids (passed down by the orchestrator) or a project
-// number this workflow resolves itself when standalone. Omit entirely for
-// boardless repos — every board step then no-ops instead of failing the run.
+// project: fully resolved ids, passed down by the orchestrator. Omit entirely
+// for boardless repos — every board step then no-ops instead of failing the run.
 const project = opts.project && typeof opts.project === 'object' ? { ...opts.project } : null
 
 // agent() can throw when the model returns without calling StructuredOutput —
@@ -322,7 +299,7 @@ const impl = await callAgent(`Implement ${repo} subtask #${issue} from the valid
 
 Setup: from ${repoDir}, run \`git fetch origin && git worktree prune\` (prune clears stale worktree registrations whose directories are gone), then create the worktree IDEMPOTENTLY. The branch name is STABLE across runs, so a stopped or killed earlier run can leave \`${BRANCH}\` and/or \`${WORKTREE}\` behind and a plain \`-b\` would fail:
   a. If branch \`${BRANCH}\` does NOT exist: \`git worktree add ${WORKTREE} -b ${BRANCH} origin/${baseBranch}\`. Skip straight to the TDD steps below.
-  b. Else the branch (and possibly its worktree) already exists. First rule out live foreign work (defensive re-check — the pipeline's own Resume step already ruled this out at launch, but re-verify since time has passed): \`gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '.[] | select(.head.ref=="${BRANCH}") | .number'\`. An OPEN PR here means STOP and report it — never reset or delete it.
+  b. Else the branch (and possibly its worktree) already exists. First rule out live work on it — this is the ONLY place that check happens, so do not skip it: \`gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '.[] | select(.head.ref=="${BRANCH}") | .number'\`. An OPEN PR here means STOP: report the PR number and change NOTHING — never reset, delete, or commit over it. (The caller established there was no live PR when it queued this subtask; one appearing since means something else is driving this branch, and that is a human's call, not yours.)
      No open PR: ensure the worktree exists (\`git worktree add ${WORKTREE} ${BRANCH}\` if ${WORKTREE} is missing), then decide RESUME vs RESET by whether the branch's own commits implement the CURRENT plan:
      - Compute \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\`. Do NOT modify \`${plan}\`'s content at any point in this workflow — its exact bytes are the resume key this hash is derived from, for this run and every future resume attempt. If ticking off plan checkboxes as you go is a habit, resist it here.
      - If the \`sha256sum\` command fails, or \`$PLAN_HASH\` ends up empty, STOP and report the failure. Never proceed with an empty/missing hash — not for the resume-check below, and not for committing later.
