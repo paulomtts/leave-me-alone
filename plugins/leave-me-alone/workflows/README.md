@@ -29,7 +29,10 @@ the old scripts, and an old `orchestrator.js` has no idea it is old. The hook st
 `~/.claude/workflows/.synced-version` and says so when the version moves, but it cannot close the
 gap — a hook cannot run before the update it reacts to. **Update, restart, then run a milestone.**
 
-`bun` and `gh` on PATH. A GitHub Projects v2 board — there is no boardless mode. Board setup and the
+**Requires `bun`, `gh` (authenticated with the `project` scope), `git`, and the `superpowers`
+plugin.** The helper scripts are invoked as `bun <script>.mjs`, and `superpowers:writing-plans`
+defines the plan format Implement and Review both assume — Plan reports whether it actually invoked
+that skill, and the run stops if it did not. `node` is needed only for this repo's test suite. A GitHub Projects v2 board — there is no boardless mode. Board setup and the
 milestone conventions are the `setup-project` and `setup-milestone` skills.
 
 ## Helper scripts

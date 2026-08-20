@@ -2,6 +2,33 @@
 
 Personal Claude Code plugin marketplace.
 
+## Requirements
+
+| | why | if missing |
+|---|---|---|
+| **bun** | every helper script runs under it — the workflows literally invoke `bun <script>.mjs` | the run stops at its first trigger step |
+| **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
+| **gh**, authenticated | issues, sub-issues, PRs, and Projects v2 board mutations | resolution fails at launch |
+| **git** | worktrees, branches, stacked bases | — |
+
+`gh auth status` must show the **`project`** scope — there is no boardless mode, so a run without
+board access stops rather than silently skipping card moves:
+
+```
+gh auth refresh -s project,read:project
+```
+
+**Node is not needed to run a milestone**, only to run this repo's own test suite — and it must be
+`node --test`, not `bun test`: the tests are written against `node:test`, which bun's runner cannot
+execute.
+
+Softer couplings, which degrade rather than stop: the `code-worker` agent is told to reach for
+`superpowers:test-driven-development` and `superpowers:systematic-debugging`, and `setup-milestone`
+assumes a spec produced by `superpowers:brainstorming`. Nothing enforces either.
+
+Verified against superpowers 6.0.3 and 6.3.0 — the `docs/superpowers/{plans,specs}/` layout and the
+spec/plan reviewer templates are unchanged across that bump.
+
 ## Install
 
 ```
