@@ -5,11 +5,13 @@ description: Use when the user asks to see or generate a progress diagram/dashbo
 
 # setup-report
 
-Renders the current state of in-flight work as a published Artifact: a stat strip, a
-diagram, blocker or caveat call-outs, and a detail table. The *shape* of the diagram is
-never fixed — it comes from whatever structure the work actually has. Forcing every run into
-one fixed template (fixed stage names, fixed lane count) is the failure mode this skill exists
-to avoid.
+Renders the current state of in-flight work as a published Artifact, always in the ONE fixed
+template defined by `reference.html`: header (eyebrow + title + dek), a 4-cell stat strip
+(Merged / Dispatching now / Queued behind deps / Escalations), a dependency-DAG diagram (levels
+as columns, one pip per unit, edges from real dependency relations), a "Caveats" notes section,
+and a single detail table. Every run produces this same shape — same section order, same stat
+categories, same diagram grammar — regardless of what the underlying work looks like. Only the
+content changes: counts, labels, node/lane count, table rows, prose.
 
 ## 1. Find the work to visualize
 
@@ -32,55 +34,55 @@ guessing.
 **Always re-derive current state, never reuse stale numbers from earlier in the conversation.**
 A CI gate mentioned as blocking ten minutes ago may already be clear.
 
-## 2. Let the data pick the diagram's shape
+## 2. Map the source onto the fixed template
 
-Do not reuse a fixed set of stage names or lane count across runs. Derive both from what this
-source actually models:
+`reference.html` is not one option among several — it is the template every run produces.
+Derive its *content* from whatever source step 1 found, but never its *shape*:
 
-| Source | Stages come from | Lanes come from |
-|---|---|---|
-| Orchestrator/milestone run | The real pipeline this repo uses to land work (e.g. implement → push → PR → CI → merge — confirm against actual `gh` state, don't assume) | Stories (each subtask a marker within its story's lane) |
-| Ledger board | The board's own stage headers, in order, verbatim | Cards (seams) |
-| Session task list | Whatever statuses the tasks actually use | Tasks, or a single lane if there's no natural grouping |
+| Source | Level (DAG column) comes from | Node comes from | Pip comes from |
+|---|---|---|---|
+| Orchestrator/milestone run | Dependency depth in the story DAG (`blockedBy`) | A story | Its subtasks |
+| Ledger board | The board's own stage order, treated as levels | The stage | Its cards |
+| Session task list | A single level if there's no natural dependency grouping | The task list itself, or a natural sub-grouping | Individual tasks |
 
-A run with 2 lanes and 3 stages is not a smaller version of a run with 6 lanes and 5 stages —
-build the SVG to the real dimensions each time.
+When the source has no real dependency edges (a ledger board, a flat task list), draw the DAG
+with one level and no edges rather than switching to a different diagram type — the node/pip
+grammar (`.nodebox`, `.nid`, `.nlabel`, `.pip`, `.pip.run`) and the rest of the template stay
+identical either way. Node and level counts still come from the real data — a run with 2 nodes
+is not stretched to look like a run with 7 — only the diagram *type* is fixed, not its
+dimensions.
 
 ## 3. Build the artifact
 
-**`reference.html` is the default visual system.** Follow it unless the user asks for something
-else: cool blue-biased neutrals; an indigo accent held *separate* from the semantic colors so
-it never collides with the done-green; three type roles — a system serif for headings, system
-sans for prose, and mono reserved strictly for identifiers (issue numbers, branch names,
-commands); a four-cell stat strip; note cards with a bold lead-in line; and a detail table with
-a `tabular-nums` leading column, grouped by unit with a `.lead` top-border, and pill status
-badges. All three themes are defined token-level (bare `:root`, `prefers-color-scheme` guarded
-by `:not([data-theme="light"])`, and `[data-theme="dark"]`); keep that structure.
+Follow `reference.html` exactly: its CSS tokens (cool blue-biased neutrals, an indigo accent
+held *separate* from the semantic colors so it never collides with the done-green, all three
+themes defined token-level — bare `:root`, `prefers-color-scheme` guarded by
+`:not([data-theme="light"])`, and `[data-theme="dark"]`), its three type roles (system serif
+for headings, system sans for prose, mono reserved strictly for identifiers), and every
+structural section in the order it appears there:
 
-**Its diagram shape is NOT the default.** `reference.html` draws a dependency DAG — levels as
-columns, each node carrying one pip per child unit, curved edges from real `blockedBy`
-relations — because that run's structure was a graph at rest, with nothing yet in motion.
-`reference-pipeline.html` is a second finished example in the same visual system drawing a
-different shape: per-lane stage progression, `marker-end` arrows, dashed edges for
-waiting/blocked, and a vertical dashed line for a gate shared across lanes — because that run's
-structure was work moving through stages. Read whichever is closer to what step 2 produced, and
-build a third shape when neither fits. Never copy either file's field names, issue numbers,
-stage labels, or level count.
-
-Sections to include, adapted to what step 2 produced:
 - Header: one-line eyebrow (scope/repo/date) + title naming the work + one-sentence dek.
-- Stat strip: counts by terminal state (done / gated-or-blocked / queued — label per the
-  data's real states, not these exact words).
-- The diagram (SVG), sized to the real shape step 2 produced.
-- Note cards: one per *distinct* real blocker, each naming what's actually stopping progress
-  and the concrete fix — never a placeholder like "needs review." When nothing is blocked, use
-  the same cards for real caveats instead (a gap in the automated gate, a deliberate
-  constraint), and say which it is — never manufacture a blocker to fill the section.
-- A full detail table, one row per unit, so nothing in the stat strip is unauditable.
+- The 4-cell stat strip, in this exact order: **Merged** (done) / **Dispatching now** (active)
+  / **Queued behind deps** (queued) / **Escalations** (blocked). Relabel only when the source's
+  own terminology is clearer (e.g. a ledger board's own stage names), but keep four cells in
+  this done → active → queued → blocked order.
+- The dependency-DAG figure (SVG): levels as columns, `LEVEL N` headers, one `.nodebox` per
+  node with its id/label and one `.pip` per child unit (`.pip.run` for the one in progress),
+  curved `.edge` paths for real dependency relations, and a `figcaption` explaining the
+  structure in prose — same as step 2 produced it.
+- `<h2>Caveats</h2>` notes: one card per *distinct* real blocker, each naming what's actually
+  stopping progress and the concrete fix — never a placeholder like "needs review." When
+  nothing is blocked, use the same cards for real caveats instead (a gap in the automated gate,
+  a deliberate constraint), and say which it is — never manufacture a blocker to fill the
+  section.
+- A full detail table (`# / Lvl / Story / Subtask / Status` columns, or the closest equivalent
+  for the source), one row per unit, grouped with the `.lead` top-border per group, pill status
+  badges — so nothing in the stat strip is unauditable.
+- Footer: snapshot timestamp, run/scope identifier, spec reference if one exists.
 
 **Load the `artifact-design` skill before writing markup** (required by the Artifact tool) —
 it governs light/dark tokens, responsive rules, and general page craft; this skill only
-supplies the domain-specific diagram pattern.
+supplies the fixed structural template above.
 
 ### Rebuild from state, never patch the last render
 
