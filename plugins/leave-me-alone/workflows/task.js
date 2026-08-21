@@ -844,6 +844,8 @@ const verifyFlags = suiteCmds
 const shipOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
    bun ${scriptsDir}/ship.mjs --repo ${repo} --issue ${issue} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
 
+This command runs the FULL verification suite before it pushes anything, which can take several minutes on a large repo — the Bash tool's own default timeout (2 minutes) is too short for it. You MUST call the Bash tool for this command with an explicit timeout of 600000 (its 10-minute maximum). Do not omit that parameter and do not rely on the default.
+
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.
 
 Only if that command printed \`"number"\` with a real PR number, do this as a final best-effort step (its failure must not change anything you return):
