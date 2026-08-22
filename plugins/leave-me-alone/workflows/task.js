@@ -79,6 +79,51 @@ function planHashMismatch(implHash, reviewHash) {
     + 'The Plan-Hash gate below will stop the run; this is why.'
 }
 
+// A degenerate Explore result is schema-valid but carries no real findings.
+// Seen live on #1296: the explore agent did the actual work (read the issue,
+// the parent story, located the exact file:line targets), but its
+// StructuredOutput call omitted the required `verification` field three times
+// in a row — a long free-text `summary` sharing one tool call with trailing
+// structured fields apparently crowded it out. After the third rejection it
+// gave up and submitted a placeholder that trivially satisfies the schema:
+// summary="test", verification.fullSuite=["a"]. Spec then correctly refused
+// to invent a design from the literal string "test" and self-blocked — which
+// read as a Spec-stage bug when the real defect was upstream: nothing checked
+// that Explore's output was real before the pipeline trusted it.
+const MIN_SUMMARY_LENGTH = 60
+const PLACEHOLDER_SUMMARIES = new Set(['test', 'todo', 'tbd', 'n/a', 'na', 'none', 'placeholder', 'unknown'])
+
+function explorationOutputGate(explore, providedVerification) {
+  const summary = String((explore && explore.summary) || '').trim()
+  if (summary.length < MIN_SUMMARY_LENGTH || PLACEHOLDER_SUMMARIES.has(summary.toLowerCase())) {
+    return { detail: `exploration summary is implausibly short/placeholder for real findings on a subtask: ${JSON.stringify(summary.slice(0, 80))}` }
+  }
+
+  const fullSuite = explore && explore.verification && Array.isArray(explore.verification.fullSuite)
+    ? explore.verification.fullSuite
+    : null
+  if (!fullSuite) {
+    return { detail: 'exploration did not return an array for verification.fullSuite' }
+  }
+
+  // When the caller already discovered verification commands, the prompt
+  // tells Explore to return them EXACTLY as given — so any deviation, not
+  // just an implausible one, is itself proof the output is not trustworthy.
+  if (providedVerification) {
+    const want = JSON.stringify(providedVerification.fullSuite || [])
+    const got = JSON.stringify(fullSuite)
+    if (got !== want) {
+      return { detail: `exploration did not return the caller-provided verification.fullSuite unchanged (expected ${want}, got ${got})` }
+    }
+    return null
+  }
+
+  if (fullSuite.some(cmd => typeof cmd !== 'string' || cmd.trim().length < 3)) {
+    return { detail: `exploration's verification.fullSuite contains an implausible command: ${JSON.stringify(fullSuite)}` }
+  }
+  return null
+}
+
 // The Review -> Ship boundary. Review is asked to REPORT three facts and never
 // to interpret or act on them: an agent that both measures and judges can talk
 // itself out of the judgement. Review is also the last stage that writes, so
@@ -384,7 +429,7 @@ const verificationStep = providedVerification
   ? `5. Verification commands are already known for this run (discovered by the caller) — return them EXACTLY as given, do not re-discover them: ${JSON.stringify(providedVerification)}. Still locate this repo's testing standards doc (via CLAUDE.md) — step 6 needs it.`
   : `5. Discover this repo's own verification commands — do NOT assume a stack. Check CLAUDE.md, its testing standards doc, CI workflow files (.github/workflows/), and the manifest (pyproject.toml/package.json/etc.) for how tests, typecheck, and lint actually run. If the repo documents multiple SEPARATE invocations for different test tiers (e.g. one tier must run in its own process), report them as separate items in fullSuite, not concatenated with &&.`
 
-const explore = await callAgent(`Explore ${repo} subtask #${issue} in ${repoDir} and report what the later stages need.
+const explorePrompt = `Explore ${repo} subtask #${issue} in ${repoDir} and report what the later stages need.
 
 1. \`gh issue view ${issue} --repo ${repo} --json title,body,labels,milestone\` — if the labels do NOT include "subtask" (e.g. it is a story), set refused=true with the reason and stop (skip everything below, including the board step).
 2. Read the parent story (\`gh api graphql\` on issue.parent, or the "Subtask of #N" line in the body) and list its sibling sub-issues with states.
@@ -395,22 +440,42 @@ ${verificationStep}
 ${DRY ? '' : `
 7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
-Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`,
-  { label: `explore:#${issue}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: {
-    type: 'object', required: ['refused', 'summary', 'verification'],
-    properties: {
-      refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
-      // Resolved once here so Ship does not re-query for ids that cannot change.
-      board: { type: 'object', properties: {
-        itemId: { type: 'string' }, parentItemId: { type: 'string' },
-        parentNumber: { type: 'integer' } } },
-      verification: { type: 'object', required: ['fullSuite'], properties: {
-        fullSuite: { type: 'array', items: { type: 'string' } },
-        typecheck: { type: 'string' }, lint: { type: 'array', items: { type: 'string' } },
-      } },
-    },
-  } })
+Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`
+const exploreOpts = { label: `explore:#${issue}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: {
+  type: 'object', required: ['refused', 'summary', 'verification'],
+  properties: {
+    refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
+    // Resolved once here so Ship does not re-query for ids that cannot change.
+    board: { type: 'object', properties: {
+      itemId: { type: 'string' }, parentItemId: { type: 'string' },
+      parentNumber: { type: 'integer' } } },
+    verification: { type: 'object', required: ['fullSuite'], properties: {
+      fullSuite: { type: 'array', items: { type: 'string' } },
+      typecheck: { type: 'string' }, lint: { type: 'array', items: { type: 'string' } },
+    } },
+  },
+} }
+
+let explore = await callAgent(explorePrompt, exploreOpts)
 if (!explore || explore.refused) return { issue, refused: true, reason: explore ? explore.reason : 'explore agent died' }
+
+// A refusal is a real, deliberate answer and skips this — everything else
+// must look like genuine findings before Spec is allowed to trust it. See
+// explorationOutputGate's comment: this is the #1296 guard.
+let degenerate = explorationOutputGate(explore, providedVerification)
+if (degenerate) {
+  log(`explore returned degenerate output (${degenerate.detail}) — retrying once`)
+  explore = await callAgent(`${explorePrompt}
+
+[RETRY: a previous attempt returned findings that do not look real — ${degenerate.detail}. This usually happens when a long free-text summary crowds out the schema's other required fields and the model gives up after repeated validation failures, submitting a placeholder just to complete the call. Do the exploration properly this time: keep summary focused on the essential findings rather than exhaustive prose, and return verification EXACTLY as specified. You MUST finish by returning genuine findings, not a placeholder.]`,
+    { ...exploreOpts, label: `${exploreOpts.label}:retry-degenerate` })
+  if (!explore || explore.refused) return { issue, refused: true, reason: explore ? explore.reason : 'explore agent died' }
+  degenerate = explorationOutputGate(explore, providedVerification)
+  if (degenerate) {
+    return { issue, blocked: 'exploration', branch: BRANCH, worktree: WORKTREE,
+      detail: `exploration returned degenerate findings twice in a row (${degenerate.detail}) — nothing was written. Stopping here rather than handing Spec unusable input it would have to refuse anyway.` }
+  }
+}
 
 // Card ids are stable for the life of the card, so this is resolved once and
 // handed to every later stage instead of being looked up again per board move.

@@ -16,8 +16,8 @@ import { loadPure } from './load-pure.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-const { verificationGate, reviewGate, isPlanHash, planHashMismatch } = await loadPure(join(HERE, 'task.js'), [
-  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch',
+const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate } = await loadPure(join(HERE, 'task.js'), [
+  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate',
 ])
 
 const BRANCH = 'task-42'
@@ -135,6 +135,54 @@ test('a numeric string count is still usable', () => {
   // would skip the gate on a branch that could have been checked.
   assert.equal(reviewGate(clean({ commitCount: '3', taggedCount: '3' }), BRANCH, BASE), null)
   assert.equal(reviewGate(clean({ commitCount: '3', taggedCount: '2' }), BRANCH, BASE).blocked, 'implement')
+})
+
+// ── explorationOutputGate ────────────────────────────────────────────────────
+// Added after a live run (#1296) where the explore agent did real work, then
+// its StructuredOutput call omitted the required `verification` field three
+// times in a row (schema-valid summary text apparently crowding it out), and
+// on the fourth attempt it gave up and submitted a placeholder that trivially
+// satisfies the schema: summary="test", verification.fullSuite=["a"]. Spec
+// then correctly refused to invent a design from "test" and self-blocked —
+// which read as a Spec-stage bug when the real defect was here: nothing
+// checked that Explore's output was real before trusting it.
+
+const realSummary = 'graph_canvas.js renderEdges (lines 228-253) needs a transparent hit-path emitted before the visible path, per issue #1296; graph_shell.css needs the matching cursor rule.'
+const realVerification = { fullSuite: ['uv run pytest tests/unit -q', 'uv run ruff check .'] }
+
+test('a real summary and plausible verification pass the gate', () => {
+  assert.equal(explorationOutputGate({ summary: realSummary, verification: realVerification }, null), null)
+})
+
+test('the #1296 placeholder output is caught: short summary', () => {
+  const gate = explorationOutputGate({ summary: 'test', verification: { fullSuite: ['a'] } }, null)
+  assert.match(gate.detail, /implausibly short/)
+})
+
+test('a summary that is exactly a known placeholder word is caught, even case-insensitively', () => {
+  for (const word of ['todo', 'TBD', 'n/a', 'None', 'placeholder']) {
+    const gate = explorationOutputGate({ summary: word, verification: realVerification }, null)
+    assert.ok(gate, `${JSON.stringify(word)} should be caught`)
+  }
+})
+
+test('a fullSuite command that is not plausible (single letter, like "a") is caught', () => {
+  const gate = explorationOutputGate({ summary: realSummary, verification: { fullSuite: ['a'] } }, null)
+  assert.match(gate.detail, /implausible command/)
+})
+
+test('when the caller provided verification, explore must return it EXACTLY unchanged', () => {
+  const provided = { fullSuite: ['make test', 'make lint'] }
+  assert.equal(
+    explorationOutputGate({ summary: realSummary, verification: { fullSuite: ['make test', 'make lint'] } }, provided),
+    null)
+  const gate = explorationOutputGate({ summary: realSummary, verification: { fullSuite: ['a'] } }, provided)
+  assert.match(gate.detail, /did not return the caller-provided verification/)
+})
+
+test('a missing or non-array fullSuite is caught, not thrown on', () => {
+  assert.ok(explorationOutputGate({ summary: realSummary, verification: {} }, null))
+  assert.ok(explorationOutputGate({ summary: realSummary }, null))
 })
 
 // ── isPlanHash / planHashMismatch ────────────────────────────────────────────
