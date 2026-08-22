@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, titleFromIssue, buildBody, ship } from './ship.mjs'
+import { parseArgs, titleFromIssue, buildBody, verifyError, ship } from './ship.mjs'
 
 const ARGS = ['--repo=o/n', '--issue=23', '--branch=m2/task-23', '--base=main',
               '--worktree=/wt', '--verify=npm test']
@@ -36,6 +36,41 @@ test('the body is built from the branch commits, and always closes the issue', (
   assert.match(body, /Closes #23/)
   assert.doesNotMatch(body, /- \n/)              // blank subjects dropped
   assert.match(buildBody([], 23), /no commit subjects found/)
+})
+
+// ── verifyError ──────────────────────────────────────────────────────────────
+// Added after seven live Ship runs all reported the content-free
+// {"command":"./scripts/gate-frontend.sh","ok":false,"tail":"Command failed: ./scripts/gate-frontend.sh"}
+// — ghError only reads err.stderr, which is right for gh/git (they always use
+// it) but wrong for arbitrary repo verify commands: linters and gate scripts
+// routinely print their diagnostic to STDOUT and exit non-zero, leaving
+// stderr empty, so every one of those seven blocked a PR with nothing
+// actionable to act on.
+
+test('stderr is used when the command wrote to it', () => {
+  const err = new Error('Command failed: npm test')
+  err.stderr = '  \n1 failing\n  1) adds numbers\n'
+  err.stdout = ''
+  assert.equal(verifyError(err), '1) adds numbers')
+})
+
+test('stdout is used when stderr is empty — the gate-frontend.sh case', () => {
+  const err = new Error('Command failed: ./scripts/gate-frontend.sh')
+  err.stdout = 'Checking frontend assets...\nERROR: graph_canvas.js:241 unexpected token\n'
+  err.stderr = ''
+  assert.equal(verifyError(err), 'ERROR: graph_canvas.js:241 unexpected token')
+})
+
+test('stderr wins over stdout when both are present', () => {
+  const err = new Error('Command failed')
+  err.stdout = 'running suite...\nsummary: 4 tests\n'
+  err.stderr = 'FATAL: config.toml not found\n'
+  assert.equal(verifyError(err), 'FATAL: config.toml not found')
+})
+
+test('falls back to the bare error message when neither stream has content', () => {
+  const err = new Error('spawn ENOENT')
+  assert.equal(verifyError(err), 'spawn ENOENT')
 })
 
 // A fake shell: matches on a fragment of the command, records order.
@@ -86,6 +121,17 @@ test('a RED command means nothing is pushed', async () => {
   assert.equal(got.pushed, false)
   assert.equal(log.filter(c => c.includes('push') || c.includes('pr create')).length, 0)
   assert.match(got.detail, /verification failed: npm test/)
+})
+
+test('a verify command that fails with diagnostics on stdout reports them, not just "Command failed"', async () => {
+  const err = new Error('Command failed: ./scripts/gate-frontend.sh')
+  err.stdout = 'Checking frontend assets...\nERROR: graph_canvas.js:241 unexpected token\n'
+  err.stderr = ''
+  const log = []
+  const routes = OK.map(([n, r]) => n === 'npm test' ? [n, err] : [n, r])
+  const got = await ship(parseArgs(ARGS), fake(routes, log))
+  assert.equal(got.passed, false)
+  assert.match(got.detail, /unexpected token/)
 })
 
 test('a later command failing still stops the push', async () => {

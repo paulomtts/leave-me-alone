@@ -75,6 +75,23 @@ export function buildBody(commitLines, issue) {
   ].join('\n')
 }
 
+// ghError only reads err.stderr, which is right for gh/git (they always put
+// the real error there) but wrong here: verify commands are arbitrary repo
+// scripts, and linters/gate scripts routinely print their diagnostic to
+// STDOUT and exit non-zero, leaving stderr empty. Seven live Ship runs all
+// reported the content-free "Command failed: ./scripts/gate-frontend.sh" —
+// ghError never looked at the stream the actual diagnostic was on. Prefer the
+// last non-empty line of stderr (real errors, when a tool does use it), fall
+// back to the last non-empty line of stdout (the gate-frontend.sh case),
+// otherwise fall back to ghError's bare-message handling.
+export function verifyError(err) {
+  const stderr = lastLine(String((err && err.stderr) || ''))
+  if (stderr) return stderr
+  const stdout = lastLine(String((err && err.stdout) || ''))
+  if (stdout) return stdout
+  return ghError(err)
+}
+
 export async function ship(options, run = runner, wait) {
   const { repo, issue, branch, base, worktree, verify } = options
   const result = { passed: false, verified: [], pushed: false, url: '', number: null, detail: '' }
@@ -92,8 +109,8 @@ export async function ship(options, run = runner, wait) {
       const out = await run(command, { cwd: worktree, shell: true })
       result.verified.push({ command, ok: true, tail: plainText(lastLine(out.stdout)) })
     } catch (err) {
-      result.verified.push({ command, ok: false, tail: plainText(ghError(err)) })
-      result.detail = plainText(`verification failed: ${command} — ${ghError(err)}`, 600)
+      result.verified.push({ command, ok: false, tail: plainText(verifyError(err)) })
+      result.detail = plainText(`verification failed: ${command} — ${verifyError(err)}`, 600)
       return result   // nothing is pushed after a red command
     }
   }

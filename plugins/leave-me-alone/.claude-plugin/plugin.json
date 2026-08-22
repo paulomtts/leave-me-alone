@@ -1,6 +1,6 @@
 {
   "name": "leave-me-alone",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Personal Claude Code kit: the orchestrator/task Workflow scripts and their deterministic helper scripts, the six purpose-built agent types they dispatch, the brief/build/dispatch/explain/setup-*/smoke skills, and a PreToolUse hook that auto-allows the Bash patterns these routinely need. A SessionStart hook installs the workflows into ~/.claude/workflows/, which plugins cannot distribute natively.",
   "author": {
     "name": "Paulo",
