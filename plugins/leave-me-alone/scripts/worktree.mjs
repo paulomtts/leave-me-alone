@@ -12,6 +12,10 @@
 //
 // It creates and reports. It never resets, never deletes, and never commits:
 // deciding RESUME vs RESET needs the plan hash, which does not exist yet.
+//
+// Concurrent dispatches share one `.git`, so the check-and-create section runs
+// under `.git/leave-me-alone-worktree.lock` — an atomic `wx` lockfile, retried
+// with backoff, reclaimed when stale.
 
 import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { ghRunner, gitRunner, ghError, jsonFrom, readFlags, sleep, withRetries } from './gh.mjs'

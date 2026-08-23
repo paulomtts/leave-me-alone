@@ -44,7 +44,7 @@ Each is also usable standalone for inspecting or debugging a run.
 |---|---|
 | `detect.mjs` | the whole milestone census: stories, `blockedBy`, sub-issues, PRs. Also does the ONE `git fetch` + `worktree prune` for the run |
 | `resolve.mjs` | a project number → the node ids the mutation API needs |
-| `worktree.mjs` | create a subtask's worktree idempotently; report what was already there. Never resets, deletes or commits |
+| `worktree.mjs` | create a subtask's worktree idempotently; report what was already there. Never resets, deletes or commits. Serializes concurrent dispatches on a `.git/leave-me-alone-worktree.lock` lockfile |
 | `plan-check.mjs` | is there a saved, validated plan for this issue? |
 | `ship.mjs` | verify → push → open the PR. Nothing is pushed after a red command |
 | `check-workflows.mjs` | do the workflow scripts still parse? |
