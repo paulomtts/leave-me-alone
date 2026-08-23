@@ -95,6 +95,29 @@ export function isLockContention(err) {
     || /cannot lock ref/i.test(text)
 }
 
+export async function addWorktreeWithRetry(git, plan, { tries = 3, baseDelayMs = 250, wait = sleep } = {}) {
+  const { repoDir, worktree, branch, base, branchExisted } = plan
+  const args = branchExisted
+    ? ['-C', repoDir, 'worktree', 'add', worktree, branch]
+    : ['-C', repoDir, 'worktree', 'add', worktree, '-b', branch, `origin/${base}`]
+
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    try {
+      await git(args)
+      return { created: true }
+    } catch (err) {
+      if (!isLockContention(err)) throw err
+      // A contended add can be partially applied, so ask git what exists now
+      // rather than repeating a write.
+      const paths = worktreePaths(await git(['-C', repoDir, 'worktree', 'list', '--porcelain']))
+      if (paths.includes(worktree)) return { created: false }
+      if (attempt === tries - 1) throw err
+      await wait(baseDelayMs * (2 ** attempt))
+    }
+  }
+  throw new Error(`worktree: add of ${worktree} exhausted ${tries} attempts`)
+}
+
 export async function prepare(options, git = gitRunner, gh = ghRunner, wait, lockOptions = {}) {
   const { repo, branch, base, worktree, repoDir } = options
   const result = { branch, worktree, branchExisted: false, worktreeExisted: false, created: false, openPr: null, commitCount: 0 }
@@ -128,11 +151,9 @@ export async function prepare(options, git = gitRunner, gh = ghRunner, wait, loc
       await git(['-C', repoDir, 'worktree', 'list', '--porcelain'])).includes(worktree)
 
     if (!result.worktreeExisted) {
-      const args = result.branchExisted
-        ? ['-C', repoDir, 'worktree', 'add', worktree, branch]
-        : ['-C', repoDir, 'worktree', 'add', worktree, '-b', branch, `origin/${base}`]
-      await git(args)
-      result.created = true
+      const added = await addWorktreeWithRetry(git,
+        { repoDir, worktree, branch, base, branchExisted: result.branchExisted }, { wait })
+      result.created = added.created
     }
   } finally {
     await lock.release(lockPath)

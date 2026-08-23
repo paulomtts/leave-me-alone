@@ -203,3 +203,34 @@ test('a stale lock is reclaimed instead of wedging the dispatch', async () => {
   assert.deepEqual(log.filter(line => line.startsWith('acquire') || line.startsWith('release')),
     [`release ${LOCK}`, `acquire ${LOCK}`, `release ${LOCK}`])
 })
+
+test('a contended `worktree add` re-checks existence instead of repeating the write', async () => {
+  const log = []
+  const lock = memLock({}, log)
+  const listings = ['worktree /repo\n', 'worktree /repo\n\nworktree /wt\n']
+  const git = async (args) => {
+    const joined = args.join(' ')
+    log.push(joined)
+    if (joined.includes('worktree list')) return listings.shift() ?? 'worktree /repo\n\nworktree /wt\n'
+    if (joined.includes('worktree add')) throw new Error("fatal: cannot lock ref 'refs/heads/m1/task-9'")
+    if (joined.includes('rev-list')) return '0\n'
+    return ''
+  }
+  const got = await prepare(opts(), git, ghNone, async () => {}, { lock })
+  assert.equal(got.created, false)
+  assert.equal(log.filter(line => line.includes('worktree add')).length, 1)
+  assert.equal(lock.state.holder, null)
+})
+
+test('a non-contention `worktree add` failure is not retried', async () => {
+  const log = []
+  const lock = memLock({}, log)
+  const git = async (args) => {
+    const joined = args.join(' ')
+    log.push(joined)
+    if (joined.includes('worktree add')) throw new Error("fatal: '/wt' already exists")
+    return ''
+  }
+  await assert.rejects(() => prepare(opts(), git, ghNone, async () => {}, { lock }), /'\/wt' already exists/)
+  assert.equal(log.filter(line => line.includes('worktree add')).length, 1)
+})
