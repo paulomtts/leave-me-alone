@@ -234,3 +234,35 @@ test('a non-contention `worktree add` failure is not retried', async () => {
   await assert.rejects(() => prepare(opts(), git, ghNone, async () => {}, { lock }), /'\/wt' already exists/)
   assert.equal(log.filter(line => line.includes('worktree add')).length, 1)
 })
+
+test('two concurrent dispatches serialize: one creates, the other finds', async () => {
+  // The bug this whole file exists for: both calls read "no worktree" and both
+  // add. The shared memLock makes the check-and-create section exclusive.
+  const log = []
+  const lock = memLock({}, log)
+  const world = { added: false }
+  const git = async (args) => {
+    const joined = args.join(' ')
+    log.push(joined)
+    if (joined.includes('worktree list')) return world.added ? 'worktree /repo\n\nworktree /wt\n' : 'worktree /repo\n'
+    if (joined.includes('worktree add')) { world.added = true; return '' }
+    if (joined.includes('rev-list')) return '0\n'
+    return ''
+  }
+  // A macrotask, so the holder's microtask chain always finishes between the
+  // waiter's attempts.
+  const wait = () => new Promise(resolve => setImmediate(resolve))
+
+  const results = await Promise.all([
+    prepare(opts(), git, ghNone, wait, { lock }),
+    prepare(opts(), git, ghNone, wait, { lock }),
+  ])
+
+  assert.equal(log.filter(line => line.includes('worktree add')).length, 1)
+  const creator = results.find(r => r.created === true)
+  const finder = results.find(r => r.created === false)
+  assert.ok(creator, `expected exactly one creator: ${JSON.stringify(results)}`)
+  assert.ok(finder, `expected exactly one finder: ${JSON.stringify(results)}`)
+  assert.equal(finder.worktreeExisted, true)
+  assert.equal(lock.state.holder, null)
+})
