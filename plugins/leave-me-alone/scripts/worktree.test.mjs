@@ -35,7 +35,7 @@ const opts = () => parseArgs(ARGS)
 
 test('a brand new subtask gets a branch cut from the base', async () => {
   const log = []
-  const got = await prepare(opts(), gitFake([['rev-list', '0\n']], log), ghNone)
+  const got = await prepare(opts(), gitFake([['rev-list', '0\n']], log), ghNone, undefined, { lock: memLock() })
   assert.equal(got.created, true)
   assert.equal(got.branchExisted, false)
   assert.match(log.find(c => c.includes('worktree add')), /worktree add \/wt -b m1\/task-9 origin\/main/)
@@ -45,7 +45,7 @@ test('an existing branch is checked out, NOT re-cut from the base', async () => 
   // Re-cutting would silently discard a killed run's commits.
   const log = []
   const got = await prepare(opts(),
-    gitFake([['for-each-ref', 'master\nm1/task-9\n'], ['rev-list', '3\n']], log), ghNone)
+    gitFake([['for-each-ref', 'master\nm1/task-9\n'], ['rev-list', '3\n']], log), ghNone, undefined, { lock: memLock() })
   assert.equal(got.branchExisted, true)
   assert.equal(got.commitCount, 3)
   assert.match(log.find(c => c.includes('worktree add')), /worktree add \/wt m1\/task-9$/)
@@ -55,7 +55,7 @@ test('an existing worktree is left completely alone', async () => {
   const log = []
   const got = await prepare(opts(), gitFake([
     ['for-each-ref', 'm1/task-9\n'], ['worktree list', 'worktree /wt\n'], ['rev-list', '2\n'],
-  ], log), ghNone)
+  ], log), ghNone, undefined, { lock: memLock() })
   assert.equal(got.worktreeExisted, true)
   assert.equal(got.created, false)
   assert.equal(log.some(c => c.includes('worktree add')), false)
@@ -63,16 +63,18 @@ test('an existing worktree is left completely alone', async () => {
 
 test('a live PR stops everything before a single git command runs', async () => {
   // Something else is driving this branch; resetting or committing over it is
-  // a human's call. Nothing is created.
+  // a human's call. Nothing is created, and no lock is taken.
   const log = []
-  const got = await prepare(opts(), gitFake([], log), async () => '[41]')
+  const lock = memLock({}, log)
+  const got = await prepare(opts(), gitFake([], log), async () => '[41]', undefined, { lock })
   assert.equal(got.openPr, 41)
   assert.deepEqual(log, [])
+  assert.equal(lock.state.holder, null)
 })
 
 test('a failed PR lookup is reported, not treated as "no PR"', async () => {
   // "The API did not answer" and "the branch is clear" must stay distinct.
-  const got = await prepare(opts(), gitFake([['rev-list', '0\n']]), async () => { throw new Error('502 bad gateway') }, () => Promise.resolve())
+  const got = await prepare(opts(), gitFake([['rev-list', '0\n']]), async () => { throw new Error('502 bad gateway') }, () => Promise.resolve(), { lock: memLock() })
   assert.match(got.prLookupError, /502/)
   assert.equal(got.openPr, null)
   assert.equal(got.created, true)
@@ -80,7 +82,7 @@ test('a failed PR lookup is reported, not treated as "no PR"', async () => {
 
 test('it never resets, deletes or commits', async () => {
   const log = []
-  await prepare(opts(), gitFake([['for-each-ref', 'm1/task-9\n'], ['rev-list', '9\n']], log), ghNone)
+  await prepare(opts(), gitFake([['for-each-ref', 'm1/task-9\n'], ['rev-list', '9\n']], log), ghNone, undefined, { lock: memLock() })
   for (const forbidden of ['reset', 'checkout -f', 'clean', 'commit', 'push', 'worktree remove', 'prune']) {
     assert.equal(log.some(c => c.includes(forbidden)), false, `must not run ${forbidden}`)
   }
@@ -146,4 +148,35 @@ test('only real git lock contention counts as contention', async () => {
   assert.equal(isLockContention({ stderr: 'fatal: .git/worktrees/wt/locked is present' }), true)
   assert.equal(isLockContention(new Error("fatal: '/wt' already exists")), false)
   assert.equal(isLockContention(undefined), false)
+})
+
+const LOCK = '/repo/.git/leave-me-alone-worktree.lock'
+
+test('the lock is held across the whole check-and-create section', async () => {
+  const log = []
+  const lock = memLock({}, log)
+  const got = await prepare(opts(), gitFake([['rev-list', '0\n']], log), ghNone, undefined, { lock })
+  const at = needle => log.findIndex(line => line.includes(needle))
+  assert.equal(at(`acquire ${LOCK}`), 0, log.join(' | '))
+  assert.ok(at('for-each-ref') < at('worktree list'), log.join(' | '))
+  assert.ok(at('worktree list') < at('worktree add'), log.join(' | '))
+  assert.ok(at('worktree add') < at(`release ${LOCK}`), log.join(' | '))
+  assert.ok(at(`release ${LOCK}`) < at('rev-list'), log.join(' | '))
+  assert.equal(got.created, true)
+})
+
+test('the lock is released when `worktree add` throws', async () => {
+  const log = []
+  const lock = memLock({}, log)
+  const git = async (args) => {
+    const joined = args.join(' ')
+    log.push(joined)
+    if (joined.includes('worktree add')) throw new Error('fatal: could not create leading directories')
+    if (joined.includes('rev-list')) return '0\n'
+    return ''
+  }
+  await assert.rejects(() => prepare(opts(), git, ghNone, async () => {}, { lock }),
+    /could not create leading directories/)
+  assert.equal(lock.state.holder, null)
+  assert.equal(log.at(-1), `release ${LOCK}`)
 })

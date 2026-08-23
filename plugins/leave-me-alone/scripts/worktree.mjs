@@ -95,7 +95,7 @@ export function isLockContention(err) {
     || /cannot lock ref/i.test(text)
 }
 
-export async function prepare(options, git = gitRunner, gh = ghRunner, wait) {
+export async function prepare(options, git = gitRunner, gh = ghRunner, wait, lockOptions = {}) {
   const { repo, branch, base, worktree, repoDir } = options
   const result = { branch, worktree, branchExisted: false, worktreeExisted: false, created: false, openPr: null, commitCount: 0 }
 
@@ -116,17 +116,26 @@ export async function prepare(options, git = gitRunner, gh = ghRunner, wait) {
     result.prLookupError = ghError(err)
   }
 
-  result.branchExisted = branchExists(
-    await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']), branch)
-  result.worktreeExisted = worktreePaths(
-    await git(['-C', repoDir, 'worktree', 'list', '--porcelain'])).includes(worktree)
+  const lock = lockOptions.lock ?? fileLock
+  const lockPath = lockOptions.lockPath ?? lockPathFor(repoDir)
+  const { reclaimed } = await acquireLock(lockPath, { wait, ...lockOptions, lock })
+  if (reclaimed) result.lockReclaimed = true
 
-  if (!result.worktreeExisted) {
-    const args = result.branchExisted
-      ? ['-C', repoDir, 'worktree', 'add', worktree, branch]
-      : ['-C', repoDir, 'worktree', 'add', worktree, '-b', branch, `origin/${base}`]
-    await git(args)
-    result.created = true
+  try {
+    result.branchExisted = branchExists(
+      await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']), branch)
+    result.worktreeExisted = worktreePaths(
+      await git(['-C', repoDir, 'worktree', 'list', '--porcelain'])).includes(worktree)
+
+    if (!result.worktreeExisted) {
+      const args = result.branchExisted
+        ? ['-C', repoDir, 'worktree', 'add', worktree, branch]
+        : ['-C', repoDir, 'worktree', 'add', worktree, '-b', branch, `origin/${base}`]
+      await git(args)
+      result.created = true
+    }
+  } finally {
+    await lock.release(lockPath)
   }
 
   result.commitCount = Number(String(
