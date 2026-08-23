@@ -180,3 +180,26 @@ test('the lock is released when `worktree add` throws', async () => {
   assert.equal(lock.state.holder, null)
   assert.equal(log.at(-1), `release ${LOCK}`)
 })
+
+test('an exhausted lock budget rejects without touching git', async () => {
+  const log = []
+  const lock = memLock({ holder: 'pid 4242' }, log)
+  const delays = []
+  await assert.rejects(
+    () => prepare(opts(), gitFake([], log), ghNone, async (ms) => { delays.push(ms) },
+      { lock, tries: 3, baseDelayMs: 250, now: () => 0 }),
+    /worktree: could not acquire .*leave-me-alone-worktree\.lock after 3 attempts \(held by pid 4242\)/)
+  assert.deepEqual(delays, [250, 500])
+  assert.deepEqual(log, [])
+})
+
+test('a stale lock is reclaimed instead of wedging the dispatch', async () => {
+  const log = []
+  const lock = memLock({ holder: 'pid 4242 (killed)', heldAtMs: 0 }, log)
+  const got = await prepare(opts(), gitFake([['rev-list', '0\n']], log), ghNone, async () => {},
+    { lock, now: () => 11 * 60 * 1000 })
+  assert.equal(got.lockReclaimed, true)
+  assert.equal(got.created, true)
+  assert.deepEqual(log.filter(line => line.startsWith('acquire') || line.startsWith('release')),
+    [`release ${LOCK}`, `acquire ${LOCK}`, `release ${LOCK}`])
+})
