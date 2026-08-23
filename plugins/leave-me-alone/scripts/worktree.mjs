@@ -13,7 +13,8 @@
 // It creates and reports. It never resets, never deletes, and never commits:
 // deciding RESUME vs RESET needs the plan hash, which does not exist yet.
 
-import { ghRunner, gitRunner, ghError, jsonFrom, readFlags, withRetries } from './gh.mjs'
+import { readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { ghRunner, gitRunner, ghError, jsonFrom, readFlags, sleep, withRetries } from './gh.mjs'
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
@@ -44,6 +45,54 @@ export function worktreePaths(porcelain) {
 
 export function branchExists(refList, branch) {
   return String(refList ?? '').split('\n').map(l => l.trim()).filter(Boolean).includes(branch)
+}
+
+export const LOCK_STALE_MS = 10 * 60 * 1000
+
+export function lockPathFor(repoDir) {
+  return `${repoDir}/.git/leave-me-alone-worktree.lock`
+}
+
+export const fileLock = {
+  // `wx` fails when the file already exists, so creation is atomic across processes.
+  async acquire(path, holder) { await writeFile(path, holder, { flag: 'wx' }) },
+  async read(path) { try { return String(await readFile(path, 'utf8')).trim() } catch { return null } },
+  async age(path, nowMs) { try { return nowMs - (await stat(path)).mtimeMs } catch { return null } },
+  async release(path) { await rm(path, { force: true }) },
+}
+
+export async function acquireLock(lockPath, {
+  lock = fileLock,
+  holder = `pid ${process.pid}`,
+  tries = 8,
+  baseDelayMs = 250,
+  staleMs = LOCK_STALE_MS,
+  wait = sleep,
+  now = () => Date.now(),
+} = {}) {
+  let reclaimed = false
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    try {
+      await lock.acquire(lockPath, holder)
+      return { reclaimed }
+    } catch {
+      const ageMs = await lock.age(lockPath, now())
+      if (ageMs !== null && ageMs > staleMs) {
+        await lock.release(lockPath)
+        reclaimed = true
+        continue
+      }
+      if (attempt < tries - 1) await wait(baseDelayMs * (2 ** attempt))
+    }
+  }
+  throw new Error(`worktree: could not acquire ${lockPath} after ${tries} attempts (held by ${await lock.read(lockPath) ?? 'unknown'})`)
+}
+
+export function isLockContention(err) {
+  const text = `${(err && err.stderr) || ''} ${(err && err.message) || ''}`
+  return /index\.lock/.test(text)
+    || /\.git\/worktrees\/[^\s]+\/locked/.test(text)
+    || /cannot lock ref/i.test(text)
 }
 
 export async function prepare(options, git = gitRunner, gh = ghRunner, wait) {

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, worktreePaths, branchExists, prepare } from './worktree.mjs'
+import { parseArgs, worktreePaths, branchExists, prepare, acquireLock, isLockContention } from './worktree.mjs'
 
 const ARGS = ['--repo=o/n', '--branch=m1/task-9', '--base=main', '--worktree=/wt', '--repo-dir=/repo']
 
@@ -84,4 +84,66 @@ test('it never resets, deletes or commits', async () => {
   for (const forbidden of ['reset', 'checkout -f', 'clean', 'commit', 'push', 'worktree remove', 'prune']) {
     assert.equal(log.some(c => c.includes(forbidden)), false, `must not run ${forbidden}`)
   }
+})
+
+// Stand-in for the lockfile: `acquire` refuses while someone holds it, exactly
+// like writeFile(..., { flag: 'wx' }).
+function memLock({ holder = null, heldAtMs = 0 } = {}, events = []) {
+  const state = { holder, heldAtMs }
+  return {
+    state,
+    events,
+    async acquire(path, who) {
+      if (state.holder !== null) throw new Error(`EEXIST: ${path}`)
+      state.holder = who
+      state.heldAtMs = 0
+      events.push(`acquire ${path}`)
+    },
+    async read() { return state.holder },
+    async age(_path, nowMs) { return state.holder === null ? null : nowMs - state.heldAtMs },
+    async release(path) { state.holder = null; events.push(`release ${path}`) },
+  }
+}
+
+test('a contended lock is retried with doubling backoff, then acquired', async () => {
+  const lock = memLock({ holder: 'pid 4242' })
+  const delays = []
+  const wait = async (ms) => { delays.push(ms); lock.state.holder = null }
+  const got = await acquireLock('/repo/.git/leave-me-alone-worktree.lock',
+    { lock, wait, now: () => 0, tries: 4, baseDelayMs: 250 })
+  assert.equal(got.reclaimed, false)
+  assert.deepEqual(delays, [250])
+  assert.equal(lock.state.holder, 'pid ' + process.pid)
+})
+
+test('an exhausted lock budget rejects with a labelled error naming the holder', async () => {
+  const lock = memLock({ holder: 'pid 4242' })
+  const delays = []
+  await assert.rejects(
+    () => acquireLock('/repo/.git/leave-me-alone-worktree.lock',
+      { lock, wait: async (ms) => { delays.push(ms) }, now: () => 0, tries: 3, baseDelayMs: 250 }),
+    /worktree: could not acquire \/repo\/\.git\/leave-me-alone-worktree\.lock after 3 attempts \(held by pid 4242\)/)
+  assert.deepEqual(delays, [250, 500])
+})
+
+test('a lock older than the stale threshold is reclaimed, not waited on', async () => {
+  const events = []
+  const lock = memLock({ holder: 'pid 4242 (killed)', heldAtMs: 0 }, events)
+  const delays = []
+  const got = await acquireLock('/repo/.git/leave-me-alone-worktree.lock',
+    { lock, wait: async (ms) => { delays.push(ms) }, now: () => 11 * 60 * 1000 })
+  assert.equal(got.reclaimed, true)
+  assert.deepEqual(delays, [])
+  assert.deepEqual(events, [
+    'release /repo/.git/leave-me-alone-worktree.lock',
+    'acquire /repo/.git/leave-me-alone-worktree.lock',
+  ])
+})
+
+test('only real git lock contention counts as contention', async () => {
+  assert.equal(isLockContention(new Error("fatal: Unable to create '/repo/.git/index.lock': File exists")), true)
+  assert.equal(isLockContention(new Error("fatal: cannot lock ref 'refs/heads/m1/task-9'")), true)
+  assert.equal(isLockContention({ stderr: 'fatal: .git/worktrees/wt/locked is present' }), true)
+  assert.equal(isLockContention(new Error("fatal: '/wt' already exists")), false)
+  assert.equal(isLockContention(undefined), false)
 })
