@@ -52,10 +52,12 @@ Push changes to this repo, then in Claude Code:
 
 ## Contents (leave-me-alone)
 
+- `bench-prompt` — benchmark a prompt change with a repeated synthetic-input harness
 - `brief` — /brief, fast recap of conversation/task state
 - `build` — rebuild worktree containers, dodging port conflicts
 - `dispatch` — /dispatch, launch a subagent pinned to a specific model
 - `explain` — /explain, plain-language explanation + ASCII architecture diagram
+- `qa` — /qa, stress-test one component/screen area: plan interactions from its actual code, drive them in Chrome, report findings + a recommendation
 - `setup-project` — preps a repo's GitHub Projects v2 board for the orchestrator/task workflows
 - `setup-milestone` — sets up a GitHub milestone with story issues + sub-issue subtasks
 - `setup-report` — renders an in-flight-work progress dashboard as an Artifact
