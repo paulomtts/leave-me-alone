@@ -159,6 +159,7 @@
   .nlabel { fill: var(--text-dim); font-size: 10.5px; }
   .pip { fill: none; stroke: var(--queued); stroke-width: 1.6; }
   .pip.run { stroke: var(--active); stroke-width: 2.2; }
+  .pip.done { fill: var(--done); stroke: var(--done); stroke-width: 1.6; }
   .edge { fill: none; stroke: var(--rule); stroke-width: 1.4; }
   .gridline { stroke: var(--rule); stroke-opacity: 0.5; }
 
@@ -262,11 +263,11 @@
   <div class="stats">
     <div class="stat done">
       <span class="n">0</span>
-      <span class="label">Merged</span>
+      <span class="label">PRs opened</span>
     </div>
     <div class="stat active">
       <span class="n">2</span>
-      <span class="label">Dispatching now</span>
+      <span class="label">In progress</span>
     </div>
     <div class="stat queued">
       <span class="n">18</span>
@@ -368,7 +369,7 @@
       </g>
 
       <g class="lvl">
-        <text x="15" y="300">Each pip is one subtask &mdash; hollow queued, ringed running. Edges are real GitHub blockedBy relations.</text>
+        <text x="15" y="300">Each pip is one subtask &mdash; hollow queued, ringed in progress, filled done (PR open, CI green). Edges are real GitHub blockedBy relations.</text>
       </g>
     </svg>
     </div>
