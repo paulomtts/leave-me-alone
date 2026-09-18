@@ -3,7 +3,7 @@ export const meta = {
   description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
   whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the prTargets column.',
   phases: [
-    { title: 'Configure', detail: 'discovers the repo\'s own verification commands', model: 'haiku' },
+    { title: 'Configure', detail: 'nothing to resolve; there is no board. Detect is already dispatched by this point', model: 'haiku' },
     { title: 'Detect', detail: 'stories and blockedBy edges from brd, existing per-subtask PRs and their bases', model: 'haiku' },
     { title: 'Dispatch', detail: 'per-level pipeline over stories; each story\'s subtasks sequential, task.js once per subtask, stacked', model: 'sonnet' },
   ],
