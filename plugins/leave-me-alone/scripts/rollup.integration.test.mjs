@@ -11,12 +11,14 @@ import { rollup } from './rollup.mjs'
 let hasBrd = true
 try { execFileSync('brd', ['--help'], { stdio: 'ignore' }) } catch { hasBrd = false }
 
-let root, repo, env
+let root, repo, repoBlocked, env
 before(() => {
   if (!hasBrd) return
   root = mkdtempSync(path.join(tmpdir(), 'brd-rollup-'))
   repo = path.join(root, 'repo')
   mkdirSync(repo)
+  repoBlocked = path.join(root, 'repo-blocked')
+  mkdirSync(repoBlocked)
   env = { ...process.env, XDG_DATA_HOME: path.join(root, 'data') }
 })
 after(() => { if (root) rmSync(root, { recursive: true, force: true }) })
@@ -42,4 +44,31 @@ test('a subtask going done rolls its story and milestone up on a real board',
     await rollup({ card: second, status: 'done', cwd: repo, run })
     assert.equal(cli('show', story).status, 'done')
     assert.equal(cli('show', milestone).status, 'done')
+  })
+
+test('a blocked sibling must not read as in-progress work at the milestone',
+  { skip: !hasBrd && 'brd not installed' }, async () => {
+    const brdCli = (...args) => execFileSync('brd', args, { cwd: repoBlocked, env, encoding: 'utf8' })
+    const cli = (...args) => JSON.parse(brdCli(...args)).data
+    const run = async args => brdCli(...args)
+
+    cli('init', '--name', 'rollup-blocked')
+    const milestone = cli('add', '--title', 'Milestone').id
+    const storyA = cli('add', '--title', 'Story A', '--parent', milestone).id
+    const storyB = cli('add', '--title', 'Story B', '--parent', milestone).id
+    cli('block', storyB, '--by', storyA)
+    const a1 = cli('add', '--title', 'a1', '--parent', storyA).id
+
+    // brd must genuinely report the blocked status at this moment — assert it,
+    // the way census.integration.test.mjs asserts its raw pre-collapse value.
+    assert.equal(cli('show', storyB).status, 'blocked')
+
+    // Nothing has started. Rolling a1 to todo walks up through story A (already
+    // todo, no write) to the milestone, whose children read [todo, blocked].
+    await rollup({ card: a1, status: 'todo', cwd: repoBlocked, run })
+
+    // The milestone must stay todo. If the blocked value reached the rule
+    // unflattened it would read as a mix and the milestone would go in_progress —
+    // a board claiming work is under way when nothing has started.
+    assert.equal(cli('show', milestone).status, 'todo')
   })
