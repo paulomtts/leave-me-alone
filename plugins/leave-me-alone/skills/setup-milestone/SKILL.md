@@ -1,11 +1,15 @@
 ---
 name: setup-milestone
-description: Use when turning an agreed spec into a GitHub milestone with story issues and granular subtask cards — "create a milestone", "set up a milestone for X", "break this spec/milestone/step into stories and subtasks", "add subtasks to the board" — on repos using a story/subtask Projects-v2 board that the orchestrator/task workflows drive.
+description: Use when turning an agreed spec into a milestone with story cards and granular subtask cards — "create a milestone", "set up a milestone for X", "break this spec/milestone/step into stories and subtasks", "add subtasks to the board" — on repos tracked with `brd` that the orchestrator/task workflows drive.
 ---
 
 # Turning a spec into a milestone of stories and subtasks
 
-Milestone = the container for the release/step. Story = parent issue inside it. Subtasks = real GitHub **sub-issues** (own cards on the board), never body checklists. Board views filter by label, so wrong labels = invisible cards.
+Milestone = a top-level `brd` card (no parent). Story = a card parented to the milestone
+(`--parent <milestone id>`). Subtask = a card parented to a story (`--parent <story id>`) — a real
+card the workflows can dispatch, verify, and open a PR for, never a body checklist. `brd`'s hierarchy
+IS the board: there is no label or view to get wrong, but a card created with the wrong `--parent` is
+just as invisible to the story it should belong to.
 
 The breakdown IS the product here. The workflows are only as good as the cards you hand them: a well-cut subtask gets a tight plan, a small diff, and a review that can actually gate it. An over-cut one gets a vague plan and a review that rubber-stamps a sprawling diff.
 
@@ -25,12 +29,12 @@ What the spec gives you that the cards need:
 Existing conventions beat anything you'd make up. Before creating anything:
 
 ```bash
-gh label list --limit 50                                  # reuse exact label names (e.g. `subtask`, NOT `task`)
-gh api repos/{owner}/{repo}/milestones --jq '.[].title'    # check whether the target milestone already exists
-gh api graphql -f query='{ user(login:"OWNER") { projectV2(number:N) { views(first:10) { nodes { name filter } } } } }'
+brd tree                    # the whole board: existing milestones, stories, subtasks, and any naming
+                             # convention already in use — reuse it rather than inventing a new one
+brd list --status todo      # spot-check titles/descriptions of open work for the same reason
 ```
 
-Also check project memory / repo docs for naming schemes. pyjinhx: titles `L<layer>.<story>.<n> <module>: <thing>`, story bodies = context + reading order (no checklists — the native sub-issue tree tracks progress), subtask bodies = "Subtask of #<parent>." + one line.
+Also check project memory / repo docs for naming schemes. pyjinhx: titles `L<layer>.<story>.<n> <module>: <thing>`, story bodies = context + reading order (no checklists — `brd tree` already renders progress), subtask bodies = "Subtask of <parent id>." + one line.
 
 ## Sizing: one subtask = one green PR
 
@@ -98,81 +102,83 @@ Spec slice: *"the workflow checker should be consumable by other tooling, and it
 A tempting single card — "add `--json` and `--quiet` and document them" — fails three ways: the title needs "and" twice, it spans code and docs, and it produces one fat diff for one Review pass to gate. Cut it:
 
 ```
-story #11  Machine-readable output for check-workflows        root: main
-  #13  11.1 feat: --json output          → main        one flag, tests nameable up front, green alone
-  #14  11.2 feat: --quiet flag           → task-13     second flag; stacks because both edit arg parsing
+story a1b2c3d4  Machine-readable output for check-workflows        root: main
+  e5f6a7b8  11.1 feat: --json output          → main        one flag, tests nameable up front, green alone
+  c9d0e1f2  11.2 feat: --quiet flag           → task-e5f6a7b8   second flag; stacks because both edit arg parsing
 
-story #12  Document the checker's flags                        root: task-14   (blockedBy #11)
-  #15  12.1 docs: document the flags     → task-14     no tests of its own — correct for docs
+story 3a4b5c6d  Document the checker's flags                        root: task-c9d0e1f2   (blockedBy a1b2c3d4)
+  7d8e9f0a  12.1 docs: document the flags     → task-c9d0e1f2   no tests of its own — correct for docs
 ```
 
 Why it cuts this way:
 
-- **#13 before #14** — both touch the same argument parsing. Stacking means #14 builds on #13's parser instead of racing it. Two parallel stories here would conflict at merge time.
-- **#13 and #14 are separate**, not one "add both flags" card, because each is independently green and independently reviewable. The split costs one extra PR and buys two tight diffs.
-- **#15 is its own story, not a third subtask of #11**, because it is a different kind of work with a different footprint (`README`, not `scripts/`). As a story blocked by #11 it roots on `task-14`, so its worktree contains both finished flags — it can document what was actually built.
-- **#15 has no tests, and that is right.** Judged by the behavior-subtask rule it would look "too small" and get folded in; judged as docs, it is correctly sized.
+- **e5f6a7b8 before c9d0e1f2** — both touch the same argument parsing. Stacking means c9d0e1f2 builds on e5f6a7b8's parser instead of racing it. Two parallel stories here would conflict at merge time.
+- **e5f6a7b8 and c9d0e1f2 are separate**, not one "add both flags" card, because each is independently green and independently reviewable. The split costs one extra PR and buys two tight diffs.
+- **7d8e9f0a is its own story, not a third subtask of a1b2c3d4**, because it is a different kind of work with a different footprint (`README`, not `scripts/`). As a story blocked by a1b2c3d4 it roots on `task-c9d0e1f2`, so its worktree contains both finished flags — it can document what was actually built.
+- **7d8e9f0a has no tests, and that is right.** Judged by the behavior-subtask rule it would look "too small" and get folded in; judged as docs, it is correctly sized.
 
-What would make this breakdown wrong: putting #15 in level 0 (it would root at `main` and document flags its worktree cannot see), or giving #12 a second blocker (the run refuses to root a stack on two parents).
+What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root at `main` and document flags its worktree cannot see), or giving 3a4b5c6d a second blocker (the run refuses to root a stack on two parents).
 
 ## Sequence
 
 1. **Milestone** — if it doesn't already exist (checked in Rule zero), create it:
    ```bash
-   gh api repos/{owner}/{repo}/milestones -f title="<title>" -f description="<one-line goal>" ${DUE_ON:+-f due_on=$DUE_ON}
+   brd add --title "<title>" --description "<one-line goal>"
    ```
-   If it already exists, reuse it as-is — don't rename or redate it without being asked.
-2. **Story issue** — `gh issue create` with `--milestone <title>`, labels `story` + track label (e.g. `v2`) + kind.
-3. **Subtask issues** — one per granular unit, sized per the section above, label `subtask` + track. Body carries the spec's constraints and its out-of-scope line, so no downstream stage has to guess.
-4. **Attach as sub-issues** — REST, needs the **database id**, not the number and not the GraphQL node id:
+   If it already exists, reuse it as-is — don't rename or redescribe it without being asked.
+2. **Story card** — one per slice, parented to the milestone:
    ```bash
-   id=$(gh api repos/{owner}/{repo}/issues/<CHILD_NUM> --jq .id)
-   gh api -X POST repos/{owner}/{repo}/issues/<PARENT_NUM>/sub_issues -F sub_issue_id=$id
+   brd add --title "<title>" --parent <milestone id> --description "<context for the whole story>"
    ```
-   (Do not use the experimental `addSubIssue` GraphQL mutation.)
-5. **Story dependencies** — set `blockedBy` edges between stories. **Not optional**, and *not* the same thing as step 4: sub-issues are parent→child, these are story→story.
+3. **Subtask cards** — one per granular unit, sized per the section above, parented to their story:
+   ```bash
+   brd add --title "<title>" --parent <story id> --description "<spec's constraints + out-of-scope line>"
+   ```
+   `--parent` attaches the card as it's created — there is no separate "attach to board" step.
+
+   **Short ids must stay unique within a milestone.** Each card's branch and PR both key on the first
+   8 hex characters of its UUID. `brd` mints `uuid4`s, so a collision inside one milestone is
+   astronomically unlikely — but nothing checks it at creation time, and a collision would silently
+   give two subtasks the same branch. If a milestone runs unusually large, or two ids look alike at a
+   glance, `brd tree <milestone id>` lists every id in the milestone — diff the first 8 characters
+   before trusting the stack.
+4. **Chain each story's subtasks in sequence** — see "Order is stack order" above:
+   ```bash
+   brd block <subtask 2 id> --by <subtask 1 id>
+   brd block <subtask 3 id> --by <subtask 2 id>
+   ```
+5. **Story dependencies** — set `blockedBy` edges between stories with `brd block`. **Not optional**, and *not* the same thing as parenting: parenting is milestone→story→subtask, this is story→story.
 
    **At most ONE blocker per story.** The orchestrator roots a story's stack on its blocker's tip branch, and it can only root on one parent — a story with two blockers stops the run with an error rather than guessing. If the spec really needs two, either merge the blockers first, or chain them (A ← B ← C) so each has a single parent.
    ```bash
-   # needs the BLOCKER's database id, not its number
-   bid=$(gh api repos/{owner}/{repo}/issues/<BLOCKER_NUM> --jq .id)
-   gh api -X POST repos/{owner}/{repo}/issues/<BLOCKED_NUM>/dependencies/blocked_by -F issue_id=$bid
+   brd block <BLOCKED_STORY_ID> --by <BLOCKER_STORY_ID>
    ```
-   Derive the edges from the spec's own slice order, then **write down the DAG you intended** — step 8 checks the board against it.
-6. **Board** — `gh project item-add N --owner OWNER --url <issue-url>` for every card, parents included.
-7. **Status** — set the field (usually `Backlog`) via `updateProjectV2ItemFieldValue`; fetch project/field/option ids first. `gh project item-edit --single-select-option-id` also works.
-8. **Verify** — milestone shows the right issue count, item count on the board matches, spot-check one parent shows its sub-issue tree. Then **verify the DAG, and fail loudly**:
+   Derive the edges from the spec's own slice order, then **write down the DAG you intended** — the next step checks the board against it.
+6. **Verify** — read the tree back and compare it to what you intended:
    ```bash
-   for n in <EVERY_STORY_NUMBER>; do
-     deps=$(gh api graphql -f query="{repository(owner:\"OWNER\",name:\"REPO\"){issue(number:$n){blockedBy(first:20){nodes{number}}}}}" \
-            --jq '[.data.repository.issue.blockedBy.nodes[].number]|join(",")')
-     echo "#$n blockedBy [$deps]"
-   done
+   brd tree <milestone id>
    ```
-   Compare against the DAG you wrote in step 5. **If more than one story has no blockers, stop and say so** — a real milestone has one or two genuine roots, so a flat list of empty arrays means the edges were never written, not that the work is parallel. **If any story lists two or more blockers, fix it now** — the orchestrator will refuse it.
-9. **Dry run** — the real pre-flight, writes nothing:
+   Check: the milestone shows every story and subtask you meant to create, each story's subtasks are chained in the right order, and each story's `blocked_by` matches the DAG you wrote down in step 5. **If more than one story has no blockers, stop and say so** — a real milestone has one or two genuine roots, so a flat list of unblocked stories usually means an edge was never written, not that the work is parallel. **If any story shows two or more blockers, fix it now** — the orchestrator will refuse it.
+7. **Dry run** — the real pre-flight, writes nothing:
    ```
-   Workflow({ name: "orchestrator" }, args: { repo, repoDir, milestone: N, baseBranch, nonce: "<now>", dryRun: true, project: { number: P } })
+   Workflow({ name: "orchestrator" }, args: { repo, repoDir, milestone: "<brd card id or title>", baseBranch, nonce: "<now>", dryRun: true })
    ```
-   Check the `prTargets` column: each subtask should target the previous subtask's branch, and each story's first subtask should target its blocker's tip (or the base, if unblocked). If that column is wrong, the breakdown is wrong — fix the board, not the workflow.
+   No `project` argument — `brd` resolves everything by walking the repo directory, per `setup-project`. Check the `prTargets` column: each subtask should target the previous subtask's branch, and each story's first subtask should target its blocker's tip (or the base, if unblocked). If that column is wrong, the breakdown is wrong — fix the board, not the workflow.
 
 ## Gotchas
 
 | Trap | Reality |
 |---|---|
 | Writing scope while breaking down | Breakdown reads a spec; it does not author one. Run `superpowers:brainstorming` first. |
-| Body checklists "for visibility" | Double-tracking; sub-issue tree already renders progress. Omit. |
-| Inventing `task`/`story` label variants | Views filter on exact labels (`label:subtask`). Wrong name → card in no view. |
-| "Views can't be configured via API" | False: `updateProjectV2View`/`createProjectV2View` mutations work (undocumented but live). |
-| Creating a milestone that already exists under a slightly different title | Check Rule zero's title list first — near-duplicate milestones split tracking. Reuse the existing one. |
-| Editing Status *options* while items hold values | Option replacement WIPES every item's status. Re-set after any column change. |
-| Assuming sub-issue links imply an execution order | They don't. Sub-issues are parent→child; the orchestrator orders *stories* by `blockedBy` only. Trees can render perfectly while the DAG is empty. |
+| Body checklists "for visibility" | Double-tracking; `brd tree` already renders progress from the real card hierarchy. Omit. |
+| Creating a milestone that already exists under a slightly different title | Check Rule zero's `brd tree` first — near-duplicate milestones split tracking. Reuse the existing one. |
+| Assuming `--parent` implies execution order | It doesn't. Parenting is milestone→story→subtask containment; the orchestrator orders *stories*, and a story's *subtasks*, by `blocked_by` only. A tree can render perfectly while every `blocked_by` list is empty. |
 | Treating empty `blockedBy` as harmless | The orchestrator cannot tell "no deps recorded" from "genuinely independent" — both are `[]`. It places every story at level 0 and dispatches them all at once, against a base none of them has built on. |
 | Giving a story two blockers | Stops the run: a stack can only root on one parent branch. Chain them instead. |
 | A subtask that leaves the suite red until the next one lands | Every subtask's PR is verified alone. That split is invalid — move the boundary or merge the two halves. |
 | Folding in a docs/config/refactor card because "it has no tests" | That rule is for behavior-changing subtasks only. Judge these on their own terms — see "Subtasks that ship no behavior". |
 | A docs card written from the spec | It must read the actual implementation, which means it has to sit *after* that work in the stack. Name the files to read in its body. |
-| Expecting the run to merge anything | It does not. Each story becomes a stack of open PRs; a human merges bottom-up. Subtask issues stay open and cards sit at "In review" until then. |
+| Expecting the run to merge anything | It does not. Each story becomes a stack of open PRs; a human merges bottom-up. Subtask cards stay open, and a card's status update to "in review" (and its parent story's own status) is best-effort and reflects that a PR opened, not that anyone merged it. |
 | Subtasks not chained with `--blocked-by` | Order falls back to creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always chain a story's subtasks. |
 | Reordering subtasks after their PRs are open | The bases are derived from order, so reordering re-points them and the existing PRs read as `wrong-base` — i.e. not done. Re-target by hand or don't reorder. |
 | Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for PRs at a new address. It detects a merged PR under the old name and HALTS rather than re-implementing it, but only a re-run with the original prefix actually fixes it. |
