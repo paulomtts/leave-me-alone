@@ -37,10 +37,15 @@ fi
 # walking up from the cwd), and every pattern in this file is ^-anchored — a
 # bare `brd` rule would never match the commands that actually run.
 #
-# The prefix is deliberately narrow: no `;`, `&`, `|`, `$`, backtick or parens
-# inside the path or the trailing arguments, so it cannot become a way to
-# smuggle a second command — including via command substitution — through.
-if grep -qE '^(cd [^&|;$`()]+ && )?brd (init|projects|add|show|list|update|block|unblock|tree|next|import)( |$)[^&|;$`()]*$' <<<"$cmd"; then
+# The prefix is deliberately narrow: no `;`, `&`, `|`, `$`, backtick, parens,
+# `<` or `>` inside the path or the trailing arguments, so it cannot become a
+# way to smuggle a second command — via chaining, command substitution, or
+# output/input redirection — through. This will also defer a legitimate brd
+# argument that happens to contain one of these characters (e.g. a card title
+# with a literal `>` in it); that's the correct trade-off — a deferred command
+# costs the user a prompt, an over-matched one grants a permission they never
+# approved.
+if grep -qE '^(cd [^&|;$`()<>]+ && )?brd (init|projects|add|show|list|update|block|unblock|tree|next|import)( |$)[^&|;$`()<>]*$' <<<"$cmd"; then
   allow "leave-me-alone: brd (local board, no network)"
 fi
 

@@ -50,7 +50,9 @@ test('an empty or absent command is handled without error', () => {
 test('brd is allowed — local board, no network', () => {
   assert.equal(decide('brd tree'), 'allow')
   assert.equal(decide('brd show a32af745-15ef-45cd-b52c-64c19ae82c17'), 'allow')
-  assert.equal(decide('brd update <id> --status done'), 'allow')
+  // Real invocations substitute an actual id here, never literal angle
+  // brackets — those are excluded below as a redirection metacharacter.
+  assert.equal(decide('brd update a32af745-15ef-45cd-b52c-64c19ae82c17 --status done'), 'allow')
   assert.equal(decide('brd init --name thing'), 'allow')
 })
 
@@ -70,6 +72,21 @@ test('the cd prefix does not become a way to smuggle anything else through', () 
 test('command substitution after brd does not become a smuggling vector either', () => {
   assert.equal(decide('brd tree $(rm -rf /tmp/evil)'), null)
   assert.equal(decide('brd tree `rm -rf /tmp/evil`'), null)
+})
+
+test('the brd rule does not grant redirection or command substitution', () => {
+  assert.equal(decide('brd tree > /etc/passwd'), null)
+  assert.equal(decide('brd tree >> ~/.bashrc'), null)
+  assert.equal(decide('brd import < /dev/stdin'), null)
+  assert.equal(decide('brd tree $(rm -rf /tmp/x)'), null)
+  assert.equal(decide('brd tree `rm -rf /tmp/x`'), null)
+})
+
+test('a legitimate brd command is still allowed', () => {
+  // The rule must stay useful — these are what the workflows actually run.
+  assert.equal(decide('brd tree'), 'allow')
+  assert.equal(decide('cd /abs/repo && brd show a32af745-15ef-45cd-b52c-64c19ae82c17'), 'allow')
+  assert.equal(decide('brd update abc --status done'), 'allow')
 })
 
 test('the GitHub board writes are no longer auto-allowed', () => {
