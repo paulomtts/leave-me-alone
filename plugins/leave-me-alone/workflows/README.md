@@ -42,8 +42,7 @@ Each is also usable standalone for inspecting or debugging a run.
 
 | script | what it answers |
 |---|---|
-| `detect.mjs` | the whole milestone census: stories, `blockedBy`, sub-issues, PRs. Also does the ONE `git fetch` + `worktree prune` for the run |
-| `resolve.mjs` | a project number → the node ids the mutation API needs |
+| `detect.mjs` | the whole milestone census from brd (one `brd tree`), plus the PR listing from gh. Also does the ONE git fetch + worktree prune for the run |
 | `worktree.mjs` | create a subtask's worktree idempotently; report what was already there. Never resets, deletes or commits |
 | `plan-check.mjs` | is there a saved, validated plan for this issue? |
 | `ship.mjs` | verify → push → open the PR. Nothing is pushed after a red command |
@@ -57,7 +56,6 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
   nonce: "<current timestamp>",
   taskScript:    "<repo>/workflows/task.js",       // required, absolute
   detectScript:  "<repo>/scripts/detect.mjs",      // required, absolute
-  projectScript: "<repo>/scripts/resolve.mjs",     // required when project is a number
   project: { number: 13 },                          // or the resolved {id, fieldId, optionIds}
   verification: { fullSuite: ["npm test"], typecheck: "", lint: [] },
   dryRun: true,
@@ -69,10 +67,9 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 | `repo`, `repoDir`, `milestone`, `baseBranch` | yes | no defaults; `baseBranch` is never guessed |
 | `nonce` | yes | busts the Detect cache so a re-run re-reads GitHub |
 | `taskScript`, `detectScript` | yes | absolute paths; this repo can be checked out anywhere |
-| `projectScript` | when `project.number` | omit only if you pass resolved ids |
 | `project` | yes | `{number}` or `{id, fieldId, optionIds}`. No boardless mode |
 | `verification` | no | supply it and Detect becomes a pure trigger |
-| `branchPrefix` | no | defaults to `m<milestone>/task-`. **Constant for a milestone's life** |
+| `branchPrefix` | no | defaults to `m<milestone>`. **Constant for a milestone's life** |
 | `maxConcurrentStories` | no | default 4 |
 | `triggerAgentType` | no | default `leave-me-alone:command-runner`; `""` for the default subagent |
 | `dryRun` | no | returns the plan and writes nothing |
@@ -81,7 +78,7 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 
 | phase | agents | what |
 |---|---|---|
-| Configure | 0–1 | `resolve.mjs` → board ids. 0 if you pass them |
+| Configure | 0 | board ids read from `project`. Only the resolved `{id, fieldId, optionIds}` form is accepted |
 | Detect | 1 | `detect.mjs` → the census, plus the run's single fetch/prune |
 | — | 0 | cycles, levels, branch names, PR bases, PR matching, verification filtering |
 | Dispatch | 0 | `workflow(task.js)` per subtask — the agents are all inside `task.js` |
@@ -163,8 +160,10 @@ wrong base counts as **not** done, deliberately.
 
 ## Notes
 
-- **Branch names are derived, never discovered:** `branchPrefix + issue number`. A merged PR found
-  under a different name halts the run rather than being re-implemented.
+- **Branch names are derived, never discovered:** `<branchPrefix>/task-<slug>-<shortid>`, where
+  `shortid` is the first 8 hex characters of the card's UUID and `slug` is a readable form of its
+  title. Matching keys on the short id alone, so an edited card title never orphans its PR. A merged
+  PR found under a different name halts the run rather than being re-implemented.
 - **Subtask order is the PR targets.** Reordering after PRs exist re-points the bases and those PRs
   read as wrong-base. Give every subtask an ordinal prefix.
 - **Only one blocker per story.** A stack roots on one parent; two stops the run.

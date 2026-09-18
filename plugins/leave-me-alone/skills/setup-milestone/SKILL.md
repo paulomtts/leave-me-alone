@@ -62,13 +62,14 @@ The common failure is a docs card written from the spec instead of the code, des
 Every branch name and every PR target is **derived**, not discovered:
 
 ```
-milestone 12, subtask #14  ->  branch m12/task-14   (branchPrefix + issue number)
-                               base   m12/task-13   (the branch of the subtask before it)
+milestone 12, card "Add retry" (a1b2c3d4…)  ->  branch m12/task-add-retry-a1b2c3d4
+                                                 base   m12/task-<slug>-<shortid>   (the branch of the subtask before it)
 ```
 
 The `m12/` prefix keeps one milestone's branches and worktrees together, so several can be in flight
-in one checkout without becoming an unreadable pile. It is not what makes them unique — the issue
-number already does that.
+in one checkout without becoming an unreadable pile. It is not what makes them unique — the short id
+(the first 8 hex characters of the card's UUID) already does that, and matching keys on that short id
+alone, so editing a card's title after its PR is open never orphans the PR.
 
 So the ordering you give subtasks *is* the stack geometry. The workflow re-derives it from scratch on every run and looks for each PR at exactly that address — nothing is remembered between runs.
 

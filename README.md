@@ -8,21 +8,15 @@ Personal Claude Code plugin marketplace.
 |---|---|---|
 | **bun** | every helper script runs under it — the workflows literally invoke `bun <script>.mjs` | the run stops at its first trigger step |
 | **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
-| **gh**, authenticated | issues, sub-issues, PRs, and Projects v2 board mutations | resolution fails at launch |
+| **gh**, authenticated | PRs | resolution fails at launch |
 | **git** | worktrees, branches, stacked bases | — |
+| **brd** | the local kanban board: stories, subtasks, `blockedBy` | resolution fails at launch |
 
 Claude Code has no plugin dependency mechanism — no `dependencies` key exists in any `plugin.json`
 or `marketplace.json`, including Anthropic's own — so the plugin cannot pull superpowers in for you.
 Instead its SessionStart hook **warns** when `bun` or the `writing-plans` skill is missing, with the
 command to fix it. That is a pointer, not a guarantee: the exact check is Plan reporting whether it
 actually invoked the skill, which stops the run when it did not.
-
-`gh auth status` must show the **`project`** scope — there is no boardless mode, so a run without
-board access stops rather than silently skipping card moves:
-
-```
-gh auth refresh -s project,read:project
-```
 
 **Node is not needed to run a milestone**, only to run this repo's own test suite — and it must be
 `node --test`, not `bun test`: the tests are written against `node:test`, which bun's runner cannot

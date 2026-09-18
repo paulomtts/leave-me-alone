@@ -626,12 +626,6 @@ const triggerAgentType = typeof opts.triggerAgentType === 'string'
   : 'leave-me-alone:command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
-// Only needed when the board is given as a NUMBER — resolved ids skip the
-// lookup entirely, and unlike a census those are stable config, not a snapshot.
-const projectScript = typeof opts.projectScript === 'string' && opts.projectScript.startsWith('/')
-  ? opts.projectScript
-  : null
-
 const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.startsWith('/')
   ? opts.taskScript
   : (() => { throw new Error(
@@ -788,49 +782,15 @@ if (hasResolvedBoardIds(projectArg)) {
   // skips this dispatch entirely.
   board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
   log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
-} else if (Number.isInteger(Number(projectArg.number)) && !projectScript) {
-  throw new Error(
-    'orchestrator: `project` was given as a number but args.projectScript is missing, so there is '
-    + 'no deterministic way to resolve its ids (there is no agent fallback). Pass projectScript as '
-    + 'an absolute path to scripts/resolve.mjs, or pass the resolved {id, fieldId, optionIds} block.')
 } else if (Number.isInteger(Number(projectArg.number))) {
-  // Softly, because "the board is best-effort" was only half true: a RETURNED
-  // failure was logged and the run survived, but a THROWN one (callAgent gives
-  // up after one retry) propagated and killed the milestone. Card bookkeeping
-  // must never be able to do that.
-  const resolved = await callAgentSoftly(`Run this command and return its stdout EXACTLY as printed:
-   bun ${projectScript} --owner ${owner} --number ${projectArg.number} --compact
-
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. It exits non-zero when it finds no project — that is a normal answer, not a reason to retry or improvise.
-
-[cache-buster, ignore: ${nonce}]`,
-    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
-      type: 'object', required: ['stdout'],
-      properties: {
-        stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
-        error: { type: 'string', description: 'the command\'s stderr, when it failed' },
-      },
-    } })
-
-  // Board bookkeeping is not worth failing a milestone over, but a silent
-  // downgrade is worse than a loud one.
-  let lookup = null
-  try {
-    lookup = JSON.parse(printableOnly(String((resolved && resolved.stdout) ?? '')))
-  } catch (err) {
-    throw new Error(`orchestrator: ${projectScript} returned output that is not JSON (${err.message}). `
-      + `First 200 characters: ${String((resolved && resolved.stdout) ?? '').slice(0, 200)}`)
-  }
-  if (!lookup || !lookup.found || !lookup.id) {
-    throw new Error(`orchestrator: could not resolve project ${projectArg.number} — `
-      + `${(lookup && lookup.missing) || (resolved && resolved.error) || 'the resolver returned no project'} `
-      + '(see the setup-project skill)')
-  }
-  const ids = resolveBoardIds(lookup.fields, statusField, optionNames)
-  if (!ids.ok) throw new Error(`orchestrator: ${ids.missing} (see the setup-project skill)`)
-  board = makeBoard(lookup.id, ids.fieldId, ids.optionIds)
-  log(`board resolved: project ${projectArg.number} "${lookup.title || ''}" → ${lookup.id}`)
-  log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
+  // There is no resolver any more: brd uses one id type (a UUID string)
+  // everywhere, so a GitHub project *number* has nothing to be translated
+  // into. Without this guard, a caller who still passes {number} would fall
+  // through with unresolved ids and fail later, deeper in the run.
+  throw new Error(
+    'orchestrator: `project` was given as a number, but there is no resolver for GitHub project '
+    + 'numbers any more. Pass the board ids explicitly as a resolved '
+    + '{id, fieldId, optionIds} block.')
 } else {
   throw new Error(
     'orchestrator: `project` was passed without a usable `number` and without a complete '
