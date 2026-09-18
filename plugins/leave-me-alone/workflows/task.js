@@ -301,6 +301,8 @@ const specsDir = typeof opts.specsDir === 'string' && opts.specsDir.startsWith('
   ? opts.specsDir.replace(/\/+$/, '')
   : `${WORKTREE}/docs/superpowers/specs`
 const STEM = stemOf(BRANCH)
+const PLAN_PATH = `${plansDir}/${STEM}.md`
+const SPEC_PATH = `${specsDir}/${STEM}-design.md`
 // plan-check.mjs matches a saved plan by comparing STEM's final dash-delimited
 // segment to this card's short id (see naming.mjs's taskBranch/taskStem,
 // which is what makes them agree in practice). They agree only because the
@@ -312,8 +314,6 @@ const STEM = stemOf(BRANCH)
 if (STEM.split('-').pop() !== id) {
   log(`branch ${BRANCH} does not end in this card's short id (${id}) — plan-check will never find the plan this run saves at ${PLAN_PATH}, so the validated-plan checkpoint will not fire on a resume`)
 }
-const PLAN_PATH = `${plansDir}/${STEM}.md`
-const SPEC_PATH = `${specsDir}/${STEM}-design.md`
 
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 const DRY = opts.dryRun === true
