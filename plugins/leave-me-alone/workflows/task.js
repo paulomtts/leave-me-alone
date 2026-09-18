@@ -192,6 +192,18 @@ function reviewGate(review, branch, baseBranch) {
   }
   return null
 }
+
+// A status write (rollup.mjs, via a trigger agent) is best-effort: its failure
+// must not sink a subtask whose PR is already open and green. But it must not
+// vanish silently either, or a run reports success while the board never
+// moved. Fold the collected errors (zero, one, or two — Explore's in_progress
+// write and Ship's done write) into what the caller returns.
+function statusWriteOutcome(errors) {
+  const list = errors ?? []
+  return list.length === 0
+    ? { statusWritten: true }
+    : { statusWritten: false, statusWriteError: list.join(' | ') }
+}
 // PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
@@ -371,6 +383,14 @@ function printableOnly(text) {
   return String(text ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
 }
 
+// A status-write failure (brd missing from the trigger agent's PATH, a denied
+// permission prompt, …) must not sink a subtask whose PR is already open and
+// green — but it must not silently no-op either, or a run reports `done: true`
+// with a board still entirely at `todo`. So every rollup dispatch is
+// best-effort for CONTROL FLOW but feeds this list, which the final return
+// surfaces as `statusWritten`/`statusWriteError` for the caller to report.
+const statusWriteErrors = []
+
 // ── 1. explore ────────────────────────────────────────────────────────────────
 phase('Explore')
 const providedVerification = opts.verification && typeof opts.verification === 'object' ? opts.verification : null
@@ -437,9 +457,13 @@ It prints one line of JSON that the pipeline parses itself, so reformatting, pre
       },
     } })
   if (!rollupOut) {
-    log('rollup (in_progress) agent died — card status was not rolled up')
+    const msg = 'rollup (in_progress) agent died — card status was not rolled up'
+    log(msg)
+    statusWriteErrors.push(msg)
   } else if (rollupOut.error) {
-    log(`rollup (in_progress) failed: ${rollupOut.error}`)
+    const msg = `rollup (in_progress) failed: ${rollupOut.error}`
+    log(msg)
+    statusWriteErrors.push(msg)
   }
 }
 
@@ -896,7 +920,7 @@ try {
 // text an agent has to type is a quoting accident waiting to happen, and it
 // was the last place a model could alter what ships.
 const shipOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/ship.mjs --repo ${repo} --card ${id} --title ${shellQuote(cardTitle)} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
+   bun ${scriptsDir}/ship.mjs --repo ${repo} --card ${card} --title ${shellQuote(cardTitle)} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
 
 This command runs the FULL verification suite before it pushes anything, which can take several minutes on a large repo — the Bash tool's own default timeout (2 minutes) is too short for it. You MUST call the Bash tool for this command with an explicit timeout of 600000 (its 10-minute maximum). Do not omit that parameter and do not rely on the default.
 
@@ -954,10 +978,15 @@ It prints one line of JSON that the pipeline parses itself, so reformatting, pre
     },
   } })
 if (!rollupOut) {
-  log('rollup (done) agent died — card status was not rolled up')
+  const msg = 'rollup (done) agent died — card status was not rolled up'
+  log(msg)
+  statusWriteErrors.push(msg)
 } else if (rollupOut.error) {
-  log(`rollup (done) failed: ${rollupOut.error}`)
+  const msg = `rollup (done) failed: ${rollupOut.error}`
+  log(msg)
+  statusWriteErrors.push(msg)
 }
 
 return { card, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan,
-  tests: (ship.verified || []).map(v => `${v.ok ? 'PASS' : 'FAIL'} ${v.command}`).join('\n') }
+  tests: (ship.verified || []).map(v => `${v.ok ? 'PASS' : 'FAIL'} ${v.command}`).join('\n'),
+  ...statusWriteOutcome(statusWriteErrors) }

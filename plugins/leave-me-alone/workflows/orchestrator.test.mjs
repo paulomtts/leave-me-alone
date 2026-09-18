@@ -562,6 +562,25 @@ test('the board is no longer a concept here', () => {
   assert.doesNotMatch(source, /resolveBoardIds|hasResolvedBoardIds|optionIds|fieldId/)
 })
 
+test('branchPrefix is not forwarded to task.js — task.js never reads it', () => {
+  const source = readFileSync(ORCHESTRATOR_PATH, 'utf8')
+  const dispatch = source.slice(source.indexOf('dispatched = await workflow('), source.indexOf('dispatched = await workflow(') + 400)
+  assert.doesNotMatch(dispatch, /branchPrefix/)
+})
+
+test('a status-write failure from task.js is carried through the subtask result, not swallowed', () => {
+  const source = readFileSync(ORCHESTRATOR_PATH, 'utf8')
+  assert.match(source, /statusWritten: dispatched\.statusWritten !== false/)
+  assert.match(source, /statusWriteError/)
+})
+
+test('the final run-summary note describes the brd model, not the retired issues/Projects one', () => {
+  const source = readFileSync(ORCHESTRATOR_PATH, 'utf8')
+  assert.doesNotMatch(source, /still OPEN and their cards sit at "In review"/,
+    'the note still describes retired GitHub issues and an "In review" column that no longer exists')
+  assert.match(source, /cards already sit at "done"/)
+})
+
 // ── resolveMilestone / resolveBranchPrefix ───────────────────────────────────
 // A milestone may be a positive integer, a brd card id, or a title
 // substring (census.mjs's findMilestone() accepts all three and fails loudly

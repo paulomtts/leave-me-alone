@@ -17,8 +17,8 @@ import { loadPure } from './load-pure.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate, shortId, stemOf, shellQuote } = await loadPure(join(HERE, 'task.js'), [
-  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate', 'shortId', 'stemOf', 'shellQuote',
+const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate, shortId, stemOf, shellQuote, statusWriteOutcome } = await loadPure(join(HERE, 'task.js'), [
+  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate', 'shortId', 'stemOf', 'shellQuote', 'statusWriteOutcome',
 ])
 
 const BRANCH = 'task-42'
@@ -219,6 +219,29 @@ test('drift is not claimed when either hash is unusable', () => {
   assert.equal(planHashMismatch(null, null), null)
 })
 
+// ── statusWriteOutcome ───────────────────────────────────────────────────────
+// A brd status write is best-effort (missing PATH entry, a denied permission
+// prompt, …) so it must never sink a subtask whose PR is already open and
+// green — but that failure must not vanish into a run that reads as fully
+// clean either. This is the fold that turns collected rollup errors into what
+// the caller reports.
+
+test('no status-write errors means the write is reported clean', () => {
+  assert.deepEqual(statusWriteOutcome([]), { statusWritten: true })
+  assert.deepEqual(statusWriteOutcome(undefined), { statusWritten: true })
+})
+
+test('a single status-write failure is surfaced, not swallowed', () => {
+  assert.deepEqual(statusWriteOutcome(['rollup (done) failed: brd: command not found']),
+    { statusWritten: false, statusWriteError: 'rollup (done) failed: brd: command not found' })
+})
+
+test('both dispatch sites failing are both reported, not just the last one', () => {
+  const out = statusWriteOutcome(['rollup (in_progress) failed: denied', 'rollup (done) failed: denied'])
+  assert.equal(out.statusWritten, false)
+  assert.match(out.statusWriteError, /in_progress.*denied.*done.*denied/s)
+})
+
 // ── card identity: shortId / stemOf ──────────────────────────────────────────
 // task.js inlines shortId rather than importing scripts/naming.mjs (a Workflow
 // script has no module resolution), so this pins the inlined copy to the real
@@ -286,4 +309,20 @@ test('the status rollup goes through rollup.mjs, not a board mutation prompt', (
   const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
   assert.match(source, /rollup\.mjs --card \$\{card\} --status in_progress --repo-dir \$\{repoDir\} --compact/)
   assert.match(source, /rollup\.mjs --card \$\{card\} --status done --repo-dir \$\{repoDir\} --compact/)
+})
+
+test('both rollup dispatch sites feed statusWriteErrors — a failure does not vanish into log() alone', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  assert.match(source, /statusWriteErrors\.push/, 'no dispatch site records a status-write failure')
+  const pushCount = (source.match(/statusWriteErrors\.push/g) || []).length
+  assert.equal(pushCount, 4, // 2 per site (agent-died branch + rollupOut.error branch) x 2 sites
+    `expected both the Explore and Ship rollup tails to feed statusWriteErrors, got ${pushCount} push site(s)`)
+  assert.match(source, /statusWriteOutcome\(statusWriteErrors\)/,
+    'the final return does not fold the collected status-write errors into what the caller sees')
+})
+
+test('ship.mjs is given the full card id, not the short id — a short id cannot be pasted into brd show', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  assert.match(source, /ship\.mjs --repo \$\{repo\} --card \$\{card\}/)
+  assert.doesNotMatch(source, /ship\.mjs --repo \$\{repo\} --card \$\{id\}/)
 })

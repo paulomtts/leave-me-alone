@@ -865,8 +865,8 @@ function halt(payload) {
 async function runSubtask(levelIndex, story, subtask, stackBase) {
   if (halted) return { subtask: subtask.id, skipped: 'halted' }
 
-  // Detect matches PRs by short-id suffix, so a resumed PR's real head ref can
-  // carry an older prefix — prefer it over the freshly-derived name.
+  // Branch is always the freshly-derived name, never a resumed PR's real head
+  // ref — see subtaskBranch's comment for why that was deliberately dropped.
   const branch = subtaskBranch(subtask, branchPrefix)
 
   // A PR already exists against the right base, so this subtask is done for this
@@ -894,7 +894,7 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     // derived (`branch`), rather than a GitHub issue number and its own
     // board-move config — it moves the card itself via rollup.mjs.
     dispatched = await workflow({ scriptPath: taskScript }, {
-      repo, repoDir, card: subtask.id, branch, baseBranch: stackBase, branchPrefix, coauthor, verification,
+      repo, repoDir, card: subtask.id, branch, baseBranch: stackBase, coauthor, verification,
       // Same checkout's scripts/, derived from detectScript so there is one
       // path to get wrong instead of two.
       scriptsDir: detectScript.slice(0, detectScript.lastIndexOf('/')),
@@ -950,8 +950,17 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     return { subtask: subtask.id, escalated: true }
   }
 
+  // task.js's own status write is best-effort so a PR that is already open and
+  // green is never sunk by it — but that failure must not vanish into a `done:
+  // true` run whose board never actually moved. Carry it through verbatim.
+  if (dispatched.statusWritten === false) {
+    log(`subtask ${subtask.id}: PR #${prNumber} is open, but the card's status was NOT written — ${dispatched.statusWriteError || '(no detail)'}`)
+  }
+
   return { subtask: subtask.id, story: story.id, pr: prNumber,
-    branch: dispatched.branch || branch, base: stackBase, stacked: true, plan: dispatched.plan }
+    branch: dispatched.branch || branch, base: stackBase, stacked: true, plan: dispatched.plan,
+    statusWritten: dispatched.statusWritten !== false,
+    ...(dispatched.statusWriteError ? { statusWriteError: dispatched.statusWriteError } : {}) }
 }
 
 // ── level loop + pipeline() barrier ─────────────────────────────────────────
@@ -999,6 +1008,19 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
 // session structurally intact. `halted` only stops NEW dispatch — in-flight
 // stages in the current level finish naturally.
 if (halted) return { repo, milestone, baseBranch, mode: 'stacked', ...halted, completed: results }
+
+// A status write is best-effort per subtask (see runSubtask) so it never sinks
+// an open, green PR — but `done: true` must not read as "the board updated"
+// when it didn't. Count what silently failed and say so, rather than letting
+// a clean-looking run hide a board still at `todo`.
+const unwrittenSubtasks = results.flatMap(level => (level.stories ?? []))
+  .flatMap(story => (story && story.subtasks) || [])
+  .filter(subtask => subtask && subtask.statusWritten === false)
+
 return { repo, milestone, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
+  ...(unwrittenSubtasks.length > 0 ? { statusWriteFailures: unwrittenSubtasks.length } : {}),
   note: 'Nothing was merged. Each story is a stack of open PRs, each targeting the previous subtask\'s branch; '
-    + 'merge each stack bottom-up. Subtask issues are still OPEN and their cards sit at "In review" until you do.' }
+    + 'merge each stack bottom-up. Subtask cards already sit at "done" — done means the PR is open, not that it is merged.'
+    + (unwrittenSubtasks.length > 0
+        ? ` WARNING: ${unwrittenSubtasks.length} subtask(s) shipped a PR but the card status write failed — the board did not update for them; see each subtask's statusWriteError.`
+        : '') }

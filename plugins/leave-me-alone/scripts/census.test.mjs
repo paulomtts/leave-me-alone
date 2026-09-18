@@ -84,6 +84,25 @@ test('findMilestone fails loudly on ambiguity rather than guessing', () => {
   assert.throws(() => findMilestone([TREE, other], 'csv'), /ambiguous/)
 })
 
+test('a numeric needle does not resolve via a longer digit run it sits inside', () => {
+  // "milestone: 2" must not silently resolve "Milestone 12: CSV export" — the
+  // "2" it typed is not the "12" this card carries.
+  assert.throws(() => findMilestone([TREE], 2), /no milestone card/)
+  assert.throws(() => findMilestone([TREE], '2'), /no milestone card/)
+})
+
+test('an exact title match wins outright, even over another card it is also a substring of', () => {
+  const longer = node(9, 'Milestone 12: CSV export, revisited')
+  assert.equal(findMilestone([longer, TREE], 'Milestone 12: CSV export').id, ID(1))
+  // Case-insensitive too.
+  assert.equal(findMilestone([longer, TREE], 'milestone 12: csv export').id, ID(1))
+})
+
+test('a numeric needle still resolves a card whose whole digit run equals it', () => {
+  const twelve = node(9, 'Milestone 12')
+  assert.equal(findMilestone([twelve], 12).id, ID(9))
+})
+
 test('flattenMilestone produces stories with ordered subtasks', () => {
   const census = flattenMilestone(TREE)
   assert.equal(census.milestoneTitle, 'Milestone 12: CSV export')

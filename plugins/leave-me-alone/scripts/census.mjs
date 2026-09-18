@@ -66,7 +66,30 @@ export function findMilestone(roots, needle) {
   if (byId) return byId
 
   const lowered = wanted.toLowerCase()
-  const matches = list.filter(root => String(root.title ?? '').toLowerCase().includes(lowered))
+
+  // An exact (case-insensitive) title match wins outright, with no ambiguity
+  // check beyond this: it is unambiguous even when the needle also happens to
+  // be a substring of some other card's title.
+  const exact = list.find(root => String(root.title ?? '').toLowerCase() === lowered)
+  if (exact) return exact
+
+  // A numeric needle ("2") must not resolve via a longer digit run it merely
+  // sits inside ("Milestone 12") — that is not the milestone the caller typed,
+  // and silently resolving it turns a wrong READ into wrong branches, PRs and
+  // status writes. So a numeric needle only matches a digit run of its own
+  // length; anything longer is excluded from the candidate set entirely.
+  const isNumeric = /^[0-9]+$/.test(wanted)
+  const matches = list.filter(root => {
+    const title = String(root.title ?? '').toLowerCase()
+    const idx = title.indexOf(lowered)
+    if (idx === -1) return false
+    if (!isNumeric) return true
+    let start = idx
+    let end = idx + lowered.length
+    while (start > 0 && /[0-9]/.test(title[start - 1])) start--
+    while (end < title.length && /[0-9]/.test(title[end])) end++
+    return (end - start) <= lowered.length
+  })
   if (matches.length === 1) return matches[0]
   if (matches.length === 0) {
     throw new Error(`no milestone card matching "${wanted}" — root cards are: ${list.map(r => r.title).join(', ') || '(none)'}`)

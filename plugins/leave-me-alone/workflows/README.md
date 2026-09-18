@@ -2,10 +2,10 @@
 
 Two Workflow scripts and the deterministic helpers they drive.
 
-- **orchestrator** — one GitHub milestone, end to end, as a stack of pull requests. Computes the
+- **orchestrator** — one brd milestone card, end to end, as a stack of pull requests. Computes the
   story dependency DAG, dispatches each level's stories in parallel, runs each story's subtasks
   sequentially, and full-stops on the first escalation. **Never merges anything.**
-- **task** — one subtask issue, end to end, in its own worktree and branch: explore, spec, review the
+- **task** — one subtask card, end to end, in its own worktree and branch: explore, spec, review the
   spec, plan, review the plan, implement under strict TDD, review the diff, verify, open a PR.
   **Stops at the PR.**
 
@@ -45,7 +45,7 @@ Each is also usable standalone for inspecting or debugging a run.
 |---|---|
 | `detect.mjs` | the whole milestone census from brd (one `brd tree`), plus the PR listing from gh. Also does the ONE git fetch + worktree prune for the run |
 | `worktree.mjs` | create a subtask's worktree idempotently; report what was already there. Never resets, deletes or commits |
-| `plan-check.mjs` | is there a saved, validated plan for this issue? |
+| `plan-check.mjs` | is there a saved, validated plan for this card? |
 | `ship.mjs` | verify → push → open the PR. Nothing is pushed after a red command |
 | `check-workflows.mjs` | do the workflow scripts still parse? |
 
@@ -101,19 +101,19 @@ parent**, not the milestone base.
 | `scriptsDir` | yes | absolute path to `scripts/` |
 | `verification` | no | otherwise Explore discovers it |
 | `plansDir`, `specsDir` | no | default under the **worktree**, so the PR carries them |
-| `branchPrefix`, `coauthor`, `triggerAgentType` | no | |
+| `coauthor`, `triggerAgentType` | no | |
 | `allowNoVerification` | no | opt in to running with no test suite. Refused otherwise |
 
 ### Phases
 
 | # | phase | agent type | skill | what |
 |---|---|---|---|---|
-| 1 | Explore | `leave-me-alone:repo-reader` | — | issue, parent story, repo docs, the code it touches. Never writes |
+| 1 | Explore | `leave-me-alone:repo-reader` | — | card, parent story, repo docs, the code it touches. Never writes |
 | 2 | Worktree | `leave-me-alone:command-runner` | — | `worktree.mjs`. Must precede anything that writes |
 | 3 | plan-check | `leave-me-alone:command-runner` | — | `plan-check.mjs`. A validated plan skips 4–7 |
-| 4 | Spec | `leave-me-alone:spec-author` | — | writes `docs/superpowers/specs/issue-N-design.md`. No shell |
+| 4 | Spec | `leave-me-alone:spec-author` | — | writes `docs/superpowers/specs/task-<slug>-<shortid>-design.md`. No shell |
 | 5 | ValidateSpec | `leave-me-alone:plan-critic` | — | corrects the spec **in place**, before anything is planned on it |
-| 6 | Plan | `leave-me-alone:plan-author` | `writing-plans` | writes `docs/superpowers/plans/issue-N.md` from the spec **on disk** |
+| 6 | Plan | `leave-me-alone:plan-author` | `writing-plans` | writes `docs/superpowers/plans/task-<slug>-<shortid>.md` from the spec **on disk** |
 | 7 | ValidatePlan | `leave-me-alone:plan-critic` | — | corrects the plan; adds `<!-- task-pipeline: validated -->` |
 | 8 | Implement | `leave-me-alone:code-worker` | TDD | commits spec+plan first, then strict TDD with `Plan-Hash` trailers |
 | 9 | Review | `leave-me-alone:code-worker` | TDD, debugging | reviews the diff, fixes, reports three raw numbers |

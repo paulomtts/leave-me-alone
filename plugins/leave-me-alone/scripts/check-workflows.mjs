@@ -40,15 +40,11 @@ export const SMOKE_ARGS = {
   'orchestrator.js': {
     repo: 'o/n', repoDir: '/tmp/x', milestone: 1, baseBranch: 'main', nonce: 'n',
     taskScript: '/tmp/x/workflows/task.js', detectScript: '/tmp/x/scripts/detect.mjs',
-    project: { id: 'PVT_1', fieldId: 'F_1',
-      optionIds: { backlog: 'a', inProgress: 'b', inReview: 'c', done: 'd' } },
   },
   'task.js': {
     repo: 'o/n', repoDir: '/tmp/x', card: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
     branch: 'm1/task-fixture-aaaaaaaa', baseBranch: 'main',
     scriptsDir: '/tmp/x/scripts',
-    project: { id: 'PVT_1', fieldId: 'F_1',
-      optionIds: { backlog: 'a', inProgress: 'b', inReview: 'c', done: 'd' } },
     verification: { fullSuite: ['true'] },
   },
 }
