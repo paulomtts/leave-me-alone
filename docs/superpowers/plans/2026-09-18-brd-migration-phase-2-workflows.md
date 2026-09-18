@@ -503,14 +503,18 @@ test('the PR body references the card without implying a merge closes it', () =>
 })
 
 test('the title is used verbatim — ordinal prefixes are no longer a convention', async () => {
-  const log = []
-  const run = fakeRun(log)
+  // Use this file's OWN existing fake-runner helper and its call-log
+  // convention — do not introduce a new one. A title beginning with digits is
+  // the case the deleted titleFromIssue regex would have mangled.
+  const { run, log } = <the fake this file already uses, constructed its usual way>
   await ship({ ...parseArgs(ARGS), title: '1.2 feat: quoting', run })
   const created = log.find(call => call.includes('pr create'))
   assert.match(created, /1\.2 feat: quoting/)
   assert.ok(!log.some(call => call.includes('issue view')), `looked the title up: ${log.join(' | ')}`)
 })
 ```
+
+The angle-bracket line above is the one place in this plan you must adapt rather than transcribe: `ship.test.mjs` already has a fake `gh` runner with a call log, and this test must use it. Read the file, use what is there, and do not add a second fake alongside it.
 
 Keep every existing test that covers behavior this task does not change — the verification gate, the clean-tree check, push ordering, and the no-retry-on-mutation rule.
 
