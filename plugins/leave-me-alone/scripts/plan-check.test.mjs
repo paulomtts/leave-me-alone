@@ -12,6 +12,13 @@ test('parseArgs takes an 8-character hex card id', () => {
   assert.throws(() => parseArgs(['--repo-dir', '/abs/repo']), /--card/)
 })
 
+test('an uppercase card id is rejected rather than silently matching nothing', () => {
+  // shortId always lowercases, so an uppercase id can only come from a caller
+  // bug. Accepting it would turn a typo into "no plan found" — a gate failing
+  // open in the direction that halts a run for a reason that is not true.
+  assert.throws(() => parseArgs(['--repo-dir', '/abs/repo', '--card', 'A32AF745']), /--card/)
+})
+
 test('a plan matches when the short id is its final segment', () => {
   assert.equal(matchesCard('task-write-rows-a32af745.md', 'a32af745'), true)
   assert.equal(matchesCard('task-a32af745.md', 'a32af745'), true)

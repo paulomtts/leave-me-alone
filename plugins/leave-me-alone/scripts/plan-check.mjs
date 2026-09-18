@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Deterministic replacement for task.js's plan-check agent.
 //
-// The agent's entire job was: find `*issue-<n>.md` under the plans directory,
-// and grep it for one marker line. That is `ls` and `grep` — no judgement — yet
-// it cost a dispatch every run because a Workflow script cannot touch a disk.
+// The agent's entire job was: find `task-<slug>-<shortid>.md` under the plans
+// directory, and grep it for one marker line. That is `ls` and `grep` — no
+// judgement — yet it cost a dispatch every run because a Workflow script
+// cannot touch a disk.
 //
 //   bun scripts/plan-check.mjs --repo-dir /abs/repo --card a32af745 --compact
 
@@ -27,7 +28,7 @@ export function parseArgs(argv) {
   if (typeof out.repoDir !== 'string' || !out.repoDir.startsWith('/')) {
     throw new Error('plan-check needs --repo-dir <absolute path>')
   }
-  if (typeof out.card !== 'string' || !/^[0-9a-fA-F]{8}$/.test(out.card)) {
+  if (typeof out.card !== 'string' || !/^[0-9a-f]{8}$/.test(out.card)) {
     throw new Error('plan-check needs --card <8 hex characters>')
   }
   out.plansDir = flags['--plans-dir'] ?? `${out.repoDir}/.claude/plans`
