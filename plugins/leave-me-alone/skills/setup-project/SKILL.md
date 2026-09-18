@@ -246,4 +246,4 @@ bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone "<card 
 | Cloning this repo to a new machine and expecting the board to be there | It isn't — the board never left the machine it was created on. Run `brd init` in the new clone, and `brd import` a snapshot if you need the old cards. |
 | A story with two `blocked_by` edges | The orchestrator can only root a stack on one parent. It stops the run rather than guessing which blocker to build from — chain them instead. |
 | Expecting a card per PR | One PR per **subtask**. |
-| Expecting cards to reach "done" | The run never merges, so nothing closes. A subtask's status update to "in review" (and its parent story's own status) is best-effort and reflects that a PR opened, not that anyone merged it. |
+| Expecting `done` to mean merged | It doesn't. The run never merges, so a subtask's card reaching `done` reflects only that Ship opened its PR — that's the furthest state a run that never merges can honestly report. Its parent story's own status update is best-effort in the same way. |

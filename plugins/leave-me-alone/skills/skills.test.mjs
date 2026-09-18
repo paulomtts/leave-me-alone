@@ -27,8 +27,19 @@ test('setup-milestone no longer instructs the retired conventions', () => {
   const source = read('setup-milestone')
   assert.doesNotMatch(source, /sub_issues|addSubIssue|database id/i)
   assert.doesNotMatch(source, /label.*\bsubtask\b|--label/)
-  assert.doesNotMatch(source, /In review/)
   assert.doesNotMatch(source, /project: \{ number/)
+})
+
+test('the skills describe the status model that actually ships', () => {
+  for (const name of ['setup-project', 'setup-milestone']) {
+    const source = read(name)
+    // Phase 2 retired in_review: ship writes `done`, because a run never
+    // merges and "the PR is open" is the furthest state it can honestly
+    // report. Case-insensitive — the previous guard was satisfied by
+    // lowercasing while the claim stayed false.
+    assert.doesNotMatch(source, /in[ _]review/i, `${name} still promises in_review`)
+    assert.match(source, /\bdone\b/, `${name} must say cards reach done`)
+  }
 })
 
 test('setup-milestone owns the two rules nothing in code enforces at creation', () => {
