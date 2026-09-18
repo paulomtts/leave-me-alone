@@ -124,6 +124,11 @@ function remainingSubtasks(story) {
 // no-op and only the walk up to its ancestors does real work. Returns null
 // when the story has nothing safe to anchor on (no subtasks, or none
 // individually marked done) — there is then nothing to reassert.
+// A story marked done itself (isStoryClosed) but whose subtasks are not
+// individually marked done still returns null here rather than anchoring on
+// an arbitrary one: reasserting a subtask's status the card does not actually
+// have would be a wrong write, not a safe no-op — skipping it is deliberate,
+// not an oversight.
 function storyRollupAnchor(story) {
   return (story.subtasks ?? []).find(isSubtaskDone) || null
 }
@@ -1084,7 +1089,8 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
 // Escalation is returned, not thrown, so the payload reaches the top-level
 // session structurally intact. `halted` only stops NEW dispatch — in-flight
 // stages in the current level finish naturally.
-if (halted) return { repo, milestone, baseBranch, mode: 'stacked', ...halted, completed: results }
+if (halted) return { repo, milestone, baseBranch, mode: 'stacked', ...halted, completed: results,
+  ...(staleRollupErrors.length > 0 ? { statusWriteFailures: staleRollupErrors.length } : {}) }
 
 // A status write is best-effort per subtask (see runSubtask) so it never sinks
 // an open, green PR — but `done: true` must not read as "the board updated"

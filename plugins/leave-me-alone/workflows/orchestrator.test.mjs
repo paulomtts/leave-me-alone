@@ -680,3 +680,17 @@ test('a story whose subtasks are all already shipped still gets its card rolled 
   assert.match(source, /statusWriteFailures/,
     'and a failure here must surface the same way task.js\'s does, not vanish')
 })
+
+test('a halted run still reports stale-rollup failures, not just per-subtask ones', () => {
+  // Regression pin: the halted-escalation return used to spread `...halted`
+  // and `completed` only, dropping staleRollupErrors entirely — a stale-rollup
+  // failure that happened before a later story escalated would vanish rather
+  // than surface, unlike a per-subtask statusWriteError (which survives
+  // nested inside `completed.stories[].subtasks[]`, even though its count
+  // does not). Pin the halted return so it folds staleRollupErrors in the
+  // same additive way the other two return shapes already do.
+  const source = readFileSync(ORCHESTRATOR_PATH, 'utf8')
+  assert.match(source,
+    /if \(halted\) return \{ repo, milestone, baseBranch, mode: 'stacked', \.\.\.halted, completed: results,\n\s*\.\.\.\(staleRollupErrors\.length > 0 \? \{ statusWriteFailures: staleRollupErrors\.length \} : \{\}\) \}/,
+    'the top-level halted-run return must fold staleRollupErrors into statusWriteFailures, the same key the other two returns use — a stale-rollup failure that happened before a later story escalated must not vanish')
+})
