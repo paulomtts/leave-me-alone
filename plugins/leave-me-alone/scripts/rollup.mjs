@@ -52,15 +52,24 @@ export function parseArgs(argv) {
 //
 // Read-then-write per level rather than writing blind: sibling stories run in
 // parallel lanes, so this process's view of a shared ancestor can be stale by
-// the time it gets here. A parent that does not change ends the walk — if the
-// parent's status is unchanged, nothing above it can have changed either.
+// the time it gets here. Reading each parent freshly narrows the window per
+// level where a concurrent write would be missed, though it does not eliminate it.
+// Write only where the computed status differs from what's stored.
+//
+// Always walk to the root, even if a parent's status is unchanged. An earlier
+// interrupted run may have left a grandparent stale; by continuing past the
+// unchanged parent, the next walk that passes through it repairs the stale ancestor.
+// This self-healing property matters: milestone status is what a human reads.
+// (The tree is exactly three levels deep, so the early-exit "optimization" saved
+// at most one read—never worth the correctness cost.)
 export async function rollup({ card, status, cwd, run = brdRunner }) {
   const written = []
   await brd(['update', card, '--status', status], { cwd, run })
   written.push({ card, status })
 
   let child = card
-  for (;;) {
+  const MAX_DEPTH = 16 // Guard against corrupted parent chains
+  for (let depth = 0; depth < MAX_DEPTH; depth++) {
     const detail = await brd(['show', child], { cwd, run })
     const parent = detail && detail.parent_id
     if (!parent) return written
@@ -68,12 +77,13 @@ export async function rollup({ card, status, cwd, run = brdRunner }) {
     const tree = await brd(['tree', parent], { cwd, run })
     const node = Array.isArray(tree) ? tree[0] : tree
     const target = rollupStatus(node && node.children)
-    if (target === null || storedStatus(node.status) === target) return written
-
-    await brd(['update', parent, '--status', target], { cwd, run })
-    written.push({ card: parent, status: target })
+    if (target !== null && storedStatus(node.status) !== target) {
+      await brd(['update', parent, '--status', target], { cwd, run })
+      written.push({ card: parent, status: target })
+    }
     child = parent
   }
+  throw new Error(`rollup: exceeded maximum ancestry depth at card ${child}`)
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

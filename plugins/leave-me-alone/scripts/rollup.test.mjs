@@ -84,18 +84,29 @@ test('writes the card, then the parent when the rollup changes it', async () => 
   assert.deepEqual(written, [{ card: SUB, status: 'done' }, { card: STORY, status: 'done' }])
 })
 
-test('stops walking as soon as a parent does not change', async () => {
-  // The story stays in_progress because a sibling is still todo. The milestone
-  // therefore cannot have changed either, so it must never be read or written.
+test('does not write an unchanged parent, even while continuing the walk', async () => {
+  // The story stays in_progress because a sibling is still todo. When we walk
+  // to its parent (the milestone), it's already correct, so we read it but don't
+  // write it. Crucially, we continue past it instead of stopping — because a
+  // stale grandparent might exist upstream.
   const run = fakeBrd([
     [`update ${SUB}`, { id: SUB }],
     [`show ${SUB}`, { id: SUB, parent_id: STORY }],
     [`tree ${STORY}`, [{ id: STORY, status: 'in_progress',
       children: [{ id: SUB, status: 'done' }, { id: 'other', status: 'todo' }] }]],
+    [`show ${STORY}`, { id: STORY, parent_id: MILE }],
+    [`tree ${MILE}`, [{ id: MILE, status: 'in_progress',
+      children: [{ id: STORY, status: 'in_progress' }] }]],
+    [`show ${MILE}`, { id: MILE, parent_id: null }],
   ])
   const written = await rollup({ card: SUB, status: 'done', cwd: '/abs/repo', run })
   assert.deepEqual(written, [{ card: SUB, status: 'done' }])
-  assert.ok(!run.log.some(call => call.includes(MILE)), `walked too far: ${run.log.join(' | ')}`)
+  // Story and milestone are not written because their statuses don't change
+  assert.ok(!run.log.some(call => call.startsWith('update ') && call.includes(STORY)), `story was written`)
+  assert.ok(!run.log.some(call => call.startsWith('update ') && call.includes(MILE)), `milestone was written`)
+  // But we do read the milestone (walk continues)
+  assert.ok(run.log.some(call => call.includes(`show ${STORY}`)), `story not read`)
+  assert.ok(run.log.some(call => call.includes(`tree ${MILE}`)), `milestone tree not read`)
 })
 
 test('a brd failure aborts rather than leaving a half-written ancestry', async () => {
@@ -111,4 +122,41 @@ test('every brd call is given the repo-dir as cwd', async () => {
   }
   await rollup({ card: SUB, status: 'in_progress', cwd: '/abs/repo', run })
   assert.ok(seen.length > 0 && seen.every(cwd => cwd === '/abs/repo'), `cwds: ${JSON.stringify(seen)}`)
+})
+
+test('self-healing: a stale ancestor is repaired on the next rollup walk', async () => {
+  // Scenario: an earlier rollup was interrupted. The story is correctly in_progress
+  // (its subtask is done and a sibling is todo), but the milestone is stale at
+  // 'todo' when it should be 'in_progress'. This rollup sees the story's status
+  // is unchanged (so doesn't write it), but continues upward and discovers the
+  // stale milestone, correcting it.
+  const run = fakeBrd([
+    [`update ${SUB}`, { id: SUB }],
+    [`show ${SUB}`, { id: SUB, parent_id: STORY }],
+    [`tree ${STORY}`, [{ id: STORY, status: 'in_progress',
+      children: [{ id: SUB, status: 'done' }, { id: 'other', status: 'todo' }] }]],
+    [`show ${STORY}`, { id: STORY, parent_id: MILE }],
+    [`tree ${MILE}`, [{ id: MILE, status: 'todo', // Stale! Should be in_progress
+      children: [{ id: STORY, status: 'in_progress' }] }]],
+    [`update ${MILE}`, { id: MILE }],
+    [`show ${MILE}`, { id: MILE, parent_id: null }],
+  ])
+  const written = await rollup({ card: SUB, status: 'done', cwd: '/abs/repo', run })
+  // Story is unchanged and not written, but milestone is repaired
+  assert.deepEqual(written, [{ card: SUB, status: 'done' }, { card: MILE, status: 'in_progress' }])
+})
+
+test('depth guard: a corrupted parent chain throws rather than hanging', { timeout: 1000 }, async () => {
+  const run = fakeBrd([
+    [`update ${SUB}`, { id: SUB }],
+    [`show ${SUB}`, { id: SUB, parent_id: STORY }],
+    [`tree ${STORY}`, [{ id: STORY, status: 'in_progress', children: [{ id: SUB, status: 'done' }] }]],
+    [`update ${STORY}`, { id: STORY }],
+    [`tree`, [{ id: 'parent', status: 'in_progress', children: [] }]], // All non-specific trees
+    [`show`, { id: 'x', parent_id: 'y' }], // All non-specific shows: infinite parent chain
+  ])
+  await assert.rejects(
+    rollup({ card: SUB, status: 'done', cwd: '/abs/repo', run }),
+    /exceeded maximum ancestry depth/
+  )
 })
