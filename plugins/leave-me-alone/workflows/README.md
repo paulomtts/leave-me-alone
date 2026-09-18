@@ -29,11 +29,12 @@ the old scripts, and an old `orchestrator.js` has no idea it is old. The hook st
 `~/.claude/workflows/.synced-version` and says so when the version moves, but it cannot close the
 gap — a hook cannot run before the update it reacts to. **Update, restart, then run a milestone.**
 
-**Requires `bun`, `gh` (authenticated with the `project` scope), `git`, `brd`, and the `superpowers`
+**Requires `bun`, `gh` (authenticated), `git`, `brd`, and the `superpowers`
 plugin.** The helper scripts are invoked as `bun <script>.mjs`, and `superpowers:writing-plans`
 defines the plan format Implement and Review both assume — Plan reports whether it actually invoked
-that skill, and the run stops if it did not. `node` is needed only for this repo's test suite. A GitHub Projects v2 board — there is no boardless mode. Board setup and the
-milestone conventions are the `setup-project` and `setup-milestone` skills.
+that skill, and the run stops if it did not. `node` is needed only for this repo's test suite. Story
+and subtask state lives in `brd`, not a GitHub Projects v2 board — status moves go through
+`scripts/rollup.mjs`. Milestone conventions are the `setup-milestone` skill.
 
 ## Helper scripts
 
@@ -56,7 +57,6 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
   nonce: "<current timestamp>",
   taskScript:    "<repo>/workflows/task.js",       // required, absolute
   detectScript:  "<repo>/scripts/detect.mjs",      // required, absolute
-  project: { id: "PVT_…", fieldId: "PVTSSF_…", optionIds: { backlog: "…", inProgress: "…", inReview: "…", done: "…" } },
   verification: { fullSuite: ["npm test"], typecheck: "", lint: [] },
   dryRun: true,
 })
@@ -67,7 +67,6 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 | `repo`, `repoDir`, `milestone`, `baseBranch` | yes | no defaults; `baseBranch` is never guessed |
 | `nonce` | yes | busts the Detect cache so a re-run re-reads GitHub |
 | `taskScript`, `detectScript` | yes | absolute paths; this repo can be checked out anywhere |
-| `project` | yes | resolved `{id, fieldId, optionIds}` only — a bare `{number}` fails at launch. No boardless mode |
 | `verification` | no | supply it and Detect becomes a pure trigger |
 | `branchPrefix` | no | defaults to `m<milestone>`. **Constant for a milestone's life** |
 | `maxConcurrentStories` | no | default 4 |
@@ -78,33 +77,28 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 
 | phase | agents | what |
 |---|---|---|
-| Configure | 0 | board ids read from `project`. Only the resolved `{id, fieldId, optionIds}` form is accepted |
-| Detect | 1 | `detect.mjs` → the census, plus the run's single fetch/prune |
+| Configure | 0 | nothing to resolve; there is no board. Detect (below) is already dispatched by this point |
+| Detect | 1 | `detect.mjs` → the census, plus the run's single fetch/prune, plus verification-command discovery |
 | — | 0 | cycles, levels, branch names, PR bases, PR matching, verification filtering |
 | Dispatch | 0 | `workflow(task.js)` per subtask — the agents are all inside `task.js` |
 
-Configure and Detect run **concurrently**; they share no data. A board failure disables nothing —
-it stops the run, because a milestone whose cards silently never move looks exactly like one that
-never ran.
-
 ### dryRun
 
-Returns the resolved board ids, the discovered verification commands, the dependency levels, and per
-subtask its `branch` and **`prTargets`**. Read that column: each subtask should target the previous
-one's branch, and a story's first subtask should target its blocker's tip. A blocked story rooted at
-`baseBranch` means a missing `blockedBy` edge.
+Returns the discovered verification commands, the dependency levels, and per subtask its `branch` and
+**`prTargets`**. Read that column: each subtask should target the previous one's branch, and a
+story's first subtask should target its blocker's tip. A blocked story rooted at `baseBranch` means a
+missing `blockedBy` edge.
 
 ## task
 
-Invoked per subtask by the orchestrator, which forwards `scriptsDir`, the resolved `project`,
-`verification`, `triggerAgentType` and the subtask's own `baseBranch` — its **stack parent**, not the
-milestone base.
+Invoked per subtask by the orchestrator, which forwards `scriptsDir`, `verification`,
+`triggerAgentType`, the branch it already derived, and the subtask's own `baseBranch` — its **stack
+parent**, not the milestone base.
 
 | arg | required | notes |
 |---|---|---|
-| `repo`, `repoDir`, `issue`, `baseBranch` | yes | `baseBranch` is this subtask's stack parent |
+| `repo`, `repoDir`, `card`, `branch`, `baseBranch` | yes | `card` is the brd card id (UUID); `branch` is computed once, by the orchestrator, and forwarded — `task` does not derive its own; `baseBranch` is this subtask's stack parent |
 | `scriptsDir` | yes | absolute path to `scripts/` |
-| `project` | yes | resolved ids only; `task` never resolves them itself |
 | `verification` | no | otherwise Explore discovers it |
 | `plansDir`, `specsDir` | no | default under the **worktree**, so the PR carries them |
 | `branchPrefix`, `coauthor`, `triggerAgentType` | no | |
@@ -145,8 +139,8 @@ Decisions live in the script, off values the agents merely report:
 
 ### Returns
 
-`{ issue, pr, branch, worktree, plan, tests }` on success, or
-`{ issue, refused|blocked, reason|detail, … }` when a gate stopped it. `blocked` is one of
+`{ card, pr, branch, worktree, plan, tests }` on success, or
+`{ card, refused|blocked, reason|detail, … }` when a gate stopped it. `blocked` is one of
 `verification`, `validation`, `implement`, `review`, `tests`, `pr`.
 
 ## Why per-subtask, not per-story

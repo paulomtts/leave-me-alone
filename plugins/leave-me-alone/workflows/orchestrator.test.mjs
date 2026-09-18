@@ -9,6 +9,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { loadPure } from './load-pure.mjs'
@@ -18,19 +19,19 @@ import {
 } from '../scripts/naming.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+const ORCHESTRATOR_PATH = join(HERE, 'orchestrator.js')
 
 const {
   isSubtaskDone, remainingSubtasks, computeLevels,
-  assertNoBlockerCycles, storyRoot, stackBases, escalation,
+  assertNoBlockerCycles, subtaskBranch, storyRoot, stackBases, escalation,
   prMatchesSubtask, matchPr, attachPullRequests, dropCommandsNamingMissingPaths,
-  resolveBoardIds, hasResolvedBoardIds,
   shortId, slugify, taskStem, taskBranch,
   resolveMilestone, resolveBranchPrefix,
-} = await loadPure(join(HERE, 'orchestrator.js'), [
+} = await loadPure(ORCHESTRATOR_PATH, [
   'isSubtaskDone', 'remainingSubtasks', 'computeLevels',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
   'prMatchesSubtask', 'normalizePr', 'matchPr', 'attachPullRequests',
-  'dropCommandsNamingMissingPaths', 'resolveBoardIds', 'hasResolvedBoardIds',
+  'dropCommandsNamingMissingPaths',
   'shortId', 'slugify', 'taskStem', 'taskBranch',
   'resolveMilestone', 'resolveBranchPrefix', 'shellQuote',
 ])
@@ -539,96 +540,26 @@ test('adopting the prefix on a milestone with merged work HALTS, it does not red
   assert.match(note, /the default is now "m<milestone>"/)
 })
 
-// ── resolveBoardIds: exact names, decided in script ──────────────────────────
+// ── the dispatch: card + branch, no board ─────────────────────────────────────
 
-const NAMES = { backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done' }
-const statusField = (options, name = 'Status') => ({ id: 'F_1', name, options })
-const allFour = [
-  { id: 'o1', name: 'Backlog' }, { id: 'o2', name: 'In progress' },
-  { id: 'o3', name: 'In review' }, { id: 'o4', name: 'Done' },
-]
-
-test('a board with all four options resolves to their ids', () => {
-  const got = resolveBoardIds([statusField(allFour)], 'Status', NAMES)
-  assert.equal(got.ok, true)
-  assert.equal(got.fieldId, 'F_1')
-  assert.deepEqual(got.optionIds, { backlog: 'o1', inProgress: 'o2', inReview: 'o3', done: 'o4' })
+test('the branch the orchestrator dispatches is the one it derives', async () => {
+  // subtaskBranch is already in the loadPure name list above — it is what the
+  // dry-run table and matchPr both use. This pins that the dispatch cannot
+  // drift from that derivation.
+  const S1 = uid('11111111')
+  assert.equal(subtaskBranch({ id: S1, title: 'write rows' }, 'm12'), 'm12/task-write-rows-11111111')
 })
 
-test('a case mismatch FAILS, and says what it found', () => {
-  // The whole reason this moved out of the prompt. "In Progress" is not
-  // "In progress", and a model asked to match "exactly" may helpfully bridge
-  // that -- returning a real id for the wrong column, which no later check
-  // could catch because the ids are opaque.
-  const wrong = [{ id: 'o1', name: 'Backlog' }, { id: 'o2', name: 'In Progress' },
-                 { id: 'o3', name: 'In review' }, { id: 'o4', name: 'Done' }]
-  const got = resolveBoardIds([statusField(wrong)], 'Status', NAMES)
-  assert.equal(got.ok, false)
-  assert.match(got.missing, /"In progress" \(found "In Progress"\)/)
-  assert.match(got.missing, /case and spacing/)
+test('the dispatch passes card and branch, and no longer passes issue', () => {
+  const source = readFileSync(ORCHESTRATOR_PATH, 'utf8')
+  assert.match(source, /card: subtask\.id/)
+  assert.doesNotMatch(source, /issue: subtask\.id/,
+    'the GitHub key must be gone, not merely unused')
 })
 
-test('a near-miss FIELD name is named rather than reported as absent', () => {
-  const got = resolveBoardIds([statusField(allFour, 'status')], 'Status', NAMES)
-  assert.equal(got.ok, false)
-  assert.match(got.missing, /closest is "status"/)
-})
-
-test('a genuinely absent field lists what IS there', () => {
-  const got = resolveBoardIds([statusField(allFour, 'Priority')], 'Status', NAMES)
-  assert.equal(got.ok, false)
-  assert.match(got.missing, /present: "Priority"/)
-})
-
-test('every missing option is reported at once, not one per run', () => {
-  const got = resolveBoardIds([statusField([{ id: 'o1', name: 'Backlog' }])], 'Status', NAMES)
-  assert.equal(got.ok, false)
-  for (const wanted of ['In progress', 'In review', 'Done']) assert.match(got.missing, new RegExp(wanted))
-})
-
-test('an option without an id does not count as found', () => {
-  const noId = [{ id: 'o1', name: 'Backlog' }, { name: 'In progress' },
-                { id: 'o3', name: 'In review' }, { id: 'o4', name: 'Done' }]
-  assert.equal(resolveBoardIds([statusField(noId)], 'Status', NAMES).ok, false)
-})
-
-test('renamed columns resolve when the caller declares them', () => {
-  // The zero-mutation path from the setup skill: keep Todo/Doing, tell the run.
-  const custom = { backlog: 'Todo', inProgress: 'Doing', inReview: 'In review', done: 'Shipped' }
-  const options = [{ id: 'a', name: 'Todo' }, { id: 'b', name: 'Doing' },
-                   { id: 'c', name: 'In review' }, { id: 'd', name: 'Shipped' }]
-  const got = resolveBoardIds([statusField(options)], 'Status', custom)
-  assert.deepEqual(got.optionIds, { backlog: 'a', inProgress: 'b', inReview: 'c', done: 'd' })
-})
-
-test('junk input fails cleanly instead of throwing', () => {
-  for (const bad of [null, undefined, [], 'nope', [null], [{}]]) {
-    assert.equal(resolveBoardIds(bad, 'Status', NAMES).ok, false)
-  }
-})
-
-// ── hasResolvedBoardIds ──────────────────────────────────────────────────────
-
-const RESOLVED = { id: 'PVT_1', fieldId: 'F_1',
-  optionIds: { backlog: 'o1', inProgress: 'o2', inReview: 'o3', done: 'o4' } }
-
-test('a complete id block skips the lookup dispatch', () => {
-  assert.equal(hasResolvedBoardIds(RESOLVED), true)
-  assert.equal(hasResolvedBoardIds({ ...RESOLVED, number: 13 }), true)   // number alongside is fine
-})
-
-test('a PARTIAL id block does not count', () => {
-  // A partial block would disable exactly one column's moves and look like it
-  // worked -- the worst possible outcome for bookkeeping nobody watches.
-  assert.equal(hasResolvedBoardIds({ ...RESOLVED, optionIds: { ...RESOLVED.optionIds, done: '' } }), false)
-  assert.equal(hasResolvedBoardIds({ ...RESOLVED, optionIds: { backlog: 'o1' } }), false)
-  assert.equal(hasResolvedBoardIds({ ...RESOLVED, fieldId: '' }), false)
-  assert.equal(hasResolvedBoardIds({ ...RESOLVED, id: undefined }), false)
-})
-
-test('a bare number is not a resolved block', () => {
-  assert.equal(hasResolvedBoardIds({ number: 13 }), false)
-  for (const bad of [null, undefined, 'PVT_1', 13]) assert.equal(hasResolvedBoardIds(bad), false)
+test('the board is no longer a concept here', () => {
+  const source = readFileSync(ORCHESTRATOR_PATH, 'utf8')
+  assert.doesNotMatch(source, /resolveBoardIds|hasResolvedBoardIds|optionIds|fieldId/)
 })
 
 // ── resolveMilestone / resolveBranchPrefix ───────────────────────────────────

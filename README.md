@@ -8,7 +8,7 @@ Personal Claude Code plugin marketplace.
 |---|---|---|
 | **bun** | every helper script runs under it — the workflows literally invoke `bun <script>.mjs` | the run stops at its first trigger step |
 | **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
-| **gh**, authenticated with the `project` scope | PRs, plus the Projects v2 board moves `task.js` still makes (that requirement goes away once `task.js` migrates off GitHub Projects in Phase 2) | resolution fails at launch |
+| **gh**, authenticated | PRs | resolution fails at launch |
 | **git** | worktrees, branches, stacked bases | — |
 | **brd** | the local kanban board: stories, subtasks, `blockedBy` | resolution fails at launch |
 

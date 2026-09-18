@@ -1,9 +1,9 @@
 export const meta = {
   name: 'orchestrator',
-  description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): take the project board ids already resolved, compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
+  description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
   whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the prTargets column.',
   phases: [
-    { title: 'Configure', detail: 'project/field/option ids taken as given — a bare project number is refused, plus the repo\'s own verification commands', model: 'haiku' },
+    { title: 'Configure', detail: 'discovers the repo\'s own verification commands', model: 'haiku' },
     { title: 'Detect', detail: 'stories and blockedBy edges from brd, existing per-subtask PRs and their bases', model: 'haiku' },
     { title: 'Dispatch', detail: 'per-level pipeline over stories; each story\'s subtasks sequential, task.js once per subtask, stacked', model: 'sonnet' },
   ],
@@ -277,61 +277,6 @@ function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }
   }
   const message = `orchestrator STOPPED: story #${story} subtask #${subtask} (level ${level}) could not be dispatched/verified against ${baseBranch} — trigger: ${trigger}. Nothing was merged; this run opens stacked PRs only. ${(attempts ?? []).length} note(s) recorded.`
   return { escalated: true, level, story, subtask, pr, trigger, baseBranch, attempts: attempts ?? [], message }
-}
-
-// ── board ids ───────────────────────────────────────────────────────────────
-// Turning a project NUMBER into the opaque node ids the mutation API needs.
-// The two GraphQL queries are the agent's job; deciding which field and which
-// options they name is not.
-//
-// This used to be prose: "find the single-select field named exactly X and the
-// options named exactly A, B, C, D". That is string equality handed to a model
-// trained to be helpful about near misses — and "In Progress" vs "In progress"
-// is exactly the mismatch the setup skill warns about. A model that helpfully
-// matched it would return a valid-looking option id for the WRONG column, the
-// mutation would succeed, and cards would land in the wrong place all run with
-// nothing able to notice: the ids are opaque, so there is no later check that
-// could catch it.
-function resolveBoardIds(fields, statusField, optionNames) {
-  const list = Array.isArray(fields) ? fields : []
-  const named = value => `"${String(value ?? '')}"`
-  const loose = value => String(value ?? '').trim().toLowerCase()
-
-  const field = list.find(entry => entry && entry.name === statusField)
-  if (!field) {
-    // A near miss is the likely cause, so name it rather than saying "missing".
-    const near = list.find(entry => entry && loose(entry.name) === loose(statusField))
-    return { ok: false, missing: near
-      ? `no field named exactly ${named(statusField)} — the closest is ${named(near.name)}. Names are matched exactly, case and spacing included.`
-      : `no single-select field named ${named(statusField)} (present: ${list.map(entry => named(entry && entry.name)).join(', ') || 'none'})` }
-  }
-  if (!field.id) return { ok: false, missing: `field ${named(statusField)} was reported without an id` }
-
-  const options = Array.isArray(field.options) ? field.options : []
-  const optionIds = {}
-  const missing = []
-  for (const [key, wanted] of Object.entries(optionNames)) {
-    const option = options.find(entry => entry && entry.name === wanted && entry.id)
-    if (option) { optionIds[key] = option.id; continue }
-    const near = options.find(entry => entry && loose(entry.name) === loose(wanted))
-    missing.push(near ? `${named(wanted)} (found ${named(near.name)})` : named(wanted))
-  }
-  if (missing.length > 0) {
-    return { ok: false, missing: `field ${named(statusField)} is missing option(s): ${missing.join(', ')}. `
-      + `Present: ${options.map(entry => named(entry && entry.name)).join(', ') || 'none'}. Names are matched exactly, case and spacing included.` }
-  }
-  return { ok: true, fieldId: field.id, optionIds }
-}
-
-// Ids never change, so a caller that already has them can skip the lookup
-// dispatch entirely. All four options must be present: a partial block would
-// disable exactly one column's moves and look like it worked.
-function hasResolvedBoardIds(projectArg) {
-  if (!projectArg || typeof projectArg !== 'object') return false
-  const ids = projectArg.optionIds
-  const filled = value => typeof value === 'string' && value.length > 0
-  if (!filled(projectArg.id) || !filled(projectArg.fieldId) || !ids || typeof ids !== 'object') return false
-  return ['backlog', 'inProgress', 'inReview', 'done'].every(key => filled(ids[key]))
 }
 
 // ── which PR belongs to a subtask ───────────────────────────────────────────
@@ -665,30 +610,6 @@ const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.starts
       'orchestrator needs args.taskScript as an absolute path to this checkout\'s workflows/task.js '
       + '(e.g. "<repo>/workflows/task.js") — there is no default, since this repo can be checked out anywhere.') })()
 
-// The board is REQUIRED. There is no boardless mode: a run that quietly stops
-// moving cards is indistinguishable from one that never had a board, and a
-// forgotten args.project once left merged subtasks in Backlog for weeks.
-//
-// Resolution happens once, before any work exists, so failing here is free —
-// no worktrees, no branches, no PRs. Card MOVES stay best-effort, because by
-// the time one runs there is a real PR that a bookkeeping hiccup must not undo.
-const projectArg = opts.project && typeof opts.project === 'object' ? opts.project : null
-if (!projectArg) {
-  throw new Error(
-    'orchestrator needs args.project (e.g. {"number":13}) so subtask cards move '
-    + 'Backlog -> In progress -> In review -> Done.')
-}
-if (opts.boardless !== undefined) {
-  throw new Error(
-    'orchestrator: args.boardless is no longer supported — the board is required. '
-    + 'A run that silently stops moving cards looks exactly like a run that never had a board.')
-}
-const statusField = (projectArg && projectArg.statusField) || 'Status'
-const optionNames = {
-  backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done',
-  ...((projectArg && projectArg.options) || {}),
-}
-
 // agent() can throw when the model returns without calling StructuredOutput —
 // a transient harness fault, not a real blocker (halted a full run,
 // 2026-08-18). Retry exactly once with an amended prompt (distinct cache key);
@@ -706,13 +627,10 @@ async function callAgent(prompt, agentOpts) {
   }
 }
 
-// ── 1. Configure — board ids BY NAME ────────────────────────────────────────
-// ── 2. Detect — raw GitHub state + verification commands; no judgement ──────
-// Started BEFORE the board lookup and awaited after it. The two share no data —
-// nothing in this prompt refers to the board — so running them in sequence just
-// added the shorter call's latency to the longer one's. They stay separate
-// dispatches on purpose: a board failure must not be able to stop a milestone,
-// and merging them would put every board hiccup on the critical path.
+// ── Detect — raw GitHub state + verification commands; no judgement ─────────
+// Dispatched before phase('Configure') is even reached and awaited after it —
+// there is no longer anything for Configure to do first, so this is simply
+// started as early as possible.
 //
 // Each call passes its phase explicitly, so the progress grouping does not
 // depend on which one happens to be running when phase() was last called.
@@ -794,34 +712,9 @@ const detectPromise = callAgent(detectPrompt,
 
 phase('Configure')
 
-let board = null
-const makeBoard = (id, fieldId, optionIds) =>
-  ({ id, fieldId, optionIds, optionNames, statusField, number: projectArg && projectArg.number })
-
-if (hasResolvedBoardIds(projectArg)) {
-  // Nothing to look up. Ids are stable for the life of a board, so a caller
-  // that has them (from a previous run's log, or the setup-project skill)
-  // skips this dispatch entirely.
-  board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
-  log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
-} else if (Number.isInteger(Number(projectArg.number))) {
-  // There is no resolver any more: brd uses one id type (a UUID string)
-  // everywhere, so a GitHub project *number* has nothing to be translated
-  // into. Without this guard, a caller who still passes {number} would fall
-  // through with unresolved ids and fail later, deeper in the run.
-  throw new Error(
-    'orchestrator: `project` was given as a number, but there is no resolver for GitHub project '
-    + 'numbers any more. Pass the board ids explicitly as a resolved '
-    + '{id, fieldId, optionIds} block.')
-} else {
-  throw new Error(
-    'orchestrator: `project` was passed without a usable `number` and without a complete '
-    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other.')
-}
-
-// Detect was started before the board lookup; collect it now. A rejection is
-// rethrown with its original error — unlike the board, a failed census means
-// nothing can be dispatched safely.
+// Detect was already dispatched (see above); collect it now. A rejection is
+// rethrown with its original error — a failed census means nothing can be
+// dispatched safely.
 const detectOutcome = await detectPromise
 if (detectOutcome.error) throw detectOutcome.error
 if (!detectOutcome.value) throw new Error('detect agent died')
@@ -923,7 +816,6 @@ if (DRY) {
   return {
     repo, milestone, milestoneTitle: census.milestoneTitle, baseBranch,
     mode: 'dryRun',
-    board: { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds },
     verification,
     plan: levels.map((levelStories, levelIndex) => ({
       level: levelIndex,
@@ -943,7 +835,7 @@ if (DRY) {
       }),
     })),
     alreadyDone: census.stories.filter(story => remainingSubtasks(story).length === 0).map(story => story.id),
-    note: 'dryRun: nothing was dispatched, no board or GitHub write happened. One worktree/branch/PR per SUBTASK, '
+    note: 'dryRun: nothing was dispatched, no GitHub write happened. One worktree/branch/PR per SUBTASK, '
       + 'dispatched sequentially within each story. Each PR targets its stack parent (prTargets), NOT the milestone base — '
       + 'verify that column before a real run. Nothing is ever merged.',
   }
@@ -998,17 +890,15 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     // PR target — which is exactly what stacking needs, and why task.js required
     // no change for this mode.
     //
-    // `issue` still carries the value task.js keys its own work on — it is a
-    // card id now, not a GitHub issue number. Renaming this argument itself is
-    // task.js's own re-key, out of this task's scope; this passes the right
-    // VALUE under the name task.js still reads today.
+    // task.js now takes a brd card id (`card`) and the branch this run already
+    // derived (`branch`), rather than a GitHub issue number and its own
+    // board-move config — it moves the card itself via rollup.mjs.
     dispatched = await workflow({ scriptPath: taskScript }, {
-      repo, repoDir, issue: subtask.id, baseBranch: stackBase, branchPrefix, coauthor, verification,
+      repo, repoDir, card: subtask.id, branch, baseBranch: stackBase, branchPrefix, coauthor, verification,
       // Same checkout's scripts/, derived from detectScript so there is one
       // path to get wrong instead of two.
       scriptsDir: detectScript.slice(0, detectScript.lastIndexOf('/')),
       triggerAgentType,
-      project: { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds, optionNames, statusField },
     })
   } catch (err) {
     thrown = err
