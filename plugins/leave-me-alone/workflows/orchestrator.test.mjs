@@ -25,12 +25,14 @@ const {
   prMatchesSubtask, matchPr, attachPullRequests, dropCommandsNamingMissingPaths,
   resolveBoardIds, hasResolvedBoardIds,
   shortId, slugify, taskStem, taskBranch,
+  resolveMilestone, resolveBranchPrefix,
 } = await loadPure(join(HERE, 'orchestrator.js'), [
   'isSubtaskDone', 'remainingSubtasks', 'computeLevels',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
   'prMatchesSubtask', 'normalizePr', 'matchPr', 'attachPullRequests',
   'dropCommandsNamingMissingPaths', 'resolveBoardIds', 'hasResolvedBoardIds',
   'shortId', 'slugify', 'taskStem', 'taskBranch',
+  'resolveMilestone', 'resolveBranchPrefix', 'shellQuote',
 ])
 
 // A card id is a UUID string; taskBranch() (inside orchestrator.js) derives its
@@ -71,36 +73,41 @@ test('the inlined naming copy in orchestrator.js agrees with scripts/naming.mjs'
 })
 
 // ── doneness (stacked mode: an open PR means DONE) ──────────────────────────
-// isSubtaskDone reads only `pr` and `state` — no id involved.
+// isSubtaskDone/isStoryClosed read only `pr` and `status` — the shape
+// flattenMilestone() (census.mjs) actually emits. There is no `state`
+// anywhere in the census; fixtures built as `state` would model a shape the
+// census can never produce and hide a dead contract (see the finding this
+// fixed: orchestrator.js used to read a `state` field nothing emitted, so its
+// doneness protection always evaluated false).
 
-const sub = (pr = null, state = 'OPEN') => ({ state, pr })
+const sub = (pr = null, status = 'todo') => ({ status, pr })
 const openPr = (n, ref, base = 'main') => ({ number: n, state: 'OPEN', merged: false, ref, base })
 
 test('an OPEN PR counts as done — nothing merges in stacked mode', () => {
   assert.equal(isSubtaskDone(sub(openPr(9, 'task-1'))), true)
 })
 
-test('a closed issue with NO PR ever found counts as done', () => {
-  assert.equal(isSubtaskDone(sub(null, 'CLOSED')), true)
+test('a card marked done with NO PR ever found counts as done', () => {
+  assert.equal(isSubtaskDone(sub(null, 'done')), true)
 })
 
-test('an open issue with no PR is NOT done', () => {
-  assert.equal(isSubtaskDone(sub(null, 'OPEN')), false)
+test('a card still in progress with no PR is NOT done', () => {
+  assert.equal(isSubtaskDone(sub(null, 'todo')), false)
 })
 
-test("a rejected wrong-base PR is NOT done, even on a closed issue", () => {
+test("a rejected wrong-base PR is NOT done, even on a card marked done", () => {
   // The sentinel is a string, not an object — this is the #1133 guard, and it
   // matters more now that an open PR alone counts as done.
-  assert.equal(isSubtaskDone(sub('wrong-base', 'CLOSED')), false)
-  assert.equal(isSubtaskDone(sub('wrong-base', 'OPEN')), false)
+  assert.equal(isSubtaskDone(sub('wrong-base', 'done')), false)
+  assert.equal(isSubtaskDone(sub('wrong-base', 'todo')), false)
 })
 
-test('remainingSubtasks drops done ones and skips a CLOSED story entirely', () => {
-  const s1 = { id: uid('10000001'), title: 'a', state: 'OPEN', pr: openPr(9, 'task-1') }
-  const s2 = { id: uid('10000002'), title: 'b', state: 'OPEN', pr: null }
-  const story = { id: uid('10000000'), state: 'OPEN', blockedBy: [], subtasks: [s1, s2] }
+test('remainingSubtasks drops done ones and skips a story marked done entirely', () => {
+  const s1 = { id: uid('10000001'), title: 'a', status: 'todo', pr: openPr(9, 'task-1') }
+  const s2 = { id: uid('10000002'), title: 'b', status: 'todo', pr: null }
+  const story = { id: uid('10000000'), status: 'todo', blockedBy: [], subtasks: [s1, s2] }
   assert.deepEqual(remainingSubtasks(story).map(s => s.id), [s2.id])
-  assert.deepEqual(remainingSubtasks({ ...story, state: 'CLOSED' }), [])
+  assert.deepEqual(remainingSubtasks({ ...story, status: 'done' }), [])
 })
 
 test('subtasks keep the order the census gave them — no re-sorting by title', () => {
@@ -112,18 +119,18 @@ test('subtasks keep the order the census gave them — no re-sorting by title', 
   // this test used, cannot distinguish "kept the census order" from "sorted
   // and happened not to move" — the old orderSubtasks() would have passed it
   // too.)
-  const s1 = { id: uid('10000003'), title: '1.2 quoting', state: 'OPEN', pr: null }
-  const s2 = { id: uid('10000004'), title: '1.1 write rows', state: 'OPEN', pr: null }
-  const story = { id: uid('10000000'), state: 'OPEN', blockedBy: [], subtasks: [s1, s2] }
+  const s1 = { id: uid('10000003'), title: '1.2 quoting', status: 'todo', pr: null }
+  const s2 = { id: uid('10000004'), title: '1.1 write rows', status: 'todo', pr: null }
+  const story = { id: uid('10000000'), status: 'todo', blockedBy: [], subtasks: [s1, s2] }
   assert.deepEqual(remainingSubtasks(story).map(s => s.id), [s1.id, s2.id])
 })
 
 // ── levels ──────────────────────────────────────────────────────────────────
 
 test('independent stories land in one level; a blocked story in the next', () => {
-  const A = { id: uid('20000001'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('20000011'), title: 'a', state: 'OPEN' }] }
-  const B = { id: uid('20000002'), state: 'OPEN', blockedBy: [A.id], subtasks: [{ id: uid('20000012'), title: 'b', state: 'OPEN' }] }
-  const C = { id: uid('20000003'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('20000013'), title: 'c', state: 'OPEN' }] }
+  const A = { id: uid('20000001'), status: 'todo', blockedBy: [], subtasks: [{ id: uid('20000011'), title: 'a', status: 'todo' }] }
+  const B = { id: uid('20000002'), status: 'todo', blockedBy: [A.id], subtasks: [{ id: uid('20000012'), title: 'b', status: 'todo' }] }
+  const C = { id: uid('20000003'), status: 'todo', blockedBy: [], subtasks: [{ id: uid('20000013'), title: 'c', status: 'todo' }] }
   const levels = computeLevels([A, B, C])
   assert.deepEqual(levels.map(l => l.map(s => s.id)), [[A.id, C.id], [B.id]])
 })
@@ -132,16 +139,16 @@ test('computeLevels preserves the census order within a level — it does not re
   // Passed in an order a naive alphabetical (or any other) re-sort of the ids
   // would disturb: 'cccccccc', 'aaaaaaaa', 'bbbbbbbb' is not ascending, so a
   // reintroduced sort would visibly reorder this level.
-  const C = { id: uid('cccccccc'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('c0000001'), title: 'c', state: 'OPEN' }] }
-  const A = { id: uid('aaaaaaaa'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('a0000001'), title: 'a', state: 'OPEN' }] }
-  const B = { id: uid('bbbbbbbb'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('b0000001'), title: 'b', state: 'OPEN' }] }
+  const C = { id: uid('cccccccc'), status: 'todo', blockedBy: [], subtasks: [{ id: uid('c0000001'), title: 'c', status: 'todo' }] }
+  const A = { id: uid('aaaaaaaa'), status: 'todo', blockedBy: [], subtasks: [{ id: uid('a0000001'), title: 'a', status: 'todo' }] }
+  const B = { id: uid('bbbbbbbb'), status: 'todo', blockedBy: [], subtasks: [{ id: uid('b0000001'), title: 'b', status: 'todo' }] }
   const levels = computeLevels([C, A, B])
   assert.deepEqual(levels.map(l => l.map(s => s.id)), [[C.id, A.id, B.id]])
 })
 
 test('a story whose blocker has no remaining work is unblocked immediately', () => {
-  const A = { id: uid('20000004'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('20000014'), title: 'a', state: 'OPEN', pr: openPr(9, 'task-1') }] }
-  const B = { id: uid('20000005'), state: 'OPEN', blockedBy: [A.id], subtasks: [{ id: uid('20000015'), title: 'b', state: 'OPEN' }] }
+  const A = { id: uid('20000004'), status: 'todo', blockedBy: [], subtasks: [{ id: uid('20000014'), title: 'a', status: 'todo', pr: openPr(9, 'task-1') }] }
+  const B = { id: uid('20000005'), status: 'todo', blockedBy: [A.id], subtasks: [{ id: uid('20000015'), title: 'b', status: 'todo' }] }
   assert.deepEqual(computeLevels([A, B]).map(l => l.map(s => s.id)), [[B.id]])
 })
 
@@ -206,16 +213,16 @@ test('a blocked story roots on its blocker TIP, not on the base', () => {
 })
 
 test('a DONE predecessor still supplies the base (full list, not remaining)', () => {
-  const s1 = { id: uid('40000031'), title: 'a', pr: openPr(9, 'task-1'), state: 'OPEN' }
-  const s2 = { id: uid('40000032'), title: 'b', pr: null, state: 'OPEN' }
+  const s1 = { id: uid('40000031'), title: 'a', pr: openPr(9, 'task-1'), status: 'todo' }
+  const s2 = { id: uid('40000032'), title: 'b', pr: null, status: 'todo' }
   const A = { id: uid('40000030'), blockedBy: [], subtasks: [s1, s2] }
   assert.equal(stackBases(A, mk([A]), PREFIX, BASE).get(s2.id), `${PREFIX}/task-a-40000031`)
 })
 
 test('a DONE blocker still supplies its tip — done does not mean landed', () => {
-  const s1 = { id: uid('40000041'), title: 'a', pr: openPr(9, 'task-1'), state: 'OPEN' }
+  const s1 = { id: uid('40000041'), title: 'a', pr: openPr(9, 'task-1'), status: 'todo' }
   const A = { id: uid('40000040'), blockedBy: [], subtasks: [s1] }
-  const s2 = { id: uid('40000051'), title: 'b', state: 'OPEN' }
+  const s2 = { id: uid('40000051'), title: 'b', status: 'todo' }
   const B = { id: uid('40000050'), blockedBy: [A.id], subtasks: [s2] }
   assert.equal(storyRoot(B, mk([A, B]), PREFIX, BASE), `${PREFIX}/task-a-40000041`)
 })
@@ -227,8 +234,8 @@ test('the geometry is derived from the graph, never from a PR head ref', () => {
   // the bases, and that circularity produced two bugs in one afternoon.
   // matchPr() is where a stray branch gets noticed, and it halts rather than
   // quietly re-shaping the stack.
-  const s1 = { id: uid('40000061'), title: 'a', pr: openPr(9, 'aq-1'), state: 'OPEN' }
-  const s2 = { id: uid('40000062'), title: 'b', pr: null, state: 'OPEN' }
+  const s1 = { id: uid('40000061'), title: 'a', pr: openPr(9, 'aq-1'), status: 'todo' }
+  const s2 = { id: uid('40000062'), title: 'b', pr: null, status: 'todo' }
   const A = { id: uid('40000060'), blockedBy: [], subtasks: [s1, s2] }
   assert.equal(stackBases(A, mk([A]), PREFIX, BASE).get(s2.id), `${PREFIX}/task-a-40000061`)
 })
@@ -424,8 +431,8 @@ const attach = (stories, pulls, failed = false) =>
   attachPullRequests(stories, pulls, failed, PREFIX, BASE)
 
 test('every branch and base comes from the graph, with no PR consulted', () => {
-  const t1 = { id: uid('50000001'), title: 'first', state: 'OPEN' }
-  const t2 = { id: uid('50000002'), title: 'second', state: 'OPEN' }
+  const t1 = { id: uid('50000001'), title: 'first', status: 'todo' }
+  const t2 = { id: uid('50000002'), title: 'second', status: 'todo' }
   const story = { id: uid('50000000'), blockedBy: [], subtasks: [t1, t2] }
   const branch1 = `${PREFIX}/task-first-50000001`
   const branch2 = `${PREFIX}/task-second-50000002`
@@ -444,7 +451,7 @@ test('a title edit does not orphan an open PR — the short id still matches und
   // literal string == against the freshly-derived branch (which now carries
   // the CURRENT slug), an edited title would miss, fall through to the
   // near-miss path, and report real work as unstarted.
-  const t1 = { id: uid('50000041'), title: 'first', state: 'OPEN' }   // title edited after the PR opened
+  const t1 = { id: uid('50000041'), title: 'first', status: 'todo' }   // title edited after the PR opened
   const story = { id: uid('50000040'), blockedBy: [], subtasks: [t1] }
   const staleBranch = `${PREFIX}/task-was-first-50000041`             // same short id, stale slug
   const notes = attach([story], [
@@ -455,8 +462,8 @@ test('a title edit does not orphan an open PR — the short id still matches und
 })
 
 test('a whole stack built under an older prefix halts on its first merged PR', () => {
-  const t1 = { id: uid('50000011'), title: 'first', state: 'CLOSED' }
-  const t2 = { id: uid('50000012'), title: 'second', state: 'OPEN' }
+  const t1 = { id: uid('50000011'), title: 'first', status: 'done' }
+  const t2 = { id: uid('50000012'), title: 'second', status: 'todo' }
   const story = { id: uid('50000010'), blockedBy: [], subtasks: [t1, t2] }
   // Near miss: some OTHER branch that merely ends with the subtask's short id —
   // the signature of a changed branchPrefix, regardless of slug.
@@ -469,9 +476,9 @@ test('a whole stack built under an older prefix halts on its first merged PR', (
 })
 
 test('the first subtask of a blocked story roots on its blocker tip', () => {
-  const ta = { id: uid('50000021'), title: 'a', state: 'OPEN' }
+  const ta = { id: uid('50000021'), title: 'a', status: 'todo' }
   const a = { id: uid('50000020'), blockedBy: [], subtasks: [ta] }
-  const tb = { id: uid('50000031'), title: 'b', state: 'OPEN' }
+  const tb = { id: uid('50000031'), title: 'b', status: 'todo' }
   const b = { id: uid('50000030'), blockedBy: [a.id], subtasks: [tb] }
   const branchA = `${PREFIX}/task-a-50000021`
   attach([a, b], [
@@ -482,8 +489,8 @@ test('the first subtask of a blocked story roots on its blocker tip', () => {
 })
 
 test('a failed lookup marks every subtask unknown and rejects nothing', () => {
-  const t1 = { id: uid('50000041'), title: 'a', state: 'OPEN' }
-  const t2 = { id: uid('50000042'), title: 'b', state: 'OPEN' }
+  const t1 = { id: uid('50000041'), title: 'a', status: 'todo' }
+  const t2 = { id: uid('50000042'), title: 'b', status: 'todo' }
   const story = { id: uid('50000040'), blockedBy: [], subtasks: [t1, t2] }
   const notes = attach([story], [], true)
   assert.deepEqual(notes, [])
@@ -492,17 +499,17 @@ test('a failed lookup marks every subtask unknown and rejects nothing', () => {
 
 test('multi-blocker shapes throw even when the PR lookup failed', () => {
   // The shape is a human decision and must surface regardless of API health.
-  const a = { id: uid('50000050'), blockedBy: [], subtasks: [{ id: uid('50000051'), title: 'a', state: 'OPEN' }] }
-  const b = { id: uid('50000060'), blockedBy: [], subtasks: [{ id: uid('50000061'), title: 'b', state: 'OPEN' }] }
-  const c = { id: uid('50000070'), blockedBy: [a.id, b.id], subtasks: [{ id: uid('50000071'), title: 'c', state: 'OPEN' }] }
+  const a = { id: uid('50000050'), blockedBy: [], subtasks: [{ id: uid('50000051'), title: 'a', status: 'todo' }] }
+  const b = { id: uid('50000060'), blockedBy: [], subtasks: [{ id: uid('50000061'), title: 'b', status: 'todo' }] }
+  const c = { id: uid('50000070'), blockedBy: [a.id, b.id], subtasks: [{ id: uid('50000071'), title: 'c', status: 'todo' }] }
   assert.throws(() => attach([a, b, c], [], true), /blocked by 2 stories/)
 })
 
 // ── milestone-scoped branch prefixes ─────────────────────────────────────────
 
 test('a milestone-scoped prefix groups branches without disturbing the geometry', () => {
-  const t1 = { id: uid('60000001'), title: 'first', state: 'OPEN' }
-  const t2 = { id: uid('60000002'), title: 'second', state: 'OPEN' }
+  const t1 = { id: uid('60000001'), title: 'first', status: 'todo' }
+  const t2 = { id: uid('60000002'), title: 'second', status: 'todo' }
   const story = { id: uid('60000000'), blockedBy: [], subtasks: [t1, t2] }
   const bases = stackBases(story, mk([story]), 'm12', BASE)
   assert.equal(bases.get(t1.id), 'main')
@@ -622,4 +629,43 @@ test('a PARTIAL id block does not count', () => {
 test('a bare number is not a resolved block', () => {
   assert.equal(hasResolvedBoardIds({ number: 13 }), false)
   for (const bad of [null, undefined, 'PVT_1', 13]) assert.equal(hasResolvedBoardIds(bad), false)
+})
+
+// ── resolveMilestone / resolveBranchPrefix ───────────────────────────────────
+// A milestone may be a positive integer, a brd card id, or a title
+// substring (census.mjs's findMilestone() accepts all three and fails loudly
+// on ambiguity). Only the numeric form has a safe default branchPrefix — a
+// title fed through `m${milestone}` naively would produce an invalid git ref
+// like `mMilestone 12: CSV export`.
+
+test('a positive integer milestone is numeric and defaults its branchPrefix', () => {
+  assert.deepEqual(resolveMilestone(12), { milestone: 12, isNumeric: true })
+  assert.deepEqual(resolveMilestone('12'), { milestone: 12, isNumeric: true })
+  assert.equal(resolveBranchPrefix(undefined, 12, true), 'm12')
+})
+
+test('a card id or title substring is not numeric', () => {
+  const cardId = 'aaaaaaaa-0000-4000-8000-000000000000'
+  assert.deepEqual(resolveMilestone(cardId), { milestone: cardId, isNumeric: false })
+  assert.deepEqual(resolveMilestone('CSV export'), { milestone: 'CSV export', isNumeric: false })
+})
+
+test('a missing/empty milestone throws rather than silently addressing nothing', () => {
+  for (const bad of [undefined, null, '', '   ']) {
+    assert.throws(() => resolveMilestone(bad), /needs args\.milestone/)
+  }
+})
+
+test('a non-numeric milestone with no branchPrefix throws a clear, actionable error', () => {
+  assert.throws(
+    () => resolveBranchPrefix(undefined, 'CSV export', false),
+    /needs args\.branchPrefix.*"CSV export".*not a positive integer/s)
+})
+
+test('a non-numeric milestone WITH an explicit branchPrefix is accepted verbatim', () => {
+  assert.equal(resolveBranchPrefix('csv-export', 'CSV export', false), 'csv-export')
+})
+
+test('an explicit branchPrefix wins even for a numeric milestone', () => {
+  assert.equal(resolveBranchPrefix('custom', 12, true), 'custom')
 })

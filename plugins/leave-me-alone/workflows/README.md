@@ -29,7 +29,7 @@ the old scripts, and an old `orchestrator.js` has no idea it is old. The hook st
 `~/.claude/workflows/.synced-version` and says so when the version moves, but it cannot close the
 gap — a hook cannot run before the update it reacts to. **Update, restart, then run a milestone.**
 
-**Requires `bun`, `gh` (authenticated with the `project` scope), `git`, and the `superpowers`
+**Requires `bun`, `gh` (authenticated with the `project` scope), `git`, `brd`, and the `superpowers`
 plugin.** The helper scripts are invoked as `bun <script>.mjs`, and `superpowers:writing-plans`
 defines the plan format Implement and Review both assume — Plan reports whether it actually invoked
 that skill, and the run stops if it did not. `node` is needed only for this repo's test suite. A GitHub Projects v2 board — there is no boardless mode. Board setup and the
@@ -56,7 +56,7 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
   nonce: "<current timestamp>",
   taskScript:    "<repo>/workflows/task.js",       // required, absolute
   detectScript:  "<repo>/scripts/detect.mjs",      // required, absolute
-  project: { number: 13 },                          // or the resolved {id, fieldId, optionIds}
+  project: { id: "PVT_…", fieldId: "PVTSSF_…", optionIds: { backlog: "…", inProgress: "…", inReview: "…", done: "…" } },
   verification: { fullSuite: ["npm test"], typecheck: "", lint: [] },
   dryRun: true,
 })
@@ -67,7 +67,7 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 | `repo`, `repoDir`, `milestone`, `baseBranch` | yes | no defaults; `baseBranch` is never guessed |
 | `nonce` | yes | busts the Detect cache so a re-run re-reads GitHub |
 | `taskScript`, `detectScript` | yes | absolute paths; this repo can be checked out anywhere |
-| `project` | yes | `{number}` or `{id, fieldId, optionIds}`. No boardless mode |
+| `project` | yes | resolved `{id, fieldId, optionIds}` only — a bare `{number}` fails at launch. No boardless mode |
 | `verification` | no | supply it and Detect becomes a pure trigger |
 | `branchPrefix` | no | defaults to `m<milestone>`. **Constant for a milestone's life** |
 | `maxConcurrentStories` | no | default 4 |
@@ -165,7 +165,9 @@ wrong base counts as **not** done, deliberately.
   title. Matching keys on the short id alone, so an edited card title never orphans its PR. A merged
   PR found under a different name halts the run rather than being re-implemented.
 - **Subtask order is the PR targets.** Reordering after PRs exist re-points the bases and those PRs
-  read as wrong-base. Give every subtask an ordinal prefix.
+  read as wrong-base. Order comes from the `blocked_by` edges between sibling cards — chain a story's
+  subtasks with `--blocked-by <previous subtask id>`. Ordinal title prefixes are optional decoration;
+  nothing parses them.
 - **Only one blocker per story.** A stack roots on one parent; two stops the run.
 - **The shared checkout is touched once**, by `detect.mjs`, before dispatch. `task.js` is forbidden
   from running `fetch` or `worktree prune` against it — several subtasks share that `.git`, and a

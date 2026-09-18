@@ -40,8 +40,10 @@ gh project list --owner OWNER --format json --jq '.projects[] | "\(.number)\t\(.
 gh project create --owner OWNER --title "REPO delivery"
 ```
 
-Note the **project number** (the small integer in the URL, e.g. `/users/OWNER/projects/12`), not the
-`PVT_…` node id. The number is what you pass as `project.number`; the workflow resolves the node id.
+Note the **project number** (the small integer in the URL, e.g. `/users/OWNER/projects/12`) — you'll
+need it below to resolve the node id and field/option ids yourself. There is no resolver in the
+workflow any more: `project` must be passed as a resolved `{id, fieldId, optionIds}` block (see
+"Making both agents deterministic"). A bare `project.number` fails at launch.
 
 ## 2. The Status single-select field
 
@@ -61,16 +63,10 @@ query($o:String!,$n:Int!){ user(login:$o){ projectV2(number:$n){ id title
 
 New boards ship a `Status` field with `Todo` / `In Progress` / `Done`. Two ways forward:
 
-**A — tell the workflow your names** (safest, zero mutation):
-
-```jsonc
-"project": { "number": 12, "statusField": "Status",
-             "options": { "backlog": "Todo", "inProgress": "In Progress",
-                          "inReview": "In review", "done": "Done" } }
-```
-
-Every option you name must still *exist* — the workflow needs a distinct "in review" column,
-so add one if there is none.
+**A — keep your own names** (safest, zero mutation): note which field and option names the board
+already uses (they need not match the defaults), confirm a distinct "in review" column exists (add
+one if not), then resolve THOSE names into the `{id, fieldId, optionIds}` block below — there is no
+resolver in the workflow to hand names to; the ids must already be resolved before you pass `project`.
 
 **B — set the options explicitly** (do this while the board is still empty):
 
@@ -137,16 +133,17 @@ id=$(gh api repos/OWNER/REPO/issues/<CHILD> --jq .id)
 gh api -X POST repos/OWNER/REPO/issues/<STORY>/sub_issues -F sub_issue_id=$id
 ```
 
-**Ordering — give every subtask an ordinal prefix.** Order decides the stack geometry: branch names
-are derived (`<branchPrefix>/task-<slug>-<shortid>`, matched by short id alone) and each subtask's PR targets the previous subtask's
-branch, so the order *is* the set of PR targets. The workflows detect an ordinal prefix like
-`L2.3.1 …` / `1.2 …` automatically; a repo with a different convention passes `ordinalPattern` (a JS
-regex string whose **first capture group** is the ordinal).
+**Ordering — chain every subtask with `--blocked-by <previous subtask id>`.** Order decides the stack
+geometry: branch names are derived (`<branchPrefix>/task-<slug>-<shortid>`, matched by short id alone)
+and each subtask's PR targets the previous subtask's branch, so the order *is* the set of PR targets.
+That order comes from the `blocked_by` edges between sibling cards, not from the title — chain a
+story's subtasks (subtask 2 `--blocked-by` subtask 1, subtask 3 `--blocked-by` subtask 2, …) so the
+board states the order rather than encoding it in text. Ordinal-looking title prefixes (`11.1 `,
+`1.2 `) are optional decoration now — nothing parses them.
 
-Without any ordinal, order falls back to the order the `sub_issues` endpoint returns — creation
-order — which detaching and re-attaching a child will change. That silently re-shapes the stack
-between runs, and PRs opened against the old shape then read as `wrong-base`. It works, but only for
-a milestone nobody ever touches.
+Without a chain, independent siblings keep creation order, which detaching and re-attaching a child
+can change. That silently re-shapes the stack between runs, and PRs opened against the old shape then
+read as `wrong-base`. It works, but only for a milestone nobody ever touches.
 
 **`branchPrefix` is part of the milestone's identity.** It defaults to `m<milestone>`, so a subtask
 card builds on `m12/task-<slug>-<shortid>` in worktree `.claude/worktrees/m12/task-<slug>-<shortid>`.
@@ -220,16 +217,21 @@ Workflow({ name: "orchestrator" }, args: {
   nonce: "<current timestamp>", dryRun: true,
   taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
   detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
-  project: { number: PROJ }
+  project: { id: "PVT_…", fieldId: "PVTSSF_…",
+             optionIds: { backlog: "…", inProgress: "…", inReview: "…", done: "…" } }
 })
 ```
 
-It returns the resolved board ids, the discovered test/lint commands, the dependency levels, and the
-ordered subtask list per story — each with a `prTargets` field naming the branch that subtask's PR
-will target. **Read that column.** Each subtask should target the previous one's branch, and each
-story's first subtask should target its blocker's tip (or `baseBranch` if it has none). A story
-rooted at `baseBranch` when it has a blocker means the edge is missing, and the story will be built
-against a base that has never seen the code it depends on.
+There is no resolver — `project` must already be this resolved `{id, fieldId, optionIds}` block (see
+"Making both agents deterministic" below for how to get it); a bare `project: { number: PROJ }` fails
+at launch, before anything is dispatched.
+
+It returns the board ids you supplied (unchanged), the discovered test/lint commands, the dependency
+levels, and the ordered subtask list per story — each with a `prTargets` field naming the branch that
+subtask's PR will target. **Read that column.** Each subtask should target the previous one's branch,
+and each story's first subtask should target its blocker's tip (or `baseBranch` if it has none). A
+story rooted at `baseBranch` when it has a blocker means the edge is missing, and the story will be
+built against a base that has never seen the code it depends on.
 
 If the levels, the subtask order, or the targets look wrong, fix the board — not the workflow.
 
@@ -319,17 +321,15 @@ and Detect's prompt drops to the one trigger line:
 To inspect a board by hand — or to debug a run that came back wrong — the same script runs standalone:
 
 ```bash
-bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone 12
+bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone "<card id or title substring>"
 ```
 
-## Skipping the id lookup
+## The board ids are stable — resolve them once
 
-Resolving `{number: 12}` into node ids costs one agent dispatch per run. The ids never change, so you
-can hand them over instead and skip it. Every successful run logs them ready to paste:
-
-```
-board ids for reuse — pass these back to skip this lookup next run: {"id":"PVT_…","fieldId":"PVTSSF_…","optionIds":{…}}
-```
+There is no id lookup left to skip: `project` must always be passed as a resolved
+`{id, fieldId, optionIds}` block (see the graphql calls in step 1 and step 2 above to get them). The
+ids never change once resolved, so paste the same block into every run of this milestone rather than
+re-deriving it:
 
 ```jsonc
 "project": { "id": "PVT_…", "fieldId": "PVTSSF_…",
@@ -337,22 +337,22 @@ board ids for reuse — pass these back to skip this lookup next run: {"id":"PVT
 ```
 
 All four option ids must be present — a partial block is rejected rather than half-applied, because
-disabling exactly one column's moves looks like it worked. Column names are matched **in the script,
-exactly**, so a board renamed since you copied the ids will move cards to whatever those ids now
-point at: re-resolve from `number` after any column change.
+disabling exactly one column's moves looks like it worked. Column names are matched **exactly** by
+whatever resolved these ids — so a board renamed since you resolved them will move cards to whatever
+those ids now point at: re-resolve after any column change.
 
 ## Gotchas
 
 | Trap | Reality |
 |---|---|
-| Passing `PVT_…` as `project.number` | `number` is the small integer from the URL. The node id is resolved for you. |
+| Passing `project` as a bare `{number: PROJ}` | There is no resolver. The run STOPS at launch — resolve `{id, fieldId, optionIds}` yourself first. |
 | Renaming Status options on a populated board | Option replacement wipes every item's Status. Re-set each card afterwards. |
-| `In Progress` vs `In progress` | Matched exactly, in the script — not by an agent. A mismatch disables the board and logs both strings, rather than resolving to a real id for the wrong column. |
-| Passing `project` with neither a `number` nor a complete id block | The run STOPS at launch. There is no boardless mode and no silent degradation. |
+| `In Progress` vs `In progress` | Matched exactly, wherever you resolve the ids — not by an agent. A mismatch means you resolved the wrong option. |
+| Passing `project` without a complete `{id, fieldId, optionIds}` block | The run STOPS at launch. There is no boardless mode and no silent degradation. |
 | Body checklists instead of sub-issues | `sub_issues` returns empty → `task` refuses the story as having nothing to sequence. |
 | Adding cards to the board later | Cards missing at resolve time are reported, never auto-added. |
 | Expecting a card per PR | One PR per **subtask**. Each subtask's card goes "In review" when its own PR opens. |
-| Expecting cards to reach "Done" | The run never merges, so nothing closes. Cards stop at "In review" and issues stay open until a human merges the stack. "Done" is still required to exist — the board resolver checks all four option names. |
+| Expecting cards to reach "Done" | The run never merges, so nothing closes. Cards stop at "In review" and issues stay open until a human merges the stack. "Done" is still required — the run checks all four option ids are present in `optionIds`. |
 | Expecting flat branch names | The default prefix is `m<milestone>`, so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme — it is used verbatim. |
 | Adopting the milestone prefix on a milestone that already has merged PRs | Those PRs sit at the old addresses. The run finds them as near misses and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
 | Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A merged PR under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |

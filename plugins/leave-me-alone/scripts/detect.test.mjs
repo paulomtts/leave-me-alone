@@ -127,6 +127,17 @@ test('detect builds its census from brd and its PR list from gh', async () => {
   assert.ok(ghCalls.every(call => call.includes('pulls')), `unexpected gh calls: ${ghCalls.join(' | ')}`)
 })
 
+test('brd is invoked exactly once — brd calls are never retried', async () => {
+  // Stated global invariant: unlike the gh PR listing (which IS retried, see
+  // below), a brd failure is real and local, so calling it more than once
+  // would silently paper over that.
+  let calls = 0
+  const runBrd = async () => { calls += 1; return JSON.stringify(TREE) }
+  await detect({ repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
+    run: fakeGh(BASE_PR_ROUTES), runBrd, git: async () => '' })
+  assert.equal(calls, 1)
+})
+
 test('a brd failure stops the run instead of yielding an empty milestone', async () => {
   const failing = async () => '{"ok": false, "error": {"type": "ProjectNotFoundError", "message": "no .brd marker found above /abs/repo"}}'
   await assert.rejects(

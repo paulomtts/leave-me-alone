@@ -11,7 +11,7 @@
 // This script has no opinions. Run it outside the sandbox and hand the JSON to
 // the orchestrator as `args.state`:
 //
-//   node scripts/detect.mjs --repo you/thing --milestone 12 > state.json
+//   node scripts/detect.mjs --repo you/thing --milestone <card id or title substring> > state.json
 //
 // Step 5 (discovering how a repo runs its tests) is deliberately NOT here: it
 // is reading comprehension over prose nobody standardised, which is the one

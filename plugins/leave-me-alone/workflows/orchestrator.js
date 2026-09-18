@@ -1,10 +1,10 @@
 export const meta = {
   name: 'orchestrator',
-  description: 'Drive a whole GitHub milestone on any repo as STACKED PULL REQUESTS: resolve the project board ids by name, compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
+  description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): take the project board ids already resolved, compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
   whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the prTargets column.',
   phases: [
-    { title: 'Configure', detail: 'project/field/option ids looked up BY NAME, plus the repo\'s own verification commands', model: 'haiku' },
-    { title: 'Detect', detail: 'stories, blockedBy edges, sub-issues, existing per-subtask PRs and their bases', model: 'haiku' },
+    { title: 'Configure', detail: 'project/field/option ids taken as given — a bare project number is refused, plus the repo\'s own verification commands', model: 'haiku' },
+    { title: 'Detect', detail: 'stories and blockedBy edges from brd, existing per-subtask PRs and their bases', model: 'haiku' },
     { title: 'Dispatch', detail: 'per-level pipeline over stories; each story\'s subtasks sequential, task.js once per subtask, stacked', model: 'sonnet' },
   ],
 }
@@ -75,7 +75,7 @@ function printableOnly(text) {
 
 // STACKED MODE: nothing merges during a run, so "done" cannot mean "merged".
 // A subtask this run has finished has an OPEN PR against its own stack parent,
-// and its issue is still open — the old rule (CLOSED issue AND merged PR) would
+// and its card is still open — the old rule (CLOSED issue AND merged PR) would
 // call every finished subtask unfinished and re-dispatch the whole stack.
 //
 // So: a subtask is done when a PR for it EXISTS against the correct base. The
@@ -84,21 +84,25 @@ function printableOnly(text) {
 // anything and must not read as done. That is the #1133 bug, and inverting this
 // rule without the base check would resurrect it immediately.
 //
-// A CLOSED issue with NO PR ever found still counts: that is work closed as
-// already-delivered or duplicate (#1145 on refactor-nori m21, delivered
-// incidentally by #1141), which must not be re-dispatched.
+// A card marked `status: 'done'` with NO PR ever found still counts: that is
+// work closed as already-delivered or duplicate (#1145 on refactor-nori m21,
+// delivered incidentally by #1141), which must not be re-dispatched.
+//
+// Reads `status` — the field flattenMilestone() (census.mjs) actually emits.
+// There is no `state` anywhere in the census; a field nothing emits is worse
+// than no check at all.
 function isSubtaskDone(subtask) {
   if (subtask.pr && typeof subtask.pr === 'object') return true
-  return String(subtask.state ?? '').toUpperCase() === 'CLOSED' && subtask.pr === null
+  return subtask.pr === null && String(subtask.status ?? '').toLowerCase() === 'done'
 }
 
-// A CLOSED story is finished, full stop — never re-dispatch its subtasks.
+// A story marked done is finished, full stop — never re-dispatch its subtasks.
 // Per-subtask doneness leans on 30-odd PR lookups; during the 2026-08-17
 // GitHub outage those returned null and closed stories were re-implemented.
-// The story's single state field can't be corrupted piecemeal, so it is the
+// The story's single status field can't be corrupted piecemeal, so it is the
 // safer gate; a story closed by mistake is reopened by hand.
 function isStoryClosed(story) {
-  return String(story.state ?? '').toUpperCase() === 'CLOSED'
+  return String(story.status ?? '').toLowerCase() === 'done'
 }
 
 // The census arrives already ordered by its blocked_by chain — no re-sorting
@@ -498,6 +502,41 @@ function dropCommandsNamingMissingPaths(commands, missingPaths) {
   return { kept, dropped }
 }
 
+// ── milestone addressing ─────────────────────────────────────────────────────
+// `milestone` may be a positive integer (a legacy numeric milestone), a brd
+// card id, or a title substring — census.mjs's findMilestone() accepts all
+// three and fails loudly on ambiguity. Only the numeric form has an
+// unambiguous branch-prefix default (`m<milestone>`); naively deriving one
+// from a title would produce an invalid git ref (`mMilestone 12: CSV
+// export`), so that default is numeric-only. resolveBranchPrefix() below
+// requires an explicit branchPrefix for anything else, rather than guessing.
+function resolveMilestone(milestoneArg) {
+  if (milestoneArg === undefined || milestoneArg === null || String(milestoneArg).trim().length === 0) {
+    throw new Error(
+      'orchestrator needs args.milestone as a positive integer, a brd card id, or a title substring, '
+      + 'e.g. args: {"repo":"owner/name","repoDir":"/abs/path","milestone":4,"baseBranch":"main","nonce":"<now>"}')
+  }
+  const asNumber = Number(milestoneArg)
+  const isNumeric = Number.isInteger(asNumber) && asNumber > 0
+  return { milestone: isNumeric ? asNumber : String(milestoneArg).trim(), isNumeric }
+}
+
+function resolveBranchPrefix(branchPrefixArg, milestone, isNumeric) {
+  if (typeof branchPrefixArg === 'string' && branchPrefixArg.length > 0) return branchPrefixArg
+  if (isNumeric) return `m${milestone}`
+  throw new Error(
+    `orchestrator needs args.branchPrefix — milestone ${JSON.stringify(milestone)} is not a positive integer, `
+    + 'so there is no safe default to derive a branch prefix from it (a title or card id would produce an '
+    + 'invalid git ref). Pass branchPrefix explicitly, e.g. "m12".')
+}
+
+// A milestone title/id can contain spaces or shell metacharacters; the trigger
+// step below hands this straight to a shell, so it must be quoted rather than
+// interpolated bare the way the numeric form always was.
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
+
 // PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
@@ -513,10 +552,7 @@ const repoDir = opts.repoDir
 if (typeof repoDir !== 'string' || !repoDir.startsWith('/')) {
   throw new Error('orchestrator needs args.repoDir as an absolute path to the checkout')
 }
-const milestoneNumber = Number(opts.milestone ?? opts.milestoneNumber)
-if (!Number.isInteger(milestoneNumber) || milestoneNumber <= 0) {
-  throw new Error('orchestrator needs a milestone NUMBER, e.g. args: {"repo":"owner/name","repoDir":"/abs/path","milestone":4,"baseBranch":"main","nonce":"<now>"}')
-}
+const { milestone, isNumeric: milestoneIsNumeric } = resolveMilestone(opts.milestone ?? opts.milestoneNumber)
 // Never defaulted: nothing maps a milestone to a branch, and guessing would
 // target the wrong integration branch.
 const baseBranch = opts.baseBranch
@@ -566,9 +602,7 @@ const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
 // explicit. Whatever it is, it must stay CONSTANT for the life of a milestone:
 // names are derived from it, so changing it points the run at addresses where
 // nothing exists (matchPr halts on a merged PR found under the old name).
-const branchPrefix = typeof opts.branchPrefix === 'string'
-  ? opts.branchPrefix
-  : `m${milestoneNumber}`
+const branchPrefix = resolveBranchPrefix(opts.branchPrefix, milestone, milestoneIsNumeric)
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 // Caps how many stories within one DAG level are in flight at once — separate
 // from the harness's own global agent() concurrency cap, which throttles
@@ -714,7 +748,7 @@ const detectVerificationStep = index => `${index}. Discover this repo's OWN veri
 // What remains is the one instruction a model still needs against its own
 // reflexes: hand the bytes back untouched rather than tidying them.
 const DETECT_TRIGGER_STEP = `Run this command and return its stdout EXACTLY as printed:
-   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --repo-dir ${repoDir} --compact
+   bun ${detectScript} --repo ${repo} --milestone ${shellQuote(milestone)} --repo-dir ${repoDir} --compact
 
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — report it, do not retry or work around it.`
 
@@ -728,14 +762,14 @@ const detectPrompt = detectSteps.length === 1
   ? `${DETECT_TRIGGER_STEP}
 
 [cache-buster, ignore: ${nonce}]`
-  : `Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+  : `Detect the remaining work on ${repo} milestone ${JSON.stringify(milestone)}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
 
 ${detectSteps.join('\n\n')}
 
 Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`
 
 const detectPromise = callAgent(detectPrompt,
-  { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', ...triggerAgent, schema: {
+  { label: `detect:${milestone}`, phase: 'Detect', model: 'haiku', ...triggerAgent, schema: {
     type: 'object',
     required: ['ok', 'stdout', ...(providedVerification ? [] : ['verification'])],
     properties: {
@@ -883,11 +917,11 @@ const suiteBlock = suiteCmds.length
   : '  (NOT DOCUMENTED — find this repo\'s real full-suite command before claiming anything passes)'
 
 const levels = computeLevels(census.stories)
-log(`milestone #${milestoneNumber} "${census.milestoneTitle || ''}": ${census.stories.length} stories, ${levels.length} dependency level(s)`)
+log(`milestone ${JSON.stringify(milestone)} "${census.milestoneTitle || ''}": ${census.stories.length} stories, ${levels.length} dependency level(s)`)
 
 if (DRY) {
   return {
-    repo, milestone: milestoneNumber, milestoneTitle: census.milestoneTitle, baseBranch,
+    repo, milestone, milestoneTitle: census.milestoneTitle, baseBranch,
     mode: 'dryRun',
     board: { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds },
     verification,
@@ -899,7 +933,7 @@ if (DRY) {
           story: story.id, title: story.title,
           root: storyRoot(story, storiesById, branchPrefix, baseBranch),
           subtasks: remainingSubtasks(story).map(subtask => ({
-            id: subtask.id, title: subtask.title, state: subtask.state,
+            id: subtask.id, title: subtask.title, status: subtask.status,
             branch: subtaskBranch(subtask, branchPrefix),
             // The whole point of a dry run in stacked mode: check this column.
             prTargets: bases.get(subtask.id) || baseBranch,
@@ -916,7 +950,7 @@ if (DRY) {
 }
 
 if (levels.length === 0) {
-  return { repo, milestone: milestoneNumber, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks' }
+  return { repo, milestone, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks' }
 }
 
 // ── halt flag ────────────────────────────────────────────────────────────────
@@ -1074,7 +1108,7 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
 // Escalation is returned, not thrown, so the payload reaches the top-level
 // session structurally intact. `halted` only stops NEW dispatch — in-flight
 // stages in the current level finish naturally.
-if (halted) return { repo, milestone: milestoneNumber, baseBranch, mode: 'stacked', ...halted, completed: results }
-return { repo, milestone: milestoneNumber, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
+if (halted) return { repo, milestone, baseBranch, mode: 'stacked', ...halted, completed: results }
+return { repo, milestone, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
   note: 'Nothing was merged. Each story is a stack of open PRs, each targeting the previous subtask\'s branch; '
     + 'merge each stack bottom-up. Subtask issues are still OPEN and their cards sit at "In review" until you do.' }
