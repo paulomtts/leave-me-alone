@@ -820,9 +820,11 @@ git commit -m "detect: read milestone structure from brd, keep PR state on gh"
 ### Task 7: re-key `orchestrator.js` from issue numbers to card ids
 
 **Files:**
-- Modify: `plugins/leave-me-alone/workflows/orchestrator.js:33-54` (delete `parseOrdinal`/`orderSubtasks`), `:99-110` (`remainingSubtasks`, `computeLevels`), `:193-235` (`storyTip`, `storyRoot`, `stackBases`)
-- Modify: `plugins/leave-me-alone/workflows/orchestrator.test.mjs`
+- Modify: `plugins/leave-me-alone/workflows/orchestrator.js:33-54` (delete `parseOrdinal`/`orderSubtasks`), `:99-110` (`remainingSubtasks`, `computeLevels`), `:193-235` (`storyTip`, `storyRoot`, `stackBases`), `:425-431` (`attachPullRequests`), `:548` (the `DEFAULT_ORDINAL` constant and `opts.ordinalPattern` read), `:868`, `:914`, `:926-930` (the dry-run table builders)
+- Modify: `plugins/leave-me-alone/workflows/orchestrator.test.mjs` — including DELETING the existing `orderSubtasks` tests (around `:40-52`), removing `orderSubtasks` from the import list (`:19`) and from the exported-surface assertion list (`:24`)
 - Test: `plugins/leave-me-alone/workflows/orchestrator.test.mjs`
+
+**Scope note (pre-flight ruling):** `ordinalPattern` and `storiesByNumber` thread through more of this file than a first reading suggests — every site listed above. Grep for both names and for `story.number` / `subtask.number` before declaring the task done; a partial re-key produces branches literally named `task-undefined` rather than an error. `attachPullRequests` must match PRs by short id, consistent with `filterPullRequests` from Task 6.
 
 **Interfaces:**
 - Consumes: the census shape from Task 4 (`story.id`, `story.blockedBy` as card ids, `story.subtasks[].id`), plus `taskBranch` from Task 2.
@@ -926,10 +928,15 @@ git commit -m "orchestrator: key the story graph by card id, drop ordinal sortin
 
 `resolve.mjs` exists only to translate a project number into GitHub's opaque GraphQL node ids. brd uses one id type everywhere, so the concept has no successor.
 
-- [ ] **Step 1: Confirm nothing still imports it**
+- [ ] **Step 1: Confirm nothing still imports it, and clear the one live reference**
 
 Run: `grep -rn "resolve.mjs\|resolveProject\|projectScript" plugins/ README.md`
-Expected: matches only in the files listed above — no live import from `detect.mjs`, `orchestrator.js` or `task.js`. If `task.js` still references `projectScript`, stop: that belongs to Phase 2 and this task must not edit it.
+
+Expected live references: `orchestrator.js:608-609` (reads `opts.projectScript`) and `orchestrator.js:768-772` (an error branch telling the caller to pass a path to `scripts/resolve.mjs`). Nothing imports the module — these are an options read and an error message.
+
+**Pre-flight ruling:** clear both here rather than leaving a guard that points at a deleted file. Delete the `projectScript` options read, and keep the guard at `:768` but change its remedy text to say the board ids must be passed explicitly as a resolved `{id, fieldId, optionIds}` block, because no resolver exists any more. **Do not delete the guard itself** — without it, a `project` given as a number would proceed with unresolved ids and fail later and worse.
+
+Leave the `project` argument and `task.js`'s board consumption alone: `task.js` still needs board ids until Phase 2 rewrites its status block. If you find a reference in `task.js`, leave it untouched — that is Phase 2's, and it is not a reason to stop.
 
 - [ ] **Step 2: Delete the files**
 
