@@ -25,35 +25,40 @@ export const meta = {
 // `args`, `agent`, `log`, `phase`, `pipeline`, or `workflow`, and it must not
 // depend on anything declared below PURE:END.
 
-// ── ordering (task.js drives one already-chosen subtask; only this script orders) ──
+// ── card identity (branch naming) ────────────────────────────────────────────
+// Mirrors scripts/naming.mjs exactly. Duplicated rather than imported: a
+// Workflow script executes in a sandbox with no module resolution (see the
+// file-level comment above), so an `import` here would break the orchestrator
+// at launch — the same reason printableOnly() below is a second copy rather
+// than a shared one. Keep this in lockstep with naming.mjs; naming.test.mjs is
+// the source of truth for its behavior.
 
-const DEFAULT_ORDINAL = '^[A-Za-z]?\\d+(?:\\.\\d+)*\\.(\\d+)\\b'
-
-function makeParseOrdinal(pattern) {
-  const ordinalRe = new RegExp(pattern)
-  return function parseOrdinal(title) {
-    const match = ordinalRe.exec(String(title ?? ''))
-    return match && match[1] !== undefined ? Number(match[1]) : null
-  }
+function shortId(cardId) {
+  if (typeof cardId !== 'string') throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  const hex = cardId.replace(/-/g, '')
+  if (!/^[0-9a-f]{32}$/i.test(hex)) throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  return hex.slice(0, 8).toLowerCase()
 }
 
-// With no ordinal-tagged title, the `sub_issues` endpoint's order (creation
-// order) IS the intended order — never re-sort by issue number. With at least
-// one tag, tagged subtasks sort by ordinal; untagged ones keep relative order
-// and sink to the end.
-function orderSubtasks(subtasks, pattern) {
-  const parseOrdinal = makeParseOrdinal(pattern || DEFAULT_ORDINAL)
-  const list = [...(subtasks ?? [])]
-  if (!list.some(subtask => parseOrdinal(subtask.title) !== null)) return list
-  return list
-    .map((subtask, index) => ({ subtask, index, ordinal: parseOrdinal(subtask.title) }))
-    .sort((a, b) => {
-      if (a.ordinal === null && b.ordinal === null) return a.index - b.index
-      if (a.ordinal === null) return 1
-      if (b.ordinal === null) return -1
-      return a.ordinal - b.ordinal || a.index - b.index
-    })
-    .map(entry => entry.subtask)
+function slugify(title, max = 24) {
+  const flat = String(title ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  if (flat.length <= max) return flat
+  const cut = flat.slice(0, max)
+  const lastDash = cut.lastIndexOf('-')
+  return (lastDash > 0 ? cut.slice(0, lastDash) : cut).replace(/-+$/g, '')
+}
+
+function taskStem(card) {
+  const slug = slugify(card && card.title)
+  const id = shortId(card && card.id)
+  return slug ? `${slug}-${id}` : id
+}
+
+function taskBranch(branchPrefix, card) {
+  return `${branchPrefix}/task-${taskStem(card)}`
 }
 
 // A script's JSON round-trips through an agent's structured output, and that
@@ -96,20 +101,23 @@ function isStoryClosed(story) {
   return String(story.state ?? '').toUpperCase() === 'CLOSED'
 }
 
-function remainingSubtasks(story, ordinalPattern) {
+// The census arrives already ordered by its blocked_by chain — no re-sorting
+// by title here, ever. A title carries no ordinal any more.
+function remainingSubtasks(story) {
   if (isStoryClosed(story)) return []
-  return orderSubtasks((story.subtasks ?? []).filter(subtask => !isSubtaskDone(subtask)), ordinalPattern)
+  return (story.subtasks ?? []).filter(subtask => !isSubtaskDone(subtask))
 }
 
-function computeLevels(stories, ordinalPattern) {
-  const doneNumbers = new Set(
-    stories.filter(story => isStoryClosed(story) || remainingSubtasks(story, ordinalPattern).length === 0)
-      .map(story => story.number),
+function computeLevels(stories) {
+  const doneIds = new Set(
+    stories.filter(story => isStoryClosed(story) || remainingSubtasks(story).length === 0)
+      .map(story => story.id),
   )
-  const pending = stories
-    .filter(story => !doneNumbers.has(story.number))
-    .sort((a, b) => a.number - b.number)
-  const pendingNumbers = new Set(pending.map(story => story.number))
+  // Card ids are opaque strings with no inherent order, unlike issue numbers —
+  // the census's own array order is the only stable order available, so
+  // pending stories keep it rather than being re-sorted.
+  const pending = stories.filter(story => !doneIds.has(story.id))
+  const pendingIds = new Set(pending.map(story => story.id))
 
   const levels = []
   const placed = new Set()
@@ -118,13 +126,13 @@ function computeLevels(stories, ordinalPattern) {
     // A dep is satisfied when the upstream story is fully done (not pending)
     // or placed in an earlier level.
     const ready = rest.filter(story => (story.blockedBy ?? [])
-      .every(dep => !pendingNumbers.has(dep) || placed.has(dep)))
+      .every(dep => !pendingIds.has(dep) || placed.has(dep)))
     if (ready.length === 0) {
-      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.number}`).join(', ')}`)
+      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.id}`).join(', ')}`)
     }
     levels.push(ready)
-    for (const story of ready) placed.add(story.number)
-    rest = rest.filter(story => !placed.has(story.number))
+    for (const story of ready) placed.add(story.id)
+    rest = rest.filter(story => !placed.has(story.id))
   }
   return levels
 }
@@ -157,27 +165,27 @@ function computeLevels(stories, ordinalPattern) {
 // stories never recurses back and never trips it. That guard only covers the
 // no-subtask fallthrough path.
 function assertNoBlockerCycles(stories) {
-  const byNumber = new Map(stories.map(story => [story.number, story]))
-  const state = new Map()   // number -> 'visiting' | 'done'
-  const walk = (number, trail) => {
-    if (state.get(number) === 'done') return
-    if (state.get(number) === 'visiting') {
-      const cycle = [...trail.slice(trail.indexOf(number)), number].map(n => `#${n}`).join(' -> ')
+  const byId = new Map(stories.map(story => [story.id, story]))
+  const state = new Map()   // id -> 'visiting' | 'done'
+  const walk = (id, trail) => {
+    if (state.get(id) === 'done') return
+    if (state.get(id) === 'visiting') {
+      const cycle = [...trail.slice(trail.indexOf(id)), id].map(n => `#${n}`).join(' -> ')
       throw new Error(`orchestrator: dependency cycle among stories ${cycle} — no stack can be rooted until it is broken`)
     }
-    state.set(number, 'visiting')
-    for (const dep of byNumber.get(number)?.blockedBy ?? []) {
-      if (byNumber.has(dep)) walk(dep, [...trail, number])
+    state.set(id, 'visiting')
+    for (const dep of byId.get(id)?.blockedBy ?? []) {
+      if (byId.has(dep)) walk(dep, [...trail, id])
     }
-    state.set(number, 'done')
+    state.set(id, 'done')
   }
-  for (const story of stories) walk(story.number, [])
+  for (const story of stories) walk(story.id, [])
 }
 
-// A subtask's branch is DERIVED, never discovered. The issue number is
-// immutable, unique within the repo, and already the identity everything else
-// uses, so branch = prefix + number is reproducible from the graph alone and
-// needs no lookup.
+// A subtask's branch is DERIVED, never discovered. The card id is immutable,
+// unique, and already the identity everything else uses, so branch =
+// taskBranch(prefix, card) is reproducible from the graph alone and needs no
+// lookup.
 //
 // An earlier version preferred a PR's real head ref, to survive a run whose
 // branchPrefix had changed. That made the geometry depend on the PRs and the
@@ -186,27 +194,27 @@ function assertNoBlockerCycles(stories) {
 // prefix is now treated as part of the milestone's identity: matchPr() reports
 // a merged PR under some OTHER name rather than silently ignoring it.
 function subtaskBranch(subtask, branchPrefix) {
-  return `${branchPrefix}${subtask.number}`
+  return taskBranch(branchPrefix, subtask)
 }
 
 // The branch a story's stack ends on — what a dependent story roots from.
-function storyTip(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen = new Set()) {
-  const ordered = orderSubtasks(story.subtasks ?? [], ordinalPattern)
+function storyTip(story, storiesById, branchPrefix, baseBranch, seen = new Set()) {
+  const ordered = story.subtasks ?? []
   if (ordered.length > 0) return subtaskBranch(ordered[ordered.length - 1], branchPrefix)
   // A story with no subtasks contributes no branch; fall through to its own root.
-  return storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen)
+  return storyRoot(story, storiesById, branchPrefix, baseBranch, seen)
 }
 
 // Where a story's stack starts. Returns a branch name, or throws with a message
 // meant for a human when the shape is one this cannot decide.
-function storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen = new Set()) {
-  if (seen.has(story.number)) {
-    throw new Error(`orchestrator: dependency cycle reached story #${story.number} while computing its stack root`)
+function storyRoot(story, storiesById, branchPrefix, baseBranch, seen = new Set()) {
+  if (seen.has(story.id)) {
+    throw new Error(`orchestrator: dependency cycle reached story #${story.id} while computing its stack root`)
   }
-  seen.add(story.number)
+  seen.add(story.id)
   // Only blockers inside this milestone can be stacked on; anything else is
   // external work whose branch this run knows nothing about.
-  const blockers = (story.blockedBy ?? []).filter(dep => storiesByNumber.has(dep))
+  const blockers = (story.blockedBy ?? []).filter(dep => storiesById.has(dep))
   if (blockers.length === 0) return baseBranch
   if (blockers.length > 1) {
     // Deliberately not guessing. Rooting on one blocker silently builds this
@@ -214,21 +222,21 @@ function storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBra
     // is exactly what this mode does not do. A human picks: merge the blockers
     // first, or split the story.
     throw new Error(
-      `orchestrator: story #${story.number} is blocked by ${blockers.length} stories (${blockers.map(n => `#${n}`).join(', ')}), `
+      `orchestrator: story #${story.id} is blocked by ${blockers.length} stories (${blockers.map(n => `#${n}`).join(', ')}), `
       + 'and stacked mode can only root a stack on ONE parent branch. Merge those blockers into '
       + `${baseBranch} first, or restructure the dependencies so this story has a single blocker.`)
   }
-  return storyTip(storiesByNumber.get(blockers[0]), storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen)
+  return storyTip(storiesById.get(blockers[0]), storiesById, branchPrefix, baseBranch, seen)
 }
 
 // The base each remaining subtask's PR targets: the previous subtask in the
 // story's FULL order, or the story's root for the first one.
-function stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch) {
-  const ordered = orderSubtasks(story.subtasks ?? [], ordinalPattern)
-  const root = storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+function stackBases(story, storiesById, branchPrefix, baseBranch) {
+  const ordered = story.subtasks ?? []
+  const root = storyRoot(story, storiesById, branchPrefix, baseBranch)
   const bases = new Map()
   ordered.forEach((subtask, index) => {
-    bases.set(subtask.number, index === 0 ? root : subtaskBranch(ordered[index - 1], branchPrefix))
+    bases.set(subtask.id, index === 0 ? root : subtaskBranch(ordered[index - 1], branchPrefix))
   })
   return bases
 }
@@ -335,15 +343,20 @@ function hasResolvedBoardIds(projectArg) {
 
 // Not the matcher any more — the DIAGNOSTIC. Branches are derived, so a PR is
 // this subtask's only if its head ref is exactly the derived name. This answers
-// the narrower question "does some other branch end with this subtask's
-// number?", which is what a changed branchPrefix looks like: `aq-1050`,
-// `wip/1050` and a bare `1050` are all near misses for 1050, while `task-11050`
-// belongs to a different subtask entirely. matchPr() halts on a MERGED near
-// miss rather than re-implementing finished work (#1050); randomising or
-// timestamping branchPrefix would make every run one big near miss.
-function prMatchesSubtask(ref, number) {
+// the narrower question "does some other branch end with this subtask's short
+// id?", which is what a changed branchPrefix looks like: `aq-a1b2c3d4`,
+// `wip/a1b2c3d4` and a bare `a1b2c3d4` are all near misses for card a1b2c3d4…,
+// while a DIFFERENT card's short id that merely ends the same is not.
+// matchPr() halts on a MERGED near miss rather than re-implementing finished
+// work (#1050); randomising or timestamping branchPrefix would make every run
+// one big near miss.
+//
+// Consistent with filterPullRequests() in detect.mjs (Task 6): both key on the
+// card's short id, never on the slug — a card's title can be edited after its
+// PR is open, and slug-based matching would orphan that PR.
+function prMatchesSubtask(ref, subtaskShortId) {
   const text = String(ref ?? '')
-  const suffix = String(number)
+  const suffix = String(subtaskShortId)
   if (suffix.length === 0 || !text.endsWith(suffix)) return false
   const before = text[text.length - suffix.length - 1]
   return before === undefined || !/[0-9]/.test(before)
@@ -374,7 +387,7 @@ function normalizePr(raw) {
 // 'unknown' (doneness is unverifiable, which halts the run), or 'wrong-base' (a
 // PR exists on this branch but not on its stack parent, so it is not evidence
 // of doneness — #1133).
-function matchPr(number, expectedBranch, expectedBase, pulls) {
+function matchPr(subtaskShortId, expectedBranch, expectedBase, pulls) {
   const all = (pulls ?? []).map(normalizePr)
   // Merged work first, then the most recent. Only ever applied WITHIN a group
   // that already agrees on branch and base, so it can never override either.
@@ -388,32 +401,32 @@ function matchPr(number, expectedBranch, expectedBase, pulls) {
     const unreported = onBranch.find(candidate => !candidate.base)
     if (unreported) {
       return { pr: 'unknown',
-        note: `detect: PR #${unreported.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
+        note: `detect: PR #${unreported.number} for subtask ${subtaskShortId} reported no base branch — doneness is unverifiable` }
     }
     const best = [...onBranch].sort(rank)[0]
     return { pr: 'wrong-base',
-      note: `detect: ignoring PR #${best.number} for subtask #${number} — base "${best.base}" is not its stack parent "${expectedBase}"` }
+      note: `detect: ignoring PR #${best.number} for subtask ${subtaskShortId} — base "${best.base}" is not its stack parent "${expectedBase}"` }
   }
 
   // Nothing on the derived branch. Before calling this unstarted, look for a PR
-  // sitting on some OTHER branch that ends with this subtask's number — the
+  // sitting on some OTHER branch that ends with this subtask's short id — the
   // signature of a changed branchPrefix (#1050). Ignoring those silently is what
   // re-dispatched finished work onto an empty diff.
-  const nearMiss = all.filter(candidate => prMatchesSubtask(candidate.ref, number)).sort(rank)
+  const nearMiss = all.filter(candidate => prMatchesSubtask(candidate.ref, subtaskShortId)).sort(rank)
   const mergedElsewhere = nearMiss.find(candidate => candidate.merged)
   if (mergedElsewhere) {
     // Halting costs one re-run with the right prefix. Guessing costs the work.
     return { pr: 'unknown',
-      note: `detect: subtask #${number} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
+      note: `detect: subtask ${subtaskShortId} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
         + `but this run derives its branch as "${expectedBranch}". That is what a changed branchPrefix looks like `
-        + '(the default is now "m<milestone>/task-"; a milestone built under a bare "task-" predates it). '
+        + '(the default is now "m<milestone>"; a milestone built under a bare "task-" predates it). '
         + 'Re-run with the branchPrefix this milestone was built under, or the finished work will be re-implemented.' }
   }
   if (nearMiss.length > 0) {
     // Unmerged and under another name: a human's branch, or an abandoned
     // attempt. Worth saying out loud, not worth halting the milestone.
     return { pr: null,
-      note: `detect: subtask #${number} — ignoring unmerged PR #${nearMiss[0].number} on "${nearMiss[0].ref}"; `
+      note: `detect: subtask ${subtaskShortId} — ignoring unmerged PR #${nearMiss[0].number} on "${nearMiss[0].ref}"; `
         + `this run works "${expectedBranch}"` }
   }
   return { pr: null, note: null }
@@ -422,19 +435,19 @@ function matchPr(number, expectedBranch, expectedBase, pulls) {
 // One pass, because the geometry no longer depends on the PRs. Mutates each
 // subtask's `pr` in place and RETURNS the notes to log, so this stays free of
 // harness globals.
-function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, ordinalPattern, baseBranch) {
-  const storiesByNumber = new Map(stories.map(story => [story.number, story]))
+function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, baseBranch) {
+  const storiesById = new Map(stories.map(story => [story.id, story]))
   const notes = []
   for (const story of stories) {
     // Computed even when the lookup failed: a multi-blocker shape is a human
     // decision and must surface either way.
-    const expectedBases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+    const expectedBases = stackBases(story, storiesById, branchPrefix, baseBranch)
     for (const subtask of story.subtasks ?? []) {
       if (prLookupFailed) { subtask.pr = 'unknown'; continue }
       const { pr, note } = matchPr(
-        subtask.number,
+        shortId(subtask.id),
         subtaskBranch(subtask, branchPrefix),
-        expectedBases.get(subtask.number) || baseBranch,
+        expectedBases.get(subtask.id) || baseBranch,
         pulls)
       if (note) notes.push(note)
       subtask.pr = pr
@@ -528,12 +541,12 @@ if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
     + 'stacked PRs and never merges, so there is nothing to auto-merge and no conflicts to resolve mid-run.')
 }
 const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
-// Branch names carry their milestone: subtask #13 of milestone 12 lives on
-// `m12/task-13`, worktree `.claude/worktrees/m12/task-13`.
+// Branch names carry their milestone: a subtask card of milestone 12 lives on
+// `m12/task-<slug>-<shortid>` (taskBranch()), worktree
+// `.claude/worktrees/m12/task-<slug>-<shortid>`.
 //
-// This is NOT collision avoidance — issue numbers are already unique per repo,
-// so two milestones can never claim the same subtask number, and two runs of
-// the SAME milestone would share this prefix anyway. It buys legibility and
+// This is NOT collision avoidance — card ids are already unique, and two runs
+// of the SAME milestone would share this prefix anyway. It buys legibility and
 // bulk cleanup: `git branch --list "m12/*"` and `rm -rf .claude/worktrees/m12`
 // each address exactly one milestone, which matters once a repo has several in
 // flight.
@@ -544,8 +557,7 @@ const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
 // nothing exists (matchPr halts on a merged PR found under the old name).
 const branchPrefix = typeof opts.branchPrefix === 'string'
   ? opts.branchPrefix
-  : `m${milestoneNumber}/task-`
-const ordinalPattern = typeof opts.ordinalPattern === 'string' ? opts.ordinalPattern : DEFAULT_ORDINAL
+  : `m${milestoneNumber}`
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 // Caps how many stories within one DAG level are in flight at once — separate
 // from the harness's own global agent() concurrency cap, which throttles
@@ -862,10 +874,10 @@ const prLookupFailed = census.prLookupFailed === true
 if (prLookupFailed) {
   log('detect: the PR lookup failed after retries — every subtask is treated as unverifiable rather than unstarted')
 }
-const storiesByNumber = new Map(census.stories.map(story => [story.number, story]))
+const storiesById = new Map(census.stories.map(story => [story.id, story]))
 assertNoBlockerCycles(census.stories)
 for (const note of attachPullRequests(
-  census.stories, pullRequests, prLookupFailed, branchPrefix, ordinalPattern, baseBranch)) {
+  census.stories, pullRequests, prLookupFailed, branchPrefix, baseBranch)) {
   log(note)
 }
 
@@ -874,7 +886,7 @@ for (const note of attachPullRequests(
 // merged work twice on 2026-08-17). Stopping costs one re-run.
 const unknownPrs = census.stories.flatMap(story =>
   (story.subtasks ?? []).filter(subtask => subtask.pr === 'unknown')
-    .map(subtask => `#${subtask.number} (story #${story.number})`))
+    .map(subtask => `#${subtask.id} (story #${story.id})`))
 if (unknownPrs.length > 0) {
   throw new Error(
     `orchestrator: PR lookup failed for ${unknownPrs.length} subtask(s) — ${unknownPrs.join(', ')}. `
@@ -911,7 +923,7 @@ const suiteBlock = suiteCmds.length
   ? suiteCmds.map(command => `  - ${command}`).join('\n')
   : '  (NOT DOCUMENTED — find this repo\'s real full-suite command before claiming anything passes)'
 
-const levels = computeLevels(census.stories, ordinalPattern)
+const levels = computeLevels(census.stories)
 log(`milestone #${milestoneNumber} "${census.milestoneTitle || ''}": ${census.stories.length} stories, ${levels.length} dependency level(s)`)
 
 if (DRY) {
@@ -923,21 +935,21 @@ if (DRY) {
     plan: levels.map((levelStories, levelIndex) => ({
       level: levelIndex,
       stories: levelStories.map(story => {
-        const bases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+        const bases = stackBases(story, storiesById, branchPrefix, baseBranch)
         return {
-          story: story.number, title: story.title,
-          root: storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch),
-          subtasks: remainingSubtasks(story, ordinalPattern).map(subtask => ({
-            number: subtask.number, title: subtask.title, state: subtask.state,
-            branch: `${branchPrefix}${subtask.number}`,
+          story: story.id, title: story.title,
+          root: storyRoot(story, storiesById, branchPrefix, baseBranch),
+          subtasks: remainingSubtasks(story).map(subtask => ({
+            id: subtask.id, title: subtask.title, state: subtask.state,
+            branch: subtaskBranch(subtask, branchPrefix),
             // The whole point of a dry run in stacked mode: check this column.
-            prTargets: bases.get(subtask.number) || baseBranch,
+            prTargets: bases.get(subtask.id) || baseBranch,
             prExisting: subtask.pr || null,
           })),
         }
       }),
     })),
-    alreadyDone: census.stories.filter(story => remainingSubtasks(story, ordinalPattern).length === 0).map(story => story.number),
+    alreadyDone: census.stories.filter(story => remainingSubtasks(story).length === 0).map(story => story.id),
     note: 'dryRun: nothing was dispatched, no board or GitHub write happened. One worktree/branch/PR per SUBTASK, '
       + 'dispatched sequentially within each story. Each PR targets its stack parent (prTargets), NOT the milestone base — '
       + 'verify that column before a real run. Nothing is ever merged.',
@@ -966,9 +978,9 @@ function halt(payload) {
 // One dispatch, one PR, no merge. `stackBase` is this subtask's parent branch —
 // the previous subtask's, or the story's root for the first one.
 async function runSubtask(levelIndex, story, subtask, stackBase) {
-  if (halted) return { subtask: subtask.number, skipped: 'halted' }
+  if (halted) return { subtask: subtask.id, skipped: 'halted' }
 
-  // Detect matches PRs by number-suffix, so a resumed PR's real head ref can
+  // Detect matches PRs by short-id suffix, so a resumed PR's real head ref can
   // carry an older prefix — prefer it over the freshly-derived name.
   const branch = subtaskBranch(subtask, branchPrefix)
 
@@ -977,7 +989,7 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
   // merge, nothing to close: the issue stays open and the card stays wherever
   // task.js left it, until a human merges the stack.
   if (subtask.pr && typeof subtask.pr === 'object') {
-    return { subtask: subtask.number, story: story.number, pr: subtask.pr.number, branch,
+    return { subtask: subtask.id, story: story.id, pr: subtask.pr.number, branch,
       base: stackBase, stacked: true, note: 'PR already open against its stack parent — nothing to redo' }
   }
 
@@ -992,8 +1004,13 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     // it for all three of: the worktree cut point, Review's diff base, and the
     // PR target — which is exactly what stacking needs, and why task.js required
     // no change for this mode.
+    //
+    // `issue` still carries the value task.js keys its own work on — it is a
+    // card id now, not a GitHub issue number. Renaming this argument itself is
+    // task.js's own re-key, out of this task's scope; this passes the right
+    // VALUE under the name task.js still reads today.
     dispatched = await workflow({ scriptPath: taskScript }, {
-      repo, repoDir, issue: subtask.number, baseBranch: stackBase, branchPrefix, coauthor, verification,
+      repo, repoDir, issue: subtask.id, baseBranch: stackBase, branchPrefix, coauthor, verification,
       // Same checkout's scripts/, derived from detectScript so there is one
       // path to get wrong instead of two.
       scriptsDir: detectScript.slice(0, detectScript.lastIndexOf('/')),
@@ -1011,9 +1028,9 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     const hint = message.includes(taskScript)
       ? ` — task.js was not readable at ${taskScript}; pass args.taskScript if these workflows live elsewhere on this machine`
       : ''
-    halt(escalation({ level: levelIndex, story: story.number, subtask: subtask.number, pr: null, baseBranch: stackBase, trigger: 'blocked',
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: null, baseBranch: stackBase, trigger: 'blocked',
       attempts: [{ attempt: 0, resolved: false, detail: `task workflow threw: ${message}${hint}` }] }))
-    return { subtask: subtask.number, escalated: true }
+    return { subtask: subtask.id, escalated: true }
   }
 
   if (!dispatched || dispatched.refused || dispatched.blocked || !dispatched.pr) {
@@ -1035,20 +1052,22 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     if (dispatched && dispatched.existingPr) {
       attempts.push({ attempt: 0, resolved: false, detail: `a PR (#${dispatched.existingPr}) already exists on branch ${branch} and is being driven by something other than this run` })
     }
-    halt(escalation({ level: levelIndex, story: story.number, subtask: subtask.number, pr: dispatched && dispatched.pr, baseBranch: stackBase, trigger, attempts }))
-    return { subtask: subtask.number, escalated: true }
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: dispatched && dispatched.pr, baseBranch: stackBase, trigger, attempts }))
+    return { subtask: subtask.id, escalated: true }
   }
 
   // Belt and braces with task.js's own check: a non-numeric PR reference would
-  // corrupt the stack geometry every later subtask is computed from.
+  // corrupt the stack geometry every later subtask is computed from. PRs
+  // themselves are still real GitHub PRs with numeric identifiers — only the
+  // subtask/story identity moved to card ids.
   const prNumber = Number(dispatched.pr)
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
-    halt(escalation({ level: levelIndex, story: story.number, subtask: subtask.number, pr: null, baseBranch: stackBase, trigger: 'blocked',
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: null, baseBranch: stackBase, trigger: 'blocked',
       attempts: [{ attempt: 0, resolved: false, detail: `PR reference was not a number (${typeof dispatched.pr}) — refusing to stack the next subtask on it` }] }))
-    return { subtask: subtask.number, escalated: true }
+    return { subtask: subtask.id, escalated: true }
   }
 
-  return { subtask: subtask.number, story: story.number, pr: prNumber,
+  return { subtask: subtask.id, story: story.id, pr: prNumber,
     branch: dispatched.branch || branch, base: stackBase, stacked: true, plan: dispatched.plan }
 }
 
@@ -1058,7 +1077,7 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
   if (halted) break
   phase('Dispatch')
   const level = levels[levelIndex]
-  log(`level ${levelIndex}: dispatching ${level.length} story/stories, up to ${maxConcurrentStories} at once — ${level.map(story => `#${story.number}`).join(', ')}`)
+  log(`level ${levelIndex}: dispatching ${level.length} story/stories, up to ${maxConcurrentStories} at once — ${level.map(story => `#${story.id}`).join(', ')}`)
   // mapWithConcurrency, not pipeline(): the harness caps agent() calls but not
   // story lanes, and each lane opens a worktree and runs a whole task.js
   // pipeline. One story per item; that story's subtasks run SEQUENTIALLY inside
@@ -1069,17 +1088,17 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     // still supplies the branch its successor stacks on. Computed once per
     // story; a shape this cannot decide (multi-blocker, cycle) throws here and
     // pipeline() turns it into a null result, caught as a halt below.
-    const bases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
-    for (const subtask of remainingSubtasks(story, ordinalPattern)) {
-      if (halted) { out.push({ subtask: subtask.number, skipped: 'halted' }); continue }
-      const stackBase = bases.get(subtask.number) || baseBranch
+    const bases = stackBases(story, storiesById, branchPrefix, baseBranch)
+    for (const subtask of remainingSubtasks(story)) {
+      if (halted) { out.push({ subtask: subtask.id, skipped: 'halted' }); continue }
+      const stackBase = bases.get(subtask.id) || baseBranch
       const subtaskResult = await runSubtask(levelIndex, story, subtask, stackBase)
       out.push(subtaskResult)
       // Subtask N+1 branches off N's PUSHED branch, so N must have produced one.
       // Nothing is merged — `stacked` is the success signal now, not `merged`.
       if (!subtaskResult || subtaskResult.stacked !== true) break
     }
-    return { story: story.number, root: bases.size ? [...bases.values()][0] : baseBranch, subtasks: out }
+    return { story: story.id, root: bases.size ? [...bases.values()][0] : baseBranch, subtasks: out }
   })
   // mapWithConcurrency maps a thrown/dead story callback to null
   // rather than propagating — treat that as a halt, or level N+1 would
