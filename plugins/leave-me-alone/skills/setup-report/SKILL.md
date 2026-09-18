@@ -24,10 +24,10 @@ state (a ledger board, a task list) — see the state model below.
 
 Don't ask first — look. In priority order, the first source that has live data wins:
 
-1. **An active orchestrator/milestone run** (GitHub Projects v2 board with story/subtask
-   issues, per this session's `orchestrator`/`task`/`setup-milestone` skills) — pull real state with
-   `gh`: issue/sub-issue status, PR state, CI check conclusions (`gh pr checks`), board Status
-   field.
+1. **An active orchestrator/milestone run** (a `brd` board with milestone/story/subtask
+   cards, per this session's `orchestrator`/`task`/`setup-milestone` skills) — pull structure,
+   status, and DAG depth from one `brd tree <milestone id>`, and pull PR state and CI check
+   conclusions from `gh` (`gh pr checks`) since a card's status alone can't show them.
 2. **A ledger board** (`.claude/ledger/BOARD.md`, if the repo has one — see the `ledger`
    skill) — each `###` card is a unit, its `##` header is its stage, `Blocked:` lines are
    blockers.
@@ -41,6 +41,15 @@ guessing.
 **Always re-derive current state, never reuse stale numbers from earlier in the conversation.**
 A CI gate mentioned as blocking ten minutes ago may already be clear.
 
+**For an orchestrator/milestone run, write `docs/board/<milestone>.json` from the same
+`brd tree` output, as a by-product of this run.** The report itself is rendered from the live
+`brd tree`/`gh` state you just pulled, never from this file — the snapshot is a record of what
+the board looked like at this render, not an input to it. Sourcing the report from the
+committed file instead is the more obvious design and the wrong one: a file-sourced report is
+only ever as fresh as its last write, and a stale dashboard misleads a reader worse than no
+dashboard would. Committing the snapshot is what gives the board a history in git; it is not
+what makes this report correct.
+
 ## 2. Map the source onto the fixed template
 
 `reference.html` is not one option among several — it is the template every run produces.
@@ -48,7 +57,7 @@ Derive its *content* from whatever source step 1 found, but never its *shape*:
 
 | Source | Level (DAG column) comes from | Node comes from | Pip comes from |
 |---|---|---|---|
-| Orchestrator/milestone run | Dependency depth in the story DAG (`blockedBy`) | A story | Its subtasks |
+| Orchestrator/milestone run | Dependency depth in the story DAG, from `brd tree`'s `blockedBy` edges | A story | Its subtasks |
 | Ledger board | The board's own stage order, treated as levels | The stage | Its cards |
 | Session task list | A single level if there's no natural dependency grouping | The task list itself, or a natural sub-grouping | Individual tasks |
 

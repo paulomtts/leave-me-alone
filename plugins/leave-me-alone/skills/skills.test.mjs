@@ -38,7 +38,8 @@ test('the skills describe the status model that actually ships', () => {
     // report. Case-insensitive — the previous guard was satisfied by
     // lowercasing while the claim stayed false.
     assert.doesNotMatch(source, /in[ _]review/i, `${name} still promises in_review`)
-    assert.match(source, /\bdone\b/, `${name} must say cards reach done`)
+    assert.match(source, /card(?:'s)? reach(?:es|ing)? `?done`?/i,
+      `${name} must tie a card to reaching done, not just contain the bare word`)
   }
 })
 
@@ -55,4 +56,16 @@ test('setup-milestone keeps the judgment that is the actual product', () => {
   assert.match(source, /one subtask = one green PR/i)
   assert.match(source, /file-disjoint/i)
   assert.match(source, /Subtasks that ship no behavior/i)
+})
+
+test('setup-report reads the live board and records a snapshot', () => {
+  const source = read('setup-report')
+  assert.match(source, /brd tree/)
+  assert.match(source, /docs\/board\//)
+  assert.doesNotMatch(source, /Projects v2|board Status|sub-issue/i)
+})
+
+test('setup-report still gets PR and CI state from gh', () => {
+  // The hybrid is the point — this would be wrong to "finish" migrating.
+  assert.match(read('setup-report'), /gh pr checks/)
 })
