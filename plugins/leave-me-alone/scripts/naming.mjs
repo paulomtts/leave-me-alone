@@ -8,10 +8,13 @@
 //
 // Eight hex characters matches the Plan-Hash convention already used in this
 // repo, and collides with probability that does not matter inside one milestone.
+// The check is deliberately strict: a card id is a UUID, and anything else is
+// a bug worth surfacing loudly rather than inventing a plausible short id.
 
 export function shortId(cardId) {
-  const hex = String(cardId ?? '').replace(/-/g, '')
-  if (!/^[0-9a-f]{8,}$/i.test(hex)) throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  if (typeof cardId !== 'string') throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  const hex = cardId.replace(/-/g, '')
+  if (!/^[0-9a-f]{32}$/i.test(hex)) throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
   return hex.slice(0, 8).toLowerCase()
 }
 

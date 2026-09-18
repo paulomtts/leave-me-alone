@@ -16,6 +16,21 @@ test('shortId rejects anything that is not a card id rather than returning junk'
   assert.throws(() => shortId('nope'), /not a card id/)
 })
 
+test('shortId rejects a number, even one that looks like hex', () => {
+  assert.throws(() => shortId(12345678), /not a card id/)
+  assert.throws(() => shortId(1234567890123456), /not a card id/)
+})
+
+test('shortId rejects a hex run that is not a full UUID', () => {
+  assert.throws(() => shortId('a32af745'), /not a card id/)
+  assert.throws(() => shortId('deadbeefdeadbeef'), /not a card id/)
+})
+
+test('shortId rejects an object and null', () => {
+  assert.throws(() => shortId({}), /not a card id/)
+  assert.throws(() => shortId(null), /not a card id/)
+})
+
 test('slugify lowercases, collapses punctuation to single dashes, and trims them', () => {
   assert.equal(slugify('40.1 feat: write rows'), '40-1-feat-write-rows')
   assert.equal(slugify('  Hello,   World!  '), 'hello-world')
