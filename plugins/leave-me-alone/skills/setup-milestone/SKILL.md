@@ -62,19 +62,26 @@ The common failure is a docs card written from the spec instead of the code, des
 Every branch name and every PR target is **derived**, not discovered:
 
 ```
-milestone 12, subtask #14  ->  branch m12/task-14   (branchPrefix + issue number)
-                               base   m12/task-13   (the branch of the subtask before it)
+milestone 12, card "Add retry" (a1b2c3d4…)  ->  branch m12/task-add-retry-a1b2c3d4
+                                                 base   m12/task-<slug>-<shortid>   (the branch of the subtask before it)
 ```
 
 The `m12/` prefix keeps one milestone's branches and worktrees together, so several can be in flight
-in one checkout without becoming an unreadable pile. It is not what makes them unique — the issue
-number already does that.
+in one checkout without becoming an unreadable pile. It is not what makes them unique — the short id
+(the first 8 hex characters of the card's UUID) already does that, and matching keys on that short id
+alone, so editing a card's title after its PR is open never orphans the PR.
 
 So the ordering you give subtasks *is* the stack geometry. The workflow re-derives it from scratch on every run and looks for each PR at exactly that address — nothing is remembered between runs.
 
 Two consequences, both load-bearing:
 
-**Give every subtask an ordinal prefix in its title** (`11.1 `, `L2.3.1 `, `1.2 `). Without one, order falls back to the order the sub-issues endpoint returns, which is creation order — and creation order is not stable: detaching and re-attaching a sub-issue moves it. A milestone ordered only by creation order can silently re-shape its own stack between runs. With ordinals, the order is written down in the titles and survives anything.
+**Chain every subtask with `--blocked-by <previous subtask id>`.** Order comes from the `blocked_by`
+edges between sibling cards, not from the title — chain a story's subtasks in sequence (subtask 2
+`--blocked-by` subtask 1, subtask 3 `--blocked-by` subtask 2, …) so the board states the order.
+Without a chain, independent siblings fall back to creation order — and creation order is not stable:
+detaching and re-attaching a card moves it. A milestone ordered only by creation order can silently
+re-shape its own stack between runs. Ordinal-looking title prefixes (`11.1 `, `L2.3.1 `, `1.2 `) are
+optional decoration now — nothing parses them.
 
 **Do not reorder subtasks once their PRs exist.** Reordering re-points the bases, so PRs opened against the old geometry no longer sit on their stack parent. The run does not guess: it reports them as `wrong-base` and treats that work as not done. If you must reorder, expect to re-target the open PRs by hand.
 
@@ -166,7 +173,7 @@ What would make this breakdown wrong: putting #15 in level 0 (it would root at `
 | Folding in a docs/config/refactor card because "it has no tests" | That rule is for behavior-changing subtasks only. Judge these on their own terms — see "Subtasks that ship no behavior". |
 | A docs card written from the spec | It must read the actual implementation, which means it has to sit *after* that work in the stack. Name the files to read in its body. |
 | Expecting the run to merge anything | It does not. Each story becomes a stack of open PRs; a human merges bottom-up. Subtask issues stay open and cards sit at "In review" until then. |
-| Subtasks with no ordinal prefix in the title | Order falls back to the sub-issues endpoint's creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always prefix. |
+| Subtasks not chained with `--blocked-by` | Order falls back to creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always chain a story's subtasks. |
 | Reordering subtasks after their PRs are open | The bases are derived from order, so reordering re-points them and the existing PRs read as `wrong-base` — i.e. not done. Re-target by hand or don't reorder. |
 | Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for PRs at a new address. It detects a merged PR under the old name and HALTS rather than re-implementing it, but only a re-run with the original prefix actually fixes it. |
 | Fixing the edges, then resuming the orchestrator run | Detect's result is cached on its prompt; a resume replays the stale empty snapshot. Relaunch as a NEW run with a fresh `nonce`. |

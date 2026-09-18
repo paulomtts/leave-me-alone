@@ -1,31 +1,50 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, matchesIssue, pickPlan, planCheck, VALIDATED_MARKER } from './plan-check.mjs'
+import { parseArgs, matchesCard, pickPlan, planCheck, VALIDATED_MARKER } from './plan-check.mjs'
 
-test('needs an absolute repo dir and a real issue number', () => {
-  assert.equal(parseArgs(['--repo-dir=/r', '--issue=23']).issue, 23)
-  assert.equal(parseArgs(['--repo-dir=/r', '--issue=23']).plansDir, '/r/.claude/plans')
-  assert.equal(parseArgs(['--repo-dir=/r', '--issue=23', '--plans-dir=/p']).plansDir, '/p')
-  assert.throws(() => parseArgs(['--issue=23']), /--repo-dir/)
-  assert.throws(() => parseArgs(['--repo-dir=rel', '--issue=23']), /--repo-dir/)
-  assert.throws(() => parseArgs(['--repo-dir=/r', '--issue=0']), /--issue/)
+test('parseArgs takes an 8-character hex card id', () => {
+  assert.equal(parseArgs(['--repo-dir', '/abs/repo', '--card', 'a32af745']).card, 'a32af745')
+  assert.equal(parseArgs(['--repo-dir', '/abs/repo', '--card', 'a32af745']).plansDir, '/abs/repo/.claude/plans')
+  assert.equal(parseArgs(['--repo-dir', '/abs/repo', '--card', 'a32af745', '--plans-dir', '/p']).plansDir, '/p')
+  assert.throws(() => parseArgs(['--card', 'a32af745']), /--repo-dir/)
+  assert.throws(() => parseArgs(['--repo-dir', 'rel', '--card', 'a32af745']), /--repo-dir/)
+  assert.throws(() => parseArgs(['--repo-dir', '/abs/repo', '--card', '42']), /--card/)
+  assert.throws(() => parseArgs(['--repo-dir', '/abs/repo']), /--card/)
 })
 
-test('a longer number does not answer for a shorter one', () => {
-  // Same rule as branch refs: issue-123.md is not issue 23's plan.
-  assert.equal(matchesIssue('2026-issue-23.md', 23), true)
-  assert.equal(matchesIssue('issue-23.md', 23), true)
-  assert.equal(matchesIssue('issue-123.md', 23), false)
-  assert.equal(matchesIssue('issue-23.txt', 23), false)
-  assert.equal(matchesIssue('issue-23-old.md', 23), false)
+test('an uppercase card id is rejected rather than silently matching nothing', () => {
+  // shortId always lowercases, so an uppercase id can only come from a caller
+  // bug. Accepting it would turn a typo into "no plan found" — a gate failing
+  // open in the direction that halts a run for a reason that is not true.
+  assert.throws(() => parseArgs(['--repo-dir', '/abs/repo', '--card', 'A32AF745']), /--card/)
+})
+
+test('a plan matches when the short id is its final segment', () => {
+  assert.equal(matchesCard('task-write-rows-a32af745.md', 'a32af745'), true)
+  assert.equal(matchesCard('task-a32af745.md', 'a32af745'), true)
+})
+
+test('one card\'s plan never answers for another', () => {
+  // The hazard the old non-digit boundary could not express: hex ids may be
+  // preceded by hex characters.
+  assert.equal(matchesCard('task-deadbeefa32af745.md', 'a32af745'), false)
+  assert.equal(matchesCard('task-rows-a32af746.md', 'a32af745'), false)
+  assert.equal(matchesCard('task-rows-a32af745-old.md', 'a32af745'), false)
+})
+
+test('only .md files match', () => {
+  assert.equal(matchesCard('task-rows-a32af745.txt', 'a32af745'), false)
 })
 
 test('the newest matching plan wins', () => {
   // A re-planned subtask leaves the old file behind; the stale one must not
   // decide whether Spec/Plan/Validate re-run.
-  assert.equal(pickPlan(['2026-01-issue-23.md', '2026-08-issue-23.md', 'issue-9.md'], 23), '2026-08-issue-23.md')
-  assert.equal(pickPlan(['issue-9.md'], 23), null)
-  assert.equal(pickPlan(null, 23), null)
+  assert.equal(
+    pickPlan(['2026-01-task-rows-a32af745.md', '2026-08-task-rows-a32af745.md', 'task-other-deadbeef.md'], 'a32af745'),
+    '2026-08-task-rows-a32af745.md',
+  )
+  assert.equal(pickPlan(['task-other-deadbeef.md'], 'a32af745'), null)
+  assert.equal(pickPlan(null, 'a32af745'), null)
 })
 
 const fakeFs = (files) => ({
@@ -40,30 +59,30 @@ const fakeFs = (files) => ({
 })
 
 test('a missing plans directory is a normal answer, not a failure', async () => {
-  const got = await planCheck({ plansDir: '/p', issue: 23, ...fakeFs({}) })
+  const got = await planCheck({ plansDir: '/p', card: 'a32af745', ...fakeFs({}) })
   assert.deepEqual(got, { found: false, path: '', validated: false })
 })
 
 test('validated only when the marker is literally present', async () => {
   const fs = fakeFs({ '/p': {
-    'issue-23.md': `# plan\n${VALIDATED_MARKER}\nsteps`,
-    'issue-24.md': '# plan\nno marker',
+    'task-rows-a32af745.md': `# plan\n${VALIDATED_MARKER}\nsteps`,
+    'task-rows-deadbeef.md': '# plan\nno marker',
   } })
-  assert.equal((await planCheck({ plansDir: '/p', issue: 23, ...fs })).validated, true)
-  assert.equal((await planCheck({ plansDir: '/p', issue: 24, ...fs })).validated, false)
+  assert.equal((await planCheck({ plansDir: '/p', card: 'a32af745', ...fs })).validated, true)
+  assert.equal((await planCheck({ plansDir: '/p', card: 'deadbeef', ...fs })).validated, false)
 })
 
 test('a plan that merely DISCUSSES the marker still counts — literal, not clever', async () => {
   // Documented deliberately: the check is a substring test. A plan quoting the
   // marker in prose reads as validated. That is the accepted cost of never
   // mistaking a real marker for prose, which is the failure that matters.
-  const fs = fakeFs({ '/p': { 'issue-23.md': `explains that ${VALIDATED_MARKER} means signed off` } })
-  assert.equal((await planCheck({ plansDir: '/p', issue: 23, ...fs })).validated, true)
+  const fs = fakeFs({ '/p': { 'task-rows-a32af745.md': `explains that ${VALIDATED_MARKER} means signed off` } })
+  assert.equal((await planCheck({ plansDir: '/p', card: 'a32af745', ...fs })).validated, true)
 })
 
 test('an unreadable plan is found but not validated, and says why', async () => {
-  const fs = fakeFs({ '/p': { 'issue-23.md': new Error('EACCES') } })
-  const got = await planCheck({ plansDir: '/p', issue: 23, ...fs })
+  const fs = fakeFs({ '/p': { 'task-rows-a32af745.md': new Error('EACCES') } })
+  const got = await planCheck({ plansDir: '/p', card: 'a32af745', ...fs })
   assert.equal(got.found, true)
   assert.equal(got.validated, false)
   assert.match(got.error, /EACCES/)

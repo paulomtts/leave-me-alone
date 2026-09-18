@@ -1,16 +1,16 @@
 export const meta = {
   name: 'task',
-  description: 'Drive ONE subtask issue end-to-end in its own worktree/branch: explore, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo, board, and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
+  description: 'Drive ONE subtask card end-to-end in its own worktree/branch: explore, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
-    { title: 'Explore', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
+    { title: 'Explore', detail: 'card + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card status -> in_progress', model: 'sonnet' },
     { title: 'Worktree', detail: 'create the subtask worktree before anything writes into it', model: 'haiku' },
     { title: 'Spec', detail: 'scope, behavior, error paths, test list -> docs/superpowers/specs/, then adversarially reviewed BEFORE anything is planned on it', model: 'opus' },
     { title: 'Plan', detail: 'TDD implementation plan from the reviewed spec, via superpowers:writing-plans', model: 'opus' },
     { title: 'Validate', detail: 'adversarial plan review against the spec, fixes folded into the plan file', model: 'sonnet' },
     { title: 'Implement', detail: 'worktree + strict TDD, granular commits', model: 'sonnet' },
     { title: 'Review', detail: 'branch diff review, test-integrity gate, lint; fixes committed here; unresolved blockers stop the run', model: 'opus' },
-    { title: 'Ship', detail: 'clean-tree check + full verification, then push and open the PR (no merge); card -> In review', model: 'haiku' },
+    { title: 'Ship', detail: 'clean-tree check + full verification, then push and open the PR (no merge); card status -> done', model: 'haiku' },
   ],
 }
 
@@ -26,6 +26,34 @@ export const meta = {
 // for BRANCH or calls log() stops being testable, and load-pure.mjs will refuse
 // the whole region rather than let that pass quietly.
 // PURE:BEGIN
+
+// ── card identity ────────────────────────────────────────────────────────
+// Mirrors scripts/naming.mjs exactly. Duplicated rather than imported: a
+// Workflow script executes in a sandbox with no module resolution, so an
+// `import` here would break the workflow at launch (see orchestrator.js's own
+// copy, which exists for the same reason). Keep this in lockstep with
+// naming.mjs; naming.test.mjs is the source of truth for its behavior.
+function shortId(cardId) {
+  if (typeof cardId !== 'string') throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  const hex = cardId.replace(/-/g, '')
+  if (!/^[0-9a-f]{32}$/i.test(hex)) throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  return hex.slice(0, 8).toLowerCase()
+}
+
+// The artifact stem is the LAST slash-delimited segment of the branch, so a
+// plan/spec filename can never disagree with the branch task.js actually
+// uses — the branch (an orchestrator-computed, required argument; see BRANCH
+// below) is the single source of truth for both.
+function stemOf(branch) {
+  return String(branch ?? '').split('/').pop()
+}
+
+// A shell-safe single-quoted literal for interpolating an arbitrary string
+// (a card title, here) into a command a trigger agent runs verbatim. Mirrors
+// orchestrator.js's shellQuote.
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
 
 // An empty suite makes every downstream gate vacuous: Ship runs nothing and
 // reports passed=true, Review has no red/green to work against, and the PR
@@ -164,18 +192,36 @@ function reviewGate(review, branch, baseBranch) {
   }
   return null
 }
+
+// A status write (rollup.mjs, via a trigger agent) is best-effort: its failure
+// must not sink a subtask whose PR is already open and green. But it must not
+// vanish silently either, or a run reports success while the board never
+// moved. Fold the collected errors (zero, one, or two — Explore's in_progress
+// write and Ship's done write) into what the caller returns.
+function statusWriteOutcome(errors) {
+  const list = errors ?? []
+  return list.length === 0
+    ? { statusWritten: true }
+    : { statusWritten: false, statusWriteError: list.join(' | ') }
+}
 // PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
 let raw = args
 if (typeof raw === 'string') {
-  try { raw = JSON.parse(raw) } catch { raw = { issue: Number(raw) } }
+  try { raw = JSON.parse(raw) } catch { raw = { card: raw } }
 }
 const opts = raw && typeof raw === 'object' ? raw : {}
 
-const issue = Number(opts.issue)
-if (!Number.isInteger(issue) || issue <= 0) {
-  throw new Error('task workflow needs a subtask issue number, e.g. args: {"repo":"owner/name","repoDir":"/abs/path","issue":251,"baseBranch":"main"}')
+const card = typeof opts.card === 'string' && opts.card.trim().length > 0 ? opts.card.trim() : null
+if (!card) {
+  throw new Error('task workflow needs args.card as a brd card id (UUID), e.g. args: {"repo":"owner/name","repoDir":"/abs/path","card":"a32af745-15ef-45cd-b52c-64c19ae82c17","branch":"m12/task-write-rows-a32af745","baseBranch":"main"}')
+}
+let id
+try {
+  id = shortId(card)
+} catch (err) {
+  throw new Error(`task workflow needs args.card as a brd card id (UUID) — ${err.message}`)
 }
 const repo = opts.repo
 if (typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) {
@@ -215,8 +261,14 @@ const triggerAgentType = typeof opts.triggerAgentType === 'string'
   : 'leave-me-alone:command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
-const branchPrefix = typeof opts.branchPrefix === 'string' ? opts.branchPrefix : 'task-'
-const BRANCH = `${branchPrefix}${issue}`
+// task.js no longer derives its own branch. orchestrator.js computes it once
+// (subtaskBranch, from the card's title+id) and forwards it — two derivations
+// of the same name is exactly the drift that later presents as "no PRs
+// exist" (the run looks for a PR at an address nothing ever created).
+const BRANCH = typeof opts.branch === 'string' && opts.branch.trim().length > 0 ? opts.branch.trim() : null
+if (!BRANCH) {
+  throw new Error('task workflow needs args.branch — the orchestrator computes this once and forwards it; task.js does not derive its own')
+}
 const WORKTREE = `${repoDir}/.claude/worktrees/${BRANCH}`
 
 // MUST come after WORKTREE: these interpolate it, and a `const` referenced
@@ -238,8 +290,8 @@ const WORKTREE = `${repoDir}/.claude/worktrees/${BRANCH}`
 // default branch and tracked on every subtask branch, so they could not be
 // gitignored and branch-switching in the shared checkout would conflict. superpowers names files YYYY-MM-DD-<topic>.md, which a resumed run
 // cannot predict — and finding the same file again is the whole point of the
-// plan-check step, so the date is dropped and the issue number carries the
-// identity.
+// plan-check step, so the date is dropped and the artifact stem — taken from
+// BRANCH itself, never re-derived from the card — carries the identity.
 //
 // One source of truth, deliberately: Plan is told exactly where to save, and
 // plan-check.mjs is told exactly where to look. They used to decide separately
@@ -253,15 +305,27 @@ const plansDir = typeof opts.plansDir === 'string' && opts.plansDir.startsWith('
 const specsDir = typeof opts.specsDir === 'string' && opts.specsDir.startsWith('/')
   ? opts.specsDir.replace(/\/+$/, '')
   : `${WORKTREE}/docs/superpowers/specs`
-const PLAN_PATH = `${plansDir}/issue-${issue}.md`
-const SPEC_PATH = `${specsDir}/issue-${issue}-design.md`
+const STEM = stemOf(BRANCH)
+const PLAN_PATH = `${plansDir}/${STEM}.md`
+const SPEC_PATH = `${specsDir}/${STEM}-design.md`
+// plan-check.mjs matches a saved plan by comparing STEM's final dash-delimited
+// segment to this card's short id (see naming.mjs's taskBranch/taskStem,
+// which is what makes them agree in practice). They agree only because the
+// branch was built that way — nothing here enforces it — so a non-conforming
+// branch would write the plan where plan-check will never find it, silently
+// disabling the validated-plan checkpoint (Spec/Plan/Validate would re-run
+// every time). This can't be a hard stop (an operator may legitimately pass a
+// branch task.js didn't generate), so warn instead.
+if (STEM.split('-').pop() !== id) {
+  log(`branch ${BRANCH} does not end in this card's short id (${id}) — plan-check will never find the plan this run saves at ${PLAN_PATH}, so the validated-plan checkpoint will not fire on a resume`)
+}
 
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 const DRY = opts.dryRun === true
 
 // ── doneness is the CALLER's question, not this workflow's ──────────────────
 // This file assumes it was handed work that still needs doing, and it does not
-// check. Deciding whether #${issue} is already merged, already has an open PR,
+// check. Deciding whether this card is already merged, already has an open PR,
 // or targets the wrong base is orchestrator.js's job: its Detect step
 // suffix-matches every subtask's PR, drops any whose base is not this run's
 // baseBranch, and aborts outright when the API will not answer; runSubtask then
@@ -276,11 +340,6 @@ const DRY = opts.dryRun === true
 //
 // The time gap between Detect and this run is covered where it actually
 // matters: Implement re-checks for a live PR on the branch before touching it.
-
-// project: fully resolved ids, passed down by the orchestrator. REQUIRED —
-// there is no boardless mode. A subtask that ships a PR while its card silently
-// stays in Backlog is indistinguishable from one that never ran.
-const project = opts.project && typeof opts.project === 'object' ? { ...opts.project } : null
 
 // agent() can throw when the model returns without calling StructuredOutput —
 // a transient harness fault, not a real blocker. Retry exactly once with an
@@ -324,103 +383,13 @@ function printableOnly(text) {
   return String(text ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
 }
 
-// ── board — orchestrator-resolved ids only ───────────────────────────────────
-// Ids are NOT looked up here. The orchestrator resolves them once per milestone
-// in its Configure phase and forwards the resolved block to every subtask, so
-// this workflow only ever receives them ready-made — no dispatch, no GraphQL.
-//
-// An earlier version could also resolve them itself from a bare project.number,
-// for the standalone `/task 251` case. That path cost an agent dispatch on every
-// run and was never taken under the orchestrator, which is how this workflow is
-// actually driven. Pass the resolved block; there is no boardless mode.
-// (orchestrator.js still accepts a plain {number: N} — resolving by name is its
-// job, not this file's.)
-const DEFAULT_OPTION_NAMES = { backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done' }
-
-function resolveProject() {
-  if (!project) {
-    throw new Error(
-      'task workflow needs args.project with resolved ids {id, fieldId, optionIds} — the '
-      + 'orchestrator resolves them once per milestone and forwards them. There is no boardless mode.')
-  }
-  if (!(project.id && project.fieldId && project.optionIds)) {
-    throw new Error(
-      'task workflow was passed `project` without resolved ids (id/fieldId/optionIds). Let the '
-      + 'orchestrator resolve and forward them, or resolve them once yourself (see the '
-      + 'setup-project skill) and pass the whole block.')
-  }
-  return {
-    id: project.id, fieldId: project.fieldId, optionIds: project.optionIds,
-    statusField: project.statusField || 'Status',
-    optionNames: { ...DEFAULT_OPTION_NAMES, ...(project.optionNames || project.options || {}) },
-  }
-}
-const board = resolveProject()
-const optionNames = board.optionNames
-
-// This workflow only ever makes TWO card moves: "In progress" when Explore
-// accepts the subtask, and "In review" when its PR opens. An earlier version
-// also moved the card at spec->implement, but both of those stages map to the
-// SAME "In progress" option — the second mutation always wrote the value the
-// first had just written. "Backlog" belongs to milestone setup and "Done" to
-// the orchestrator's post-merge step; neither is this workflow's to write.
-//
-// Reusable prompt fragment for the board mutation — embeddable as the TAIL of
-// another stage's own agent call (Explore/PR) instead of a separate dispatch,
-// since that agent already has tool access and full context. Every call site
-// must frame this as best-effort and instruct the model not to let its failure
-// affect the stage's real return value.
-const [repoOwner, repoShortName] = repo.split('/')
-
-function boardMoveInstructions(optionKey, cached) {
-  const known = cached && typeof cached === 'object' ? cached : {}
-  const id = value => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : null)
-  const itemId = id(known.itemId)
-  const parentItemId = id(known.parentItemId)
-
-  const findCard = number => `gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){projectItems(first:10){nodes{id project{id}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${number} --jq '.data.repository.issue.projectItems.nodes[] | select(.project.id=="${board.id}") | .id'`
-  const setStatus = (idRef, optionId) => `gh api graphql -f query='mutation($i:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:"${board.id}",itemId:$i,fieldId:"${board.fieldId}",value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' -f i="${idRef}" -f o="${optionId}"`
-
-  // A project item id is stable for the life of the card, so re-resolving it in
-  // a later stage is a round trip that buys nothing. Explore resolves both ids
-  // and reports them; every stage after it is handed them. The only way a
-  // cached id goes bad is a card removed and re-added mid-run, which the
-  // stale-id fallback below covers.
-  const step1 = itemId
-    ? `1. This card's id was already resolved during exploration — use it as-is, do NOT look it up again:
-ITEM_ID="${itemId}"`
-    : `1. Find the card:
-ITEM_ID=$(${findCard(issue)})`
-
-  // The siblings' statuses are NOT cacheable: they are exactly what changes as
-  // the run progresses, which is the whole reason the parent gets re-mirrored.
-  const step3 = parentItemId
-    ? `3. Mirror the parent story. Its card id was also resolved during exploration:
-PARENT_ITEM_ID="${parentItemId}"
-You still need the siblings' CURRENT statuses, which change as the run progresses:
-${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
-Among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target "${optionNames.done}"; otherwise (a mix) target "${optionNames.inProgress}". Then run the step-2 mutation against $PARENT_ITEM_ID with the matching option id from this map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.
-If a mutation fails with a not-found/invalid-id error the cached id is stale (card removed and re-added): look that card up by its issue number with the same projectItems query, then retry once.`
-    : `3. Mirror the parent story. Fetch:
-${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
-If there is no parent, stop here. Otherwise, among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target status by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target is "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target is "${optionNames.done}"; otherwise (a mix) target is "${optionNames.inProgress}". Then find the parent's card with the step-1-style query (its issue number) and set its Status with the step-2-style mutation using this option-id map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.`
-
-  const report = known.report === true
-    ? `
-
-Finally, return board.itemId, board.parentItemId (empty if no parent) and board.parentNumber (0 if none) — later stages reuse these instead of re-querying. Report them even if a mutation failed.`
-    : ''
-
-  return `
-Move the board card for ${repo} issue #${issue} to Status "${optionNames[optionKey]}", then mirror its parent story. Use ONLY the Status-setting mutation below — never create, close, edit, or delete anything.
-
-${step1}
-
-2. Set its Status (pass the option id with -f, NOT -F — -F coerces numeric-looking strings to int and the mutation rejects it):
-${setStatus('$ITEM_ID', board.optionIds[optionKey])}
-
-${step3}${report}`
-}
+// A status-write failure (brd missing from the trigger agent's PATH, a denied
+// permission prompt, …) must not sink a subtask whose PR is already open and
+// green — but it must not silently no-op either, or a run reports `done: true`
+// with a board still entirely at `todo`. So every rollup dispatch is
+// best-effort for CONTROL FLOW but feeds this list, which the final return
+// surfaces as `statusWritten`/`statusWriteError` for the caller to report.
+const statusWriteErrors = []
 
 // ── 1. explore ────────────────────────────────────────────────────────────────
 phase('Explore')
@@ -429,26 +398,20 @@ const verificationStep = providedVerification
   ? `5. Verification commands are already known for this run (discovered by the caller) — return them EXACTLY as given, do not re-discover them: ${JSON.stringify(providedVerification)}. Still locate this repo's testing standards doc (via CLAUDE.md) — step 6 needs it.`
   : `5. Discover this repo's own verification commands — do NOT assume a stack. Check CLAUDE.md, its testing standards doc, CI workflow files (.github/workflows/), and the manifest (pyproject.toml/package.json/etc.) for how tests, typecheck, and lint actually run. If the repo documents multiple SEPARATE invocations for different test tiers (e.g. one tier must run in its own process), report them as separate items in fullSuite, not concatenated with &&.`
 
-const explorePrompt = `Explore ${repo} subtask #${issue} in ${repoDir} and report what the later stages need.
+const explorePrompt = `Explore ${repo} subtask card ${id} in ${repoDir} and report what the later stages need.
 
-1. \`gh issue view ${issue} --repo ${repo} --json title,body,labels,milestone\` — if the labels do NOT include "subtask" (e.g. it is a story), set refused=true with the reason and stop (skip everything below, including the board step).
-2. Read the parent story (\`gh api graphql\` on issue.parent, or the "Subtask of #N" line in the body) and list its sibling sub-issues with states.
+1. \`cd ${repoDir} && brd show ${card}\` — read this card's title, description and parent_id for what the subtask asks for. If parent_id is empty, this card is a MILESTONE (the root of the hierarchy has no parent): set refused=true with that reason and stop here (skip everything below).
+2. \`cd ${repoDir} && brd show <parent_id>\` (the value from step 1) — this is the parent, but brd's hierarchy is three levels (milestone -> story -> subtask), so a STORY also has a non-empty parent_id (its milestone). Check THIS card's own parent_id: if it is empty, the card from step 1 was a STORY, not a subtask — set refused=true with that distinct reason (name it as a story, not a milestone) and stop here. Only if it is non-empty (confirming step 1's card is genuinely a subtask, two levels down from the milestone) do you have the real parent story: its title/description came from this step's own \`brd show\`, and its siblings come from \`cd ${repoDir} && brd tree <parent_id>\` (parent_id from step 1) — list them with their statuses.
 3. Read this repo's own architecture/standards docs (check CLAUDE.md for an index) and any specs/ADRs the story or subtask cites.
 4. Locate the code the subtask touches: existing modules and sibling tests.
 ${verificationStep}
 6. Find this repo's own test-tier PLACEMENT rules — do NOT assume a taxonomy. Its testing standards doc usually says which tier owns what kind of test (e.g. "unit owns pure combinations, integration owns paths, e2e owns wiring, conformance owns real-vs-fake equivalence" is one repo's version — another repo's tiers and rules will differ). Cite the doc path and summarize its placement rule in one or two lines inside your summary — every later stage that writes a test needs this to place it correctly, not default to a habitual tier out of habit.
-${DRY ? '' : `
-7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
-Return: what #${issue} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`
-const exploreOpts = { label: `explore:#${issue}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: {
+Return: what card ${id} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`
+const exploreOpts = { label: `explore:${id}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: {
   type: 'object', required: ['refused', 'summary', 'verification'],
   properties: {
     refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
-    // Resolved once here so Ship does not re-query for ids that cannot change.
-    board: { type: 'object', properties: {
-      itemId: { type: 'string' }, parentItemId: { type: 'string' },
-      parentNumber: { type: 'integer' } } },
     verification: { type: 'object', required: ['fullSuite'], properties: {
       fullSuite: { type: 'array', items: { type: 'string' } },
       typecheck: { type: 'string' }, lint: { type: 'array', items: { type: 'string' } },
@@ -457,7 +420,7 @@ const exploreOpts = { label: `explore:#${issue}`, phase: 'Explore', model: 'sonn
 } }
 
 let explore = await callAgent(explorePrompt, exploreOpts)
-if (!explore || explore.refused) return { issue, refused: true, reason: explore ? explore.reason : 'explore agent died' }
+if (!explore || explore.refused) return { card, refused: true, reason: explore ? explore.reason : 'explore agent died' }
 
 // A refusal is a real, deliberate answer and skips this — everything else
 // must look like genuine findings before Spec is allowed to trust it. See
@@ -469,19 +432,39 @@ if (degenerate) {
 
 [RETRY: a previous attempt returned findings that do not look real — ${degenerate.detail}. This usually happens when a long free-text summary crowds out the schema's other required fields and the model gives up after repeated validation failures, submitting a placeholder just to complete the call. Do the exploration properly this time: keep summary focused on the essential findings rather than exhaustive prose, and return verification EXACTLY as specified. You MUST finish by returning genuine findings, not a placeholder.]`,
     { ...exploreOpts, label: `${exploreOpts.label}:retry-degenerate` })
-  if (!explore || explore.refused) return { issue, refused: true, reason: explore ? explore.reason : 'explore agent died' }
+  if (!explore || explore.refused) return { card, refused: true, reason: explore ? explore.reason : 'explore agent died' }
   degenerate = explorationOutputGate(explore, providedVerification)
   if (degenerate) {
-    return { issue, blocked: 'exploration', branch: BRANCH, worktree: WORKTREE,
+    return { card, blocked: 'exploration', branch: BRANCH, worktree: WORKTREE,
       detail: `exploration returned degenerate findings twice in a row (${degenerate.detail}) — nothing was written. Stopping here rather than handing Spec unusable input it would have to refuse anyway.` }
   }
 }
 
-// Card ids are stable for the life of the card, so this is resolved once and
-// handed to every later stage instead of being looked up again per board move.
-const boardIds = (explore.board && typeof explore.board === 'object') ? explore.board : {}
-if (!boardIds.itemId) {
-  log('explore did not report a board item id — later card moves will resolve it themselves (one extra query per move)')
+// Explore accepted real work: roll the card's status to in_progress
+// deterministically, via rollup.mjs's own ancestry walk — not a prompt asking
+// a model to build GraphQL and reason out a parent rollup itself. Best-effort:
+// its failure must not change anything else this stage returns.
+if (!DRY) {
+  const rollupOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/rollup.mjs --card ${card} --status in_progress --repo-dir ${repoDir} --compact
+
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. This step is best-effort: report a failure via the schema's error field, do not retry it yourself, and do not let it change anything else.`,
+    { label: `rollup:${id}:in_progress`, phase: 'Explore', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+      type: 'object', required: ['stdout'],
+      properties: {
+        stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+        error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+      },
+    } })
+  if (!rollupOut) {
+    const msg = 'rollup (in_progress) agent died — card status was not rolled up'
+    log(msg)
+    statusWriteErrors.push(msg)
+  } else if (rollupOut.error) {
+    const msg = `rollup (in_progress) failed: ${rollupOut.error}`
+    log(msg)
+    statusWriteErrors.push(msg)
+  }
 }
 
 const verification = providedVerification || explore.verification
@@ -489,7 +472,7 @@ const suiteCmds = (verification.fullSuite || []).filter(Boolean)
 
 const noSuite = verificationGate(suiteCmds, opts.allowNoVerification, Boolean(providedVerification))
 if (noSuite) {
-  return { issue, blocked: noSuite.blocked, branch: BRANCH, worktree: WORKTREE, detail: noSuite.detail }
+  return { card, blocked: noSuite.blocked, branch: BRANCH, worktree: WORKTREE, detail: noSuite.detail }
 }
 
 const verifyBlock = [
@@ -499,13 +482,13 @@ const verifyBlock = [
 ].filter(Boolean).join('\n')
 
 if (DRY) {
-  return { issue, mode: 'dryRun', branch: BRANCH, worktree: WORKTREE, verification,
+  return { card, mode: 'dryRun', branch: BRANCH, worktree: WORKTREE, verification,
     note: 'dryRun: Explore only. No worktree, no writes.' }
 }
 
-// ── plan-check — is there already a VALIDATED plan for this issue? ──────────
-// Filename is deterministic per issue (no date), so it survives across days
-// and reruns. A validated plan is the durable checkpoint for the three most
+// ── plan-check — is there already a VALIDATED plan for this card? ───────────
+// Filename is deterministic per the branch's stem (no date), so it survives
+// across days and reruns. A validated plan is the durable checkpoint for the three most
 // expensive upstream stages (Sonnet Spec, Opus Plan, Sonnet Validate) — skip
 // all three when one already exists, same durable-state pattern orchestrator
 // uses for subtask doneness (see orchestrator.js's isSubtaskDone).
@@ -519,7 +502,7 @@ const wtOut = await callAgent(`Run this command and return its stdout EXACTLY as
    bun ${scriptsDir}/worktree.mjs --repo ${repo} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} --repo-dir ${repoDir} --compact
 
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means a live PR already owns this branch. Report it and stop.`,
-  { label: `worktree:#${issue}`, phase: 'Implement', model: 'haiku', ...triggerAgent, schema: {
+  { label: `worktree:${id}`, phase: 'Implement', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {
       stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
@@ -532,7 +515,7 @@ let worktreeState
 try {
   worktreeState = JSON.parse(printableOnly(String(wtOut.stdout ?? '')))
 } catch (err) {
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
+  return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
     detail: `worktree.mjs returned output that is not JSON (${err.message}). Nothing was created. First 200 characters: ${String(wtOut.stdout ?? '').slice(0, 200)}` }
 }
 
@@ -540,7 +523,7 @@ try {
 // established there was none when it queued this subtask; one appearing since
 // is a human's call, not this run's.
 if (worktreeState.openPr) {
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
+  return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
     existingPr: worktreeState.openPr,
     detail: `an open PR (#${worktreeState.openPr}) already exists on ${BRANCH} — nothing was created, reset or committed.` }
 }
@@ -550,15 +533,15 @@ if (worktreeState.prLookupError) {
 log(`worktree ${worktreeState.created ? 'created' : 'reused'} at ${WORKTREE} (branch ${worktreeState.branchExisted ? 'existed' : 'new'}, ${worktreeState.commitCount} commit(s) on top of ${baseBranch})`)
 
 const planCheck = await (async () => {
-  // Find `*issue-<n>.md` and grep it for one marker: `ls` and `grep`, no
+  // Find `*-<shortid>.md` and grep it for one marker: `ls` and `grep`, no
   // judgement. It cost a dispatch every run only because a Workflow script
   // cannot touch a disk, so the agent is now a trigger and the rules live in
   // scripts/plan-check.mjs, where they are tested.
   const out = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/plan-check.mjs --repo-dir ${repoDir} --issue ${issue} --plans-dir ${plansDir} --compact
+   bun ${scriptsDir}/plan-check.mjs --repo-dir ${repoDir} --card ${id} --plans-dir ${plansDir} --compact
 
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
-    { label: `plan-check:#${issue}`, phase: 'Spec', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+    { label: `plan-check:${id}`, phase: 'Spec', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
       type: 'object', required: ['stdout'],
       properties: {
         stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
@@ -583,7 +566,7 @@ if (planCheck && planCheck.found && planCheck.validated === true &&
   log(`resumed: validated plan already exists at ${plan} — skipping Spec/Plan/Validate`)
 } else {
   // ── 2a. spec (Sonnet) ──────────────────────────────────────────────────────
-  const spec = await callAgent(`Write the spec for ${repo} subtask #${issue} in ${repoDir}.
+  const spec = await callAgent(`Write the spec for ${repo} subtask card ${id} in ${repoDir}.
 
 Exploration findings:
 ${clip(explore.summary, 8000, 'exploration summary')}
@@ -598,7 +581,7 @@ Save it to EXACTLY \`${SPEC_PATH}\`, creating the directory if needed and overwr
 The design decisions were already argued out when this milestone was broken down — you are NARROWING an agreed design to one subtask, not authoring a new one. Do not invent scope the exploration findings do not support.
 
 Return a one-paragraph summary of what you specified — the file itself is the artifact, and every later stage reads it from disk.`,
-    { label: `spec:#${issue}`, phase: 'Spec', model: 'opus', agentType: 'leave-me-alone:spec-author' })
+    { label: `spec:${id}`, phase: 'Spec', model: 'opus', agentType: 'leave-me-alone:spec-author' })
   if (!spec) throw new Error('spec agent died')
 
   // ── 2b. validate the SPEC, before anything is planned on top of it ─────────
@@ -607,7 +590,7 @@ Return a one-paragraph summary of what you specified — the file itself is the 
   // patching the plan papers over it. superpowers dispatches its two reviewer
   // templates at exactly these two points for the same reason.
   phase('Validate')
-  const specVerdict = await callAgent(`Adversarial review of the SPEC at ${SPEC_PATH} — ${repo} subtask #${issue} in ${repoDir}. No plan exists yet; do not write one.
+  const specVerdict = await callAgent(`Adversarial review of the SPEC at ${SPEC_PATH} — ${repo} subtask card ${id} in ${repoDir}. No plan exists yet; do not write one.
 
 Check it against superpowers' spec reviewer criteria:
 - completeness — TODOs, placeholders, "TBD", missing sections
@@ -623,19 +606,19 @@ Verify every suspicion against the actual files before reporting. Fold every CON
 Calibration: only flag what would cause a real problem when planning or implementing. Minor wording and stylistic preference are not issues; this stage gates a run.
 
 Return blockers=true ONLY if something unresolvable remains (a contradiction needing a human decision), with the reason.`,
-    { label: `validate-spec:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'leave-me-alone:plan-critic', schema: {
+    { label: `validate-spec:${id}`, phase: 'Validate', model: 'sonnet', agentType: 'leave-me-alone:plan-critic', schema: {
       type: 'object', required: ['blockers', 'summary'],
       properties: { blockers: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' } },
     } })
   if (!specVerdict || specVerdict.blockers) {
-    return { issue, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
+    return { card, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
       reason: specVerdict ? specVerdict.reason : 'spec validator died',
       detail: `stopped before planning: ${specVerdict ? (specVerdict.reason || 'spec has unresolvable blockers') : 'the spec validator returned nothing'}. The spec is at ${SPEC_PATH}; nothing was planned or implemented.` }
   }
 
   // ── 2b. plan (Opus) ────────────────────────────────────────────────────────
   phase('Plan')
-  const planPath = await callAgent(`Write the TDD implementation plan for ${repo} subtask #${issue} in ${repoDir}.
+  const planPath = await callAgent(`Write the TDD implementation plan for ${repo} subtask card ${id} in ${repoDir}.
 
 Read the spec at ${SPEC_PATH} — read it from disk, do not work from any summary. It was adversarially reviewed and CORRECTED in place after it was written, so any copy of it in this prompt would be the pre-review version.
 
@@ -660,7 +643,7 @@ Return:
 - skillInvoked: true ONLY if you actually invoked \`superpowers:writing-plans\` and followed it. False if the skill was unavailable or you wrote the plan from memory instead — say which in note.
 - selfReviewed: true if you ran that skill's Self-Review checklist.
 - note: one line, only when something above is false.`,
-    { label: `plan:#${issue}`, phase: 'Plan', model: 'opus', agentType: 'leave-me-alone:plan-author', schema: {
+    { label: `plan:${id}`, phase: 'Plan', model: 'opus', agentType: 'leave-me-alone:plan-author', schema: {
       type: 'object', required: ['path', 'skillInvoked'],
       properties: {
         path: { type: 'string' }, skillInvoked: { type: 'boolean' },
@@ -676,7 +659,7 @@ Return:
   // silently, which is the failure mode this whole file exists to avoid. Stop
   // instead — re-running once the skill resolves costs one plan.
   if (planPath.skillInvoked !== true) {
-    return { issue, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
+    return { card, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
       detail: `the plan was written WITHOUT the superpowers:writing-plans skill (${planPath.note || 'no reason given'}). `
         + 'That skill defines the format Implement and Review both assume, so a plan written from memory is not the '
         + 'same artifact. Check the superpowers plugin is installed and resolvable, then re-run.' }
@@ -686,13 +669,13 @@ Return:
   }
   plan = String(planPath.path || '').trim()
   if (!plan.startsWith('/')) {
-    return { issue, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
+    return { card, blocked: 'validation', branch: BRANCH, worktree: WORKTREE,
       detail: `plan returned "${plan.slice(0, 120)}" instead of an absolute path; nothing downstream can find the plan file.` }
   }
 
   // ── 3. adversarial validation ──────────────────────────────────────────────
   phase('Validate')
-  const verdict = await callAgent(`Adversarial review of the PLAN at ${plan} — ${repo} subtask #${issue} in ${repoDir}. Its spec is at ${SPEC_PATH} and was already reviewed and corrected; treat it as settled and review the plan AGAINST it rather than re-litigating it.
+  const verdict = await callAgent(`Adversarial review of the PLAN at ${plan} — ${repo} subtask card ${id} in ${repoDir}. Its spec is at ${SPEC_PATH} and was already reviewed and corrected; treat it as settled and review the plan AGAINST it rather than re-litigating it.
 
 Try to BREAK it before implementation: contradictions with this repo's architecture/standards docs (read them; the exploration cites them), decisions that bite sibling subtasks, dishonest or tautological tests, config side-effects, steps not executable verbatim. Verify every suspicion against the actual files/tools before reporting (run commands if needed).
 
@@ -706,37 +689,30 @@ Calibration: only flag what would cause a real problem during implementation. An
 
 If a plan defect traces back to the SPEC being wrong, say so in reason and set blockers=true rather than patching the plan around it: a plan that compensates for a bad spec hides the real problem from every later stage.
 
-Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust.
-
-Then, as a final best-effort step, comment on ${repo} issue #${issue} via \`gh issue comment ${issue} --repo ${repo} --body "..."\` (concise, one line) — if blockers=false, that the plan validated and implementation is next; if blockers=true, that the /task workflow stopped at validation, with your reason. Do NOT let this comment's outcome change blockers/reason/summary above — note any failure in summary instead. Explore moves the card to "${optionNames.inProgress}" on a best-effort basis; do not touch the board here either way.
+Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust. Explore already rolled the card's status to in_progress on a best-effort basis; do not touch card status here either way.
 
 Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
-    { label: `validate-plan:#${issue}`, phase: 'Validate', model: 'sonnet', agentType: 'leave-me-alone:plan-critic', schema: {
+    { label: `validate-plan:${id}`, phase: 'Validate', model: 'sonnet', agentType: 'leave-me-alone:plan-critic', schema: {
       type: 'object', required: ['blockers', 'summary'],
       properties: { blockers: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' } },
     } })
   if (!verdict || verdict.blockers) {
-    // Validate posts its own blocked-comment as its last step — but a DEAD
-    // validator (null after callAgent's retry) never got that far, so the
-    // issue would go silent. Only that case needs the fallback dispatch.
-    if (!verdict) {
-      try {
-        // Fully formed here rather than described: there is nothing for the
-        // agent to compose, so there is nothing for it to get wrong.
-        await agent(`Run this command exactly as written and report nothing else:
-gh issue comment ${issue} --repo ${repo} --body ${JSON.stringify('The /task workflow stopped at validation: the validator agent died without returning a verdict. No plan was accepted and nothing was implemented. Re-run the task to retry.')}`,
-          { label: `blocked-comment:#${issue}`, phase: 'Validate', model: 'haiku', effort: 'low', ...triggerAgent })
-      } catch (err) {
-        log(`blocked-comment agent threw (${err && err.message ? err.message : err}) — returning the blocker anyway`)
-      }
-    }
-    return { issue, blocked: 'validation', reason: verdict ? verdict.reason : 'validator died' }
+    // This used to post a best-effort `gh issue comment` here (and, on a DEAD
+    // validator, a fallback comment dispatch of its own) — deleted
+    // deliberately: there is no GitHub issue backing a brd card to comment
+    // on. The escalation payload below plus the orchestrator's full stop is
+    // the mechanism now, not a side-channel comment.
+    return { card, blocked: 'validation', reason: verdict ? verdict.reason : 'validator died' }
   }
 }
 
 // ── 4. implement (Sonnet, TDD) ───────────────────────────────────────────────
+// This stage used to close with a best-effort `gh issue comment` announcing
+// implementation finished — deleted deliberately, same reason as Validate
+// above: there is no GitHub issue backing a brd card to comment on, and the
+// escalation payload plus the orchestrator's full stop is the mechanism.
 phase('Implement')
-const impl = await callAgent(`Implement ${repo} subtask #${issue} from the validated plan at ${plan}.
+const impl = await callAgent(`Implement ${repo} subtask card ${id} from the validated plan at ${plan}.
 
 First, compute the resume key ONCE and reuse that exact value everywhere below — both paths need it, and every commit must carry it:
 \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\`
@@ -756,15 +732,13 @@ Work ONLY inside ${WORKTREE}. Sync dependencies per this repo's own convention, 
 ${verifyBlock}
 If baseline is ALREADY red before you change anything (and you are not resuming known-green work), stop and report it — do not fix someone else's failure inside this subtask.
 
-Then STRICT TDD per the plan (continuing from the next uncompleted step if you RESUMED): write the failing test, RUN it and confirm it fails for the right reason, minimal code to green, re-run, refactor, commit granularly (conventional commits, reference #${issue}). Never write production code without having watched its test fail. Every new test must land in the tier the plan assigned it (per this repo's own test-placement rule) — if a test you're about to write doesn't fit its assigned tier once you're looking at the real code, stop and say so rather than dropping it into whatever tier is convenient. Mutation-check any meta/guard tests (make them fail once on purpose). End EVERY commit message with both trailers:
+Then STRICT TDD per the plan (continuing from the next uncompleted step if you RESUMED): write the failing test, RUN it and confirm it fails for the right reason, minimal code to green, re-run, refactor, commit granularly (conventional commits, reference card ${id}). Never write production code without having watched its test fail. Every new test must land in the tier the plan assigned it (per this repo's own test-placement rule) — if a test you're about to write doesn't fit its assigned tier once you're looking at the real code, stop and say so rather than dropping it into whatever tier is convenient. Mutation-check any meta/guard tests (make them fail once on purpose). End EVERY commit message with both trailers:
 Co-Authored-By: ${coauthor}
 Plan-Hash: $PLAN_HASH
 
 (compute \`PLAN_HASH\` once at the start, as above, and reuse it — every commit on this branch must carry the SAME hash so a later resume can find them all with one \`git log --grep\`.)
 
 Do NOT push, do NOT open a PR.
-
-As a final best-effort step (do NOT let its failure change anything above): comment on ${repo} issue #${issue} (concise, one line, via \`gh issue comment ${issue} --repo ${repo} --body "..."\`) that implementation finished on branch ${BRANCH} and review/verify/PR is next.
 
 Return a structured result. This stage has THREE stop conditions, all above: an OPEN PR on \`${BRANCH}\`; a \`sha256sum\` that failed or gave an empty PLAN_HASH; a baseline suite already red before you changed anything. Reporting one of those in prose while claiming success is the single worst outcome here — the pipeline would review, verify and open a PR on top of a stop you were told to make.
 
@@ -776,7 +750,7 @@ Return a structured result. This stage has THREE stop conditions, all above: an 
 - report: the normal implementation report — commits made (oneline), test count added, deviations from the plan with reasons. The reviewer reads this next, so keep it factual and scoped to what you changed. Empty when blocked=true.
 
 Do not set blocked=true for a difficulty you worked through and solved.`,
-  { label: `implement:#${issue}`, phase: 'Implement', model: 'sonnet', agentType: 'leave-me-alone:code-worker', schema: {
+  { label: `implement:${id}`, phase: 'Implement', model: 'sonnet', agentType: 'leave-me-alone:code-worker', schema: {
     type: 'object', required: ['blocked', 'report'],
     properties: {
       blocked: { type: 'boolean' }, blockedReason: { type: 'string' },
@@ -795,14 +769,14 @@ if (!impl) throw new Error('implement agent died')
 // "this subtask's PR" is exactly the kind of confusion that costs a milestone.
 if (impl.blocked) {
   const stoppedOnPr = Number.isInteger(impl.existingPr) && impl.existingPr > 0
-  return { issue, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
+  return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
     ...(stoppedOnPr ? { existingPr: impl.existingPr } : {}),
     detail: impl.blockedReason || 'implement stopped without naming a reason' }
 }
 
 // ── 5. review + fixes ────────────────────────────────────────────────────────
 phase('Review')
-const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff origin/${baseBranch}...HEAD\`. Context: ${repo} subtask #${issue}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
+const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff origin/${baseBranch}...HEAD\`. Context: ${repo} subtask card ${id}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
 ${clip(impl.report, 12000, 'implementer report')}
 
 Check every new test file's path against this repo's own test-placement rule (cited in the plan/exploration findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
@@ -830,7 +804,7 @@ Return:
 - commitCount: the SECOND command's number.
 - taggedCount: the THIRD command's number.
 - planHash: the value \`$PLAN_HASH\` held when you ran that third command — the 8 characters, not the command.`,
-  { label: `review:#${issue}`, phase: 'Review', model: 'opus', agentType: 'leave-me-alone:code-worker', schema: {
+  { label: `review:${id}`, phase: 'Review', model: 'opus', agentType: 'leave-me-alone:code-worker', schema: {
     type: 'object', required: ['findings'],
     properties: {
       findings: { type: 'array', items: { type: 'string' } },
@@ -846,7 +820,7 @@ Return:
 // that; Review had no such check, so a dead reviewer read as "no unresolved
 // blockers" and the run walked on with nothing actually reviewed.
 if (!review) {
-  return { issue, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
+  return { card, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
     detail: `the review stage returned nothing, so this branch has not been reviewed and its worktree state is unknown. Nothing was pushed. ${WORKTREE} is intact — re-run this subtask to review it.` }
 }
 
@@ -856,7 +830,7 @@ if (!review) {
 // finding was reported and the PR opened anyway.
 const unresolvedBlockers = (review && review.unresolvedBlockers) || []
 if (unresolvedBlockers.length > 0) {
-  return { issue, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
+  return { card, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
     detail: `review left ${unresolvedBlockers.length} unresolved blocker(s): ${unresolvedBlockers.join('; ')}` }
 }
 
@@ -877,7 +851,7 @@ if (hashDrift) log(hashDrift)
 const gate = reviewGate(review, BRANCH, baseBranch)
 if (gate && gate.warn) log(gate.warn)
 if (gate && gate.blocked) {
-  return { issue, blocked: gate.blocked, branch: BRANCH, worktree: WORKTREE, plan, detail: gate.detail }
+  return { card, blocked: gate.blocked, branch: BRANCH, worktree: WORKTREE, plan, detail: gate.detail }
 }
 
 // ── 6. ship — verify, then push and open the PR (never merge) ───────────────
@@ -898,24 +872,60 @@ const verifyFlags = suiteCmds
   .map(command => `--verify ${JSON.stringify(command)}`)
   .join(' ')
 
+// ship.mjs now requires --title, and there is no module-scope place task.js
+// could have gotten it from — task.js's own identity is the card id, not its
+// title, and titles can change after Explore ran. Ship is a command-running
+// stage, so it reads the title fresh from brd rather than threading it
+// through every earlier stage's return value.
+const titleOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   cd ${repoDir} && brd show ${card}
+
+brd resolves its database by walking up from the CURRENT directory looking for a marker, so this must run from ${repoDir} — this workflow is repo-agnostic and the driving session may sit somewhere else entirely; without the \`cd\` this fails with ProjectNotFoundError.
+
+It prints one line of JSON (an envelope: {"ok":true,"data":{...}}) that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
+  { label: `card-title:${id}`, phase: 'Ship', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+    type: 'object', required: ['stdout'],
+    properties: {
+      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+    },
+  } })
+if (!titleOut) throw new Error('card-title agent died')
+
+let cardTitle
+try {
+  const envelope = JSON.parse(printableOnly(String(titleOut.stdout ?? '')))
+  const rawTitle = envelope && envelope.ok === true && envelope.data && typeof envelope.data.title === 'string'
+    ? envelope.data.title
+    : ''
+  // shellQuote is correct at the SHELL level, but the quoted result still
+  // lands inside a single prompt line the agent runs verbatim — a title
+  // containing a newline would split that line into a second, unintended
+  // command. Collapse all whitespace runs to one space rather than trusting
+  // a card's title to be single-line.
+  cardTitle = rawTitle.replace(/\s+/g, ' ').trim()
+  if (!cardTitle) throw new Error('brd show did not return a usable data.title')
+} catch (err) {
+  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `could not read this card's title from \`brd show ${card}\` (${err.message}) — ship.mjs requires --title and there is nowhere else to get it. First 200 characters: ${String(titleOut.stdout ?? '').slice(0, 200)}` }
+}
+
 // Ship used to be five-plus commands fenced in by prose: run every verification
 // command, judge whether they were green, push, open the PR with --head passed
 // explicitly, move the card. Only the last of those needed a model, and even
 // that only because a Workflow script cannot run `gh`.
 //
 // The PR title and body are DERIVED inside the script, never passed on the
-// command line. Long text an agent has to type is a quoting accident waiting to
-// happen, and it was the last place a model could alter what ships.
+// command line except for --title itself, which is shell-quoted here — long
+// text an agent has to type is a quoting accident waiting to happen, and it
+// was the last place a model could alter what ships.
 const shipOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/ship.mjs --repo ${repo} --issue ${issue} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
+   bun ${scriptsDir}/ship.mjs --repo ${repo} --card ${card} --title ${shellQuote(cardTitle)} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
 
 This command runs the FULL verification suite before it pushes anything, which can take several minutes on a large repo — the Bash tool's own default timeout (2 minutes) is too short for it. You MUST call the Bash tool for this command with an explicit timeout of 600000 (its 10-minute maximum). Do not omit that parameter and do not rely on the default.
 
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.
-
-Only if that command printed \`"number"\` with a real PR number, do this as a final best-effort step (its failure must not change anything you return):
-${boardMoveInstructions('inReview', boardIds)}`,
-  { label: `ship:#${issue}`, phase: 'Ship', model: 'haiku', ...triggerAgent, schema: {
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.`,
+  { label: `ship:${id}`, phase: 'Ship', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {
       stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
@@ -930,7 +940,7 @@ try {
 } catch (err) {
   // Parsed HERE so a mangled transcription fails at the boundary rather than
   // arriving as a plausible-looking success.
-  return { issue, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
+  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
     detail: `ship.mjs returned output that is not JSON (${err.message}). The branch may or may not have been pushed — check before re-running. First 200 characters: ${String(shipOut.stdout ?? '').slice(0, 200)}` }
 }
 
@@ -940,16 +950,43 @@ try {
 // differently. The dirty-tree and Plan-Hash gates that used to live here are
 // now decided in script above, off Review's reported values.
 if (!ship.passed) {
-  return { issue, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan, detail: ship.detail }
+  return { card, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan, detail: ship.detail }
 }
 
 // ship.mjs already parsed the URL and refused to push after a red command, so
 // these read its fields rather than re-deriving anything.
 const prNumber = Number(ship.number)
 if (!Number.isInteger(prNumber) || prNumber <= 0) {
-  return { issue, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
+  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
     detail: ship.detail || `verification passed but no usable PR number came back (url: ${String(ship.url ?? '').slice(0, 120)}). The branch ${ship.pushed ? 'WAS' : 'may not have been'} pushed — check before re-running.` }
 }
 
-return { issue, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan,
-  tests: (ship.verified || []).map(v => `${v.ok ? 'PASS' : 'FAIL'} ${v.command}`).join('\n') }
+// A PR is open — per the spec, that is what "done" means: a run never merges,
+// so it cannot observe anything later than "shipped", and "in_review" has no
+// occupant in this model. Deterministic, via rollup.mjs's own ancestry walk,
+// not a prompt asking a model to build GraphQL and reason out a parent rollup
+// itself. Best-effort: its failure must not change anything this stage returns.
+const rollupOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/rollup.mjs --card ${card} --status done --repo-dir ${repoDir} --compact
+
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. This step is best-effort: report a failure via the schema's error field, do not retry it yourself, and do not let it change anything else.`,
+  { label: `rollup:${id}:done`, phase: 'Ship', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+    type: 'object', required: ['stdout'],
+    properties: {
+      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+    },
+  } })
+if (!rollupOut) {
+  const msg = 'rollup (done) agent died — card status was not rolled up'
+  log(msg)
+  statusWriteErrors.push(msg)
+} else if (rollupOut.error) {
+  const msg = `rollup (done) failed: ${rollupOut.error}`
+  log(msg)
+  statusWriteErrors.push(msg)
+}
+
+return { card, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan,
+  tests: (ship.verified || []).map(v => `${v.ok ? 'PASS' : 'FAIL'} ${v.command}`).join('\n'),
+  ...statusWriteOutcome(statusWriteErrors) }

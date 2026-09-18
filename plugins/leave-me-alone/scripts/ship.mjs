@@ -6,13 +6,14 @@
 // EXPLICITLY (omitting it once opened a PR from an unrelated branch under this
 // subtask's title), then move the card. All of that is mechanical.
 //
-//   bun scripts/ship.mjs --repo o/n --issue 23 --branch m2/task-23 \
-//     --base m2/task-22 --worktree /abs/wt --verify "npm test" --compact
+//   bun scripts/ship.mjs --repo o/n --card a32af745 --title "feat: write rows" \
+//     --branch m12/task-write-rows-a32af745 --base m12/task-write-columns-91a2 \
+//     --worktree /abs/wt --verify "npm test" --compact
 //
-// The PR title and body are DERIVED, not passed. Long text on a command line
-// that an agent has to type is a quoting accident waiting to happen, and it is
-// the last place a model could alter what ships. The title comes from the issue
-// (minus its ordinal prefix), the body from the branch's own commits.
+// The PR body is DERIVED, not passed: it comes from the branch's own commits,
+// plus a reference to the brd card. The title is passed verbatim — the caller
+// (task.js) already has the card's title in hand, so there is nothing to
+// derive it from and no round trip to make.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -35,7 +36,7 @@ export function parseArgs(argv) {
     if (flag === '--verify') out.verify.push(take())
     else if (flag === '--compact') out.compact = true
     else if (flag === '--repo') out.repo = take()
-    else if (flag === '--issue') out.issue = Number(take())
+    else if (flag === '--card') out.card = take()
     else if (flag === '--branch') out.branch = take()
     else if (flag === '--base') out.base = take()
     else if (flag === '--worktree') out.worktree = take()
@@ -44,7 +45,8 @@ export function parseArgs(argv) {
   }
   for (const [key, test, msg] of [
     ['repo', v => typeof v === 'string' && /^[^/\s]+\/[^/\s]+$/.test(v), '--repo owner/name'],
-    ['issue', v => Number.isInteger(v) && v > 0, '--issue <positive integer>'],
+    ['card', v => typeof v === 'string' && v.length > 0, '--card <shortid>'],
+    ['title', v => typeof v === 'string' && v.length > 0, '--title <string>'],
     ['branch', v => typeof v === 'string' && v.length > 0, '--branch <name>'],
     ['base', v => typeof v === 'string' && v.length > 0, '--base <name>'],
     ['worktree', v => typeof v === 'string' && v.startsWith('/'), '--worktree <absolute path>'],
@@ -58,18 +60,15 @@ export function parseArgs(argv) {
   return out
 }
 
-// "21.1 feat: --json output" -> "feat: --json output". The ordinal orders the
-// stack; it means nothing in a PR title.
-export function titleFromIssue(issueTitle) {
-  return String(issueTitle ?? '').replace(/^\s*[A-Za-z]?\d+(?:\.\d+)*\.?\d*\s+/, '').trim()
-}
-
-export function buildBody(commitLines, issue) {
+export function buildBody(commitLines, card) {
   const commits = (commitLines ?? []).map(l => String(l).trim()).filter(Boolean)
   return [
     commits.length ? commits.map(line => `- ${line}`).join('\n') : '- (no commit subjects found)',
     '',
-    `Closes #${issue}`,
+    // NOT "Closes" — merging a PR does not and cannot change a brd card, and
+    // the card is already `done` by the time this body is written, because
+    // done means the PR is open.
+    `brd card: ${card}`,
     '',
     '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
   ].join('\n')
@@ -93,7 +92,7 @@ export function verifyError(err) {
 }
 
 export async function ship(options, run = runner, wait) {
-  const { repo, issue, branch, base, worktree, verify } = options
+  const { repo, card, branch, base, worktree, verify } = options
   const result = { passed: false, verified: [], pushed: false, url: '', number: null, detail: '' }
 
   // Nothing uncommitted may ship: git push does not carry a dirty tree, so the
@@ -120,9 +119,6 @@ export async function ship(options, run = runner, wait) {
   await withRetries('ship: push', () => run(['git', '-C', worktree, 'push', '-u', 'origin', branch]), { wait })
   result.pushed = true
 
-  const issueTitle = options.title
-    || titleFromIssue(jsonFrom((await withRetries('ship: issue title',
-      () => run(['gh', 'issue', 'view', String(issue), '--repo', repo, '--json', 'title']), { wait })).stdout).title)
   const subjects = String(
     (await run(['git', '-C', worktree, 'log', `origin/${base}..HEAD`, '--format=%s'])).stdout).split('\n')
 
@@ -136,7 +132,7 @@ export async function ship(options, run = runner, wait) {
   let url = ''
   try {
     url = lastLine((await run(['gh', 'pr', 'create', '--repo', repo, '--base', base, '--head', branch,
-      '--title', issueTitle, '--body', buildBody(subjects, issue)])).stdout)
+      '--title', options.title, '--body', buildBody(subjects, card)])).stdout)
   } catch (err) {
     const existing = jsonFrom((await withRetries('ship: post-failure PR check',
       () => run(['gh', 'api', `repos/${repo}/pulls?state=open&per_page=100`,

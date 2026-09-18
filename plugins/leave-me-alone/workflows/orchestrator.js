@@ -1,10 +1,10 @@
 export const meta = {
   name: 'orchestrator',
-  description: 'Drive a whole GitHub milestone on any repo as STACKED PULL REQUESTS: resolve the project board ids by name, compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
+  description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
   whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the prTargets column.',
   phases: [
-    { title: 'Configure', detail: 'project/field/option ids looked up BY NAME, plus the repo\'s own verification commands', model: 'haiku' },
-    { title: 'Detect', detail: 'stories, blockedBy edges, sub-issues, existing per-subtask PRs and their bases', model: 'haiku' },
+    { title: 'Configure', detail: 'nothing to resolve; there is no board. Detect is already dispatched by this point', model: 'haiku' },
+    { title: 'Detect', detail: 'stories and blockedBy edges from brd, existing per-subtask PRs and their bases', model: 'haiku' },
     { title: 'Dispatch', detail: 'per-level pipeline over stories; each story\'s subtasks sequential, task.js once per subtask, stacked', model: 'sonnet' },
   ],
 }
@@ -25,35 +25,40 @@ export const meta = {
 // `args`, `agent`, `log`, `phase`, `pipeline`, or `workflow`, and it must not
 // depend on anything declared below PURE:END.
 
-// ── ordering (task.js drives one already-chosen subtask; only this script orders) ──
+// ── card identity (branch naming) ────────────────────────────────────────────
+// Mirrors scripts/naming.mjs exactly. Duplicated rather than imported: a
+// Workflow script executes in a sandbox with no module resolution (see the
+// file-level comment above), so an `import` here would break the orchestrator
+// at launch — the same reason printableOnly() below is a second copy rather
+// than a shared one. Keep this in lockstep with naming.mjs; naming.test.mjs is
+// the source of truth for its behavior.
 
-const DEFAULT_ORDINAL = '^[A-Za-z]?\\d+(?:\\.\\d+)*\\.(\\d+)\\b'
-
-function makeParseOrdinal(pattern) {
-  const ordinalRe = new RegExp(pattern)
-  return function parseOrdinal(title) {
-    const match = ordinalRe.exec(String(title ?? ''))
-    return match && match[1] !== undefined ? Number(match[1]) : null
-  }
+function shortId(cardId) {
+  if (typeof cardId !== 'string') throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  const hex = cardId.replace(/-/g, '')
+  if (!/^[0-9a-f]{32}$/i.test(hex)) throw new Error(`not a card id: ${JSON.stringify(cardId)}`)
+  return hex.slice(0, 8).toLowerCase()
 }
 
-// With no ordinal-tagged title, the `sub_issues` endpoint's order (creation
-// order) IS the intended order — never re-sort by issue number. With at least
-// one tag, tagged subtasks sort by ordinal; untagged ones keep relative order
-// and sink to the end.
-function orderSubtasks(subtasks, pattern) {
-  const parseOrdinal = makeParseOrdinal(pattern || DEFAULT_ORDINAL)
-  const list = [...(subtasks ?? [])]
-  if (!list.some(subtask => parseOrdinal(subtask.title) !== null)) return list
-  return list
-    .map((subtask, index) => ({ subtask, index, ordinal: parseOrdinal(subtask.title) }))
-    .sort((a, b) => {
-      if (a.ordinal === null && b.ordinal === null) return a.index - b.index
-      if (a.ordinal === null) return 1
-      if (b.ordinal === null) return -1
-      return a.ordinal - b.ordinal || a.index - b.index
-    })
-    .map(entry => entry.subtask)
+function slugify(title, max = 24) {
+  const flat = String(title ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  if (flat.length <= max) return flat
+  const cut = flat.slice(0, max)
+  const lastDash = cut.lastIndexOf('-')
+  return (lastDash > 0 ? cut.slice(0, lastDash) : cut).replace(/-+$/g, '')
+}
+
+function taskStem(card) {
+  const slug = slugify(card && card.title)
+  const id = shortId(card && card.id)
+  return slug ? `${slug}-${id}` : id
+}
+
+function taskBranch(branchPrefix, card) {
+  return `${branchPrefix}/task-${taskStem(card)}`
 }
 
 // A script's JSON round-trips through an agent's structured output, and that
@@ -70,7 +75,7 @@ function printableOnly(text) {
 
 // STACKED MODE: nothing merges during a run, so "done" cannot mean "merged".
 // A subtask this run has finished has an OPEN PR against its own stack parent,
-// and its issue is still open — the old rule (CLOSED issue AND merged PR) would
+// and its card is still open — the old rule (CLOSED issue AND merged PR) would
 // call every finished subtask unfinished and re-dispatch the whole stack.
 //
 // So: a subtask is done when a PR for it EXISTS against the correct base. The
@@ -79,37 +84,44 @@ function printableOnly(text) {
 // anything and must not read as done. That is the #1133 bug, and inverting this
 // rule without the base check would resurrect it immediately.
 //
-// A CLOSED issue with NO PR ever found still counts: that is work closed as
-// already-delivered or duplicate (#1145 on refactor-nori m21, delivered
-// incidentally by #1141), which must not be re-dispatched.
+// A card marked `status: 'done'` with NO PR ever found still counts: that is
+// work closed as already-delivered or duplicate (#1145 on refactor-nori m21,
+// delivered incidentally by #1141), which must not be re-dispatched.
+//
+// Reads `status` — the field flattenMilestone() (census.mjs) actually emits.
+// There is no `state` anywhere in the census; a field nothing emits is worse
+// than no check at all.
 function isSubtaskDone(subtask) {
   if (subtask.pr && typeof subtask.pr === 'object') return true
-  return String(subtask.state ?? '').toUpperCase() === 'CLOSED' && subtask.pr === null
+  return subtask.pr === null && String(subtask.status ?? '').toLowerCase() === 'done'
 }
 
-// A CLOSED story is finished, full stop — never re-dispatch its subtasks.
+// A story marked done is finished, full stop — never re-dispatch its subtasks.
 // Per-subtask doneness leans on 30-odd PR lookups; during the 2026-08-17
 // GitHub outage those returned null and closed stories were re-implemented.
-// The story's single state field can't be corrupted piecemeal, so it is the
+// The story's single status field can't be corrupted piecemeal, so it is the
 // safer gate; a story closed by mistake is reopened by hand.
 function isStoryClosed(story) {
-  return String(story.state ?? '').toUpperCase() === 'CLOSED'
+  return String(story.status ?? '').toLowerCase() === 'done'
 }
 
-function remainingSubtasks(story, ordinalPattern) {
+// The census arrives already ordered by its blocked_by chain — no re-sorting
+// by title here, ever. A title carries no ordinal any more.
+function remainingSubtasks(story) {
   if (isStoryClosed(story)) return []
-  return orderSubtasks((story.subtasks ?? []).filter(subtask => !isSubtaskDone(subtask)), ordinalPattern)
+  return (story.subtasks ?? []).filter(subtask => !isSubtaskDone(subtask))
 }
 
-function computeLevels(stories, ordinalPattern) {
-  const doneNumbers = new Set(
-    stories.filter(story => isStoryClosed(story) || remainingSubtasks(story, ordinalPattern).length === 0)
-      .map(story => story.number),
+function computeLevels(stories) {
+  const doneIds = new Set(
+    stories.filter(story => isStoryClosed(story) || remainingSubtasks(story).length === 0)
+      .map(story => story.id),
   )
-  const pending = stories
-    .filter(story => !doneNumbers.has(story.number))
-    .sort((a, b) => a.number - b.number)
-  const pendingNumbers = new Set(pending.map(story => story.number))
+  // Card ids are opaque strings with no inherent order, unlike issue numbers —
+  // the census's own array order is the only stable order available, so
+  // pending stories keep it rather than being re-sorted.
+  const pending = stories.filter(story => !doneIds.has(story.id))
+  const pendingIds = new Set(pending.map(story => story.id))
 
   const levels = []
   const placed = new Set()
@@ -118,13 +130,13 @@ function computeLevels(stories, ordinalPattern) {
     // A dep is satisfied when the upstream story is fully done (not pending)
     // or placed in an earlier level.
     const ready = rest.filter(story => (story.blockedBy ?? [])
-      .every(dep => !pendingNumbers.has(dep) || placed.has(dep)))
+      .every(dep => !pendingIds.has(dep) || placed.has(dep)))
     if (ready.length === 0) {
-      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.number}`).join(', ')}`)
+      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.id}`).join(', ')}`)
     }
     levels.push(ready)
-    for (const story of ready) placed.add(story.number)
-    rest = rest.filter(story => !placed.has(story.number))
+    for (const story of ready) placed.add(story.id)
+    rest = rest.filter(story => !placed.has(story.id))
   }
   return levels
 }
@@ -157,27 +169,27 @@ function computeLevels(stories, ordinalPattern) {
 // stories never recurses back and never trips it. That guard only covers the
 // no-subtask fallthrough path.
 function assertNoBlockerCycles(stories) {
-  const byNumber = new Map(stories.map(story => [story.number, story]))
-  const state = new Map()   // number -> 'visiting' | 'done'
-  const walk = (number, trail) => {
-    if (state.get(number) === 'done') return
-    if (state.get(number) === 'visiting') {
-      const cycle = [...trail.slice(trail.indexOf(number)), number].map(n => `#${n}`).join(' -> ')
+  const byId = new Map(stories.map(story => [story.id, story]))
+  const state = new Map()   // id -> 'visiting' | 'done'
+  const walk = (id, trail) => {
+    if (state.get(id) === 'done') return
+    if (state.get(id) === 'visiting') {
+      const cycle = [...trail.slice(trail.indexOf(id)), id].map(n => `#${n}`).join(' -> ')
       throw new Error(`orchestrator: dependency cycle among stories ${cycle} — no stack can be rooted until it is broken`)
     }
-    state.set(number, 'visiting')
-    for (const dep of byNumber.get(number)?.blockedBy ?? []) {
-      if (byNumber.has(dep)) walk(dep, [...trail, number])
+    state.set(id, 'visiting')
+    for (const dep of byId.get(id)?.blockedBy ?? []) {
+      if (byId.has(dep)) walk(dep, [...trail, id])
     }
-    state.set(number, 'done')
+    state.set(id, 'done')
   }
-  for (const story of stories) walk(story.number, [])
+  for (const story of stories) walk(story.id, [])
 }
 
-// A subtask's branch is DERIVED, never discovered. The issue number is
-// immutable, unique within the repo, and already the identity everything else
-// uses, so branch = prefix + number is reproducible from the graph alone and
-// needs no lookup.
+// A subtask's branch is DERIVED, never discovered. The card id is immutable,
+// unique, and already the identity everything else uses, so branch =
+// taskBranch(prefix, card) is reproducible from the graph alone and needs no
+// lookup.
 //
 // An earlier version preferred a PR's real head ref, to survive a run whose
 // branchPrefix had changed. That made the geometry depend on the PRs and the
@@ -186,27 +198,27 @@ function assertNoBlockerCycles(stories) {
 // prefix is now treated as part of the milestone's identity: matchPr() reports
 // a merged PR under some OTHER name rather than silently ignoring it.
 function subtaskBranch(subtask, branchPrefix) {
-  return `${branchPrefix}${subtask.number}`
+  return taskBranch(branchPrefix, subtask)
 }
 
 // The branch a story's stack ends on — what a dependent story roots from.
-function storyTip(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen = new Set()) {
-  const ordered = orderSubtasks(story.subtasks ?? [], ordinalPattern)
+function storyTip(story, storiesById, branchPrefix, baseBranch, seen = new Set()) {
+  const ordered = story.subtasks ?? []
   if (ordered.length > 0) return subtaskBranch(ordered[ordered.length - 1], branchPrefix)
   // A story with no subtasks contributes no branch; fall through to its own root.
-  return storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen)
+  return storyRoot(story, storiesById, branchPrefix, baseBranch, seen)
 }
 
 // Where a story's stack starts. Returns a branch name, or throws with a message
 // meant for a human when the shape is one this cannot decide.
-function storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen = new Set()) {
-  if (seen.has(story.number)) {
-    throw new Error(`orchestrator: dependency cycle reached story #${story.number} while computing its stack root`)
+function storyRoot(story, storiesById, branchPrefix, baseBranch, seen = new Set()) {
+  if (seen.has(story.id)) {
+    throw new Error(`orchestrator: dependency cycle reached story #${story.id} while computing its stack root`)
   }
-  seen.add(story.number)
+  seen.add(story.id)
   // Only blockers inside this milestone can be stacked on; anything else is
   // external work whose branch this run knows nothing about.
-  const blockers = (story.blockedBy ?? []).filter(dep => storiesByNumber.has(dep))
+  const blockers = (story.blockedBy ?? []).filter(dep => storiesById.has(dep))
   if (blockers.length === 0) return baseBranch
   if (blockers.length > 1) {
     // Deliberately not guessing. Rooting on one blocker silently builds this
@@ -214,21 +226,21 @@ function storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBra
     // is exactly what this mode does not do. A human picks: merge the blockers
     // first, or split the story.
     throw new Error(
-      `orchestrator: story #${story.number} is blocked by ${blockers.length} stories (${blockers.map(n => `#${n}`).join(', ')}), `
+      `orchestrator: story #${story.id} is blocked by ${blockers.length} stories (${blockers.map(n => `#${n}`).join(', ')}), `
       + 'and stacked mode can only root a stack on ONE parent branch. Merge those blockers into '
       + `${baseBranch} first, or restructure the dependencies so this story has a single blocker.`)
   }
-  return storyTip(storiesByNumber.get(blockers[0]), storiesByNumber, branchPrefix, ordinalPattern, baseBranch, seen)
+  return storyTip(storiesById.get(blockers[0]), storiesById, branchPrefix, baseBranch, seen)
 }
 
 // The base each remaining subtask's PR targets: the previous subtask in the
 // story's FULL order, or the story's root for the first one.
-function stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch) {
-  const ordered = orderSubtasks(story.subtasks ?? [], ordinalPattern)
-  const root = storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+function stackBases(story, storiesById, branchPrefix, baseBranch) {
+  const ordered = story.subtasks ?? []
+  const root = storyRoot(story, storiesById, branchPrefix, baseBranch)
   const bases = new Map()
   ordered.forEach((subtask, index) => {
-    bases.set(subtask.number, index === 0 ? root : subtaskBranch(ordered[index - 1], branchPrefix))
+    bases.set(subtask.id, index === 0 ? root : subtaskBranch(ordered[index - 1], branchPrefix))
   })
   return bases
 }
@@ -267,61 +279,6 @@ function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }
   return { escalated: true, level, story, subtask, pr, trigger, baseBranch, attempts: attempts ?? [], message }
 }
 
-// ── board ids ───────────────────────────────────────────────────────────────
-// Turning a project NUMBER into the opaque node ids the mutation API needs.
-// The two GraphQL queries are the agent's job; deciding which field and which
-// options they name is not.
-//
-// This used to be prose: "find the single-select field named exactly X and the
-// options named exactly A, B, C, D". That is string equality handed to a model
-// trained to be helpful about near misses — and "In Progress" vs "In progress"
-// is exactly the mismatch the setup skill warns about. A model that helpfully
-// matched it would return a valid-looking option id for the WRONG column, the
-// mutation would succeed, and cards would land in the wrong place all run with
-// nothing able to notice: the ids are opaque, so there is no later check that
-// could catch it.
-function resolveBoardIds(fields, statusField, optionNames) {
-  const list = Array.isArray(fields) ? fields : []
-  const named = value => `"${String(value ?? '')}"`
-  const loose = value => String(value ?? '').trim().toLowerCase()
-
-  const field = list.find(entry => entry && entry.name === statusField)
-  if (!field) {
-    // A near miss is the likely cause, so name it rather than saying "missing".
-    const near = list.find(entry => entry && loose(entry.name) === loose(statusField))
-    return { ok: false, missing: near
-      ? `no field named exactly ${named(statusField)} — the closest is ${named(near.name)}. Names are matched exactly, case and spacing included.`
-      : `no single-select field named ${named(statusField)} (present: ${list.map(entry => named(entry && entry.name)).join(', ') || 'none'})` }
-  }
-  if (!field.id) return { ok: false, missing: `field ${named(statusField)} was reported without an id` }
-
-  const options = Array.isArray(field.options) ? field.options : []
-  const optionIds = {}
-  const missing = []
-  for (const [key, wanted] of Object.entries(optionNames)) {
-    const option = options.find(entry => entry && entry.name === wanted && entry.id)
-    if (option) { optionIds[key] = option.id; continue }
-    const near = options.find(entry => entry && loose(entry.name) === loose(wanted))
-    missing.push(near ? `${named(wanted)} (found ${named(near.name)})` : named(wanted))
-  }
-  if (missing.length > 0) {
-    return { ok: false, missing: `field ${named(statusField)} is missing option(s): ${missing.join(', ')}. `
-      + `Present: ${options.map(entry => named(entry && entry.name)).join(', ') || 'none'}. Names are matched exactly, case and spacing included.` }
-  }
-  return { ok: true, fieldId: field.id, optionIds }
-}
-
-// Ids never change, so a caller that already has them can skip the lookup
-// dispatch entirely. All four options must be present: a partial block would
-// disable exactly one column's moves and look like it worked.
-function hasResolvedBoardIds(projectArg) {
-  if (!projectArg || typeof projectArg !== 'object') return false
-  const ids = projectArg.optionIds
-  const filled = value => typeof value === 'string' && value.length > 0
-  if (!filled(projectArg.id) || !filled(projectArg.fieldId) || !ids || typeof ids !== 'object') return false
-  return ['backlog', 'inProgress', 'inReview', 'done'].every(key => filled(ids[key]))
-}
-
 // ── which PR belongs to a subtask ───────────────────────────────────────────
 // This was ~700 characters of prose in Detect's prompt, executed per subtask by
 // a haiku agent. It is pure string and number logic, and it is the exact rule
@@ -333,17 +290,25 @@ function hasResolvedBoardIds(projectArg) {
 // Detect now fetches the PR list ONCE for the whole milestone and returns it
 // raw; the matching happens here, per subtask.
 
-// Not the matcher any more — the DIAGNOSTIC. Branches are derived, so a PR is
-// this subtask's only if its head ref is exactly the derived name. This answers
-// the narrower question "does some other branch end with this subtask's
-// number?", which is what a changed branchPrefix looks like: `aq-1050`,
-// `wip/1050` and a bare `1050` are all near misses for 1050, while `task-11050`
-// belongs to a different subtask entirely. matchPr() halts on a MERGED near
-// miss rather than re-implementing finished work (#1050); randomising or
-// timestamping branchPrefix would make every run one big near miss.
-function prMatchesSubtask(ref, number) {
+// Not the matcher any more — the DIAGNOSTIC. Branches are derived, so this
+// checks whether some OTHER branch — outside the milestone's own prefix — ends
+// with this subtask's short id, which is what a changed branchPrefix looks
+// like: `aq-a1b2c3d4`, `wip/a1b2c3d4` and a bare `a1b2c3d4` are all near
+// misses for card a1b2c3d4…, while a DIFFERENT card's short id that merely
+// ends the same is not. matchPr() halts on a MERGED near miss rather than
+// re-implementing finished work (#1050); randomising or timestamping
+// branchPrefix would make every run one big near miss.
+//
+// Consistent with filterPullRequests() in detect.mjs (Task 6): both key on the
+// card's short id, never on the slug — a card's title can be edited after its
+// PR is open, and slug-based matching would orphan that PR. This is also why
+// matchPr()'s PRIMARY match below is id-scoped, not a literal string == against
+// the derived branch: the slug half of that derived name is mutable board
+// data, and an exact-string match would silently re-classify a live PR as
+// unstarted the moment someone edits a card's title mid-milestone.
+function prMatchesSubtask(ref, subtaskShortId) {
   const text = String(ref ?? '')
-  const suffix = String(number)
+  const suffix = String(subtaskShortId)
   if (suffix.length === 0 || !text.endsWith(suffix)) return false
   const before = text[text.length - suffix.length - 1]
   return before === undefined || !/[0-9]/.test(before)
@@ -374,13 +339,20 @@ function normalizePr(raw) {
 // 'unknown' (doneness is unverifiable, which halts the run), or 'wrong-base' (a
 // PR exists on this branch but not on its stack parent, so it is not evidence
 // of doneness — #1133).
-function matchPr(number, expectedBranch, expectedBase, pulls) {
+function matchPr(subtaskShortId, expectedBranch, expectedBase, pulls, branchPrefix) {
   const all = (pulls ?? []).map(normalizePr)
   // Merged work first, then the most recent. Only ever applied WITHIN a group
   // that already agrees on branch and base, so it can never override either.
   const rank = (a, b) => (a.merged !== b.merged ? (a.merged ? -1 : 1) : b.number - a.number)
 
-  const onBranch = all.filter(candidate => candidate.ref === expectedBranch)
+  // The PRIMARY match: id-scoped, not a literal string ==. `expectedBranch`
+  // carries the card's slug, and a slug is mutable board data — a title edit
+  // must not orphan an open PR. Still scoped to THIS milestone's prefix, so a
+  // ref outside it (a changed branchPrefix) still falls through to the
+  // near-miss path below rather than being treated as a match.
+  const onBranch = all.filter(candidate =>
+    candidate.ref === expectedBranch
+    || (candidate.ref.startsWith(branchPrefix) && candidate.ref.endsWith(`-${subtaskShortId}`)))
   if (onBranch.length > 0) {
     const onBase = onBranch.filter(candidate => candidate.base === expectedBase).sort(rank)
     if (onBase.length > 0) return { pr: onBase[0], note: null }
@@ -388,32 +360,32 @@ function matchPr(number, expectedBranch, expectedBase, pulls) {
     const unreported = onBranch.find(candidate => !candidate.base)
     if (unreported) {
       return { pr: 'unknown',
-        note: `detect: PR #${unreported.number} for subtask #${number} reported no base branch — doneness is unverifiable` }
+        note: `detect: PR #${unreported.number} for subtask ${subtaskShortId} reported no base branch — doneness is unverifiable` }
     }
     const best = [...onBranch].sort(rank)[0]
     return { pr: 'wrong-base',
-      note: `detect: ignoring PR #${best.number} for subtask #${number} — base "${best.base}" is not its stack parent "${expectedBase}"` }
+      note: `detect: ignoring PR #${best.number} for subtask ${subtaskShortId} — base "${best.base}" is not its stack parent "${expectedBase}"` }
   }
 
   // Nothing on the derived branch. Before calling this unstarted, look for a PR
-  // sitting on some OTHER branch that ends with this subtask's number — the
+  // sitting on some OTHER branch that ends with this subtask's short id — the
   // signature of a changed branchPrefix (#1050). Ignoring those silently is what
   // re-dispatched finished work onto an empty diff.
-  const nearMiss = all.filter(candidate => prMatchesSubtask(candidate.ref, number)).sort(rank)
+  const nearMiss = all.filter(candidate => prMatchesSubtask(candidate.ref, subtaskShortId)).sort(rank)
   const mergedElsewhere = nearMiss.find(candidate => candidate.merged)
   if (mergedElsewhere) {
     // Halting costs one re-run with the right prefix. Guessing costs the work.
     return { pr: 'unknown',
-      note: `detect: subtask #${number} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
+      note: `detect: subtask ${subtaskShortId} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
         + `but this run derives its branch as "${expectedBranch}". That is what a changed branchPrefix looks like `
-        + '(the default is now "m<milestone>/task-"; a milestone built under a bare "task-" predates it). '
+        + '(the default is now "m<milestone>"; a milestone built under a bare "task-" predates it). '
         + 'Re-run with the branchPrefix this milestone was built under, or the finished work will be re-implemented.' }
   }
   if (nearMiss.length > 0) {
     // Unmerged and under another name: a human's branch, or an abandoned
     // attempt. Worth saying out loud, not worth halting the milestone.
     return { pr: null,
-      note: `detect: subtask #${number} — ignoring unmerged PR #${nearMiss[0].number} on "${nearMiss[0].ref}"; `
+      note: `detect: subtask ${subtaskShortId} — ignoring unmerged PR #${nearMiss[0].number} on "${nearMiss[0].ref}"; `
         + `this run works "${expectedBranch}"` }
   }
   return { pr: null, note: null }
@@ -422,20 +394,21 @@ function matchPr(number, expectedBranch, expectedBase, pulls) {
 // One pass, because the geometry no longer depends on the PRs. Mutates each
 // subtask's `pr` in place and RETURNS the notes to log, so this stays free of
 // harness globals.
-function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, ordinalPattern, baseBranch) {
-  const storiesByNumber = new Map(stories.map(story => [story.number, story]))
+function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, baseBranch) {
+  const storiesById = new Map(stories.map(story => [story.id, story]))
   const notes = []
   for (const story of stories) {
     // Computed even when the lookup failed: a multi-blocker shape is a human
     // decision and must surface either way.
-    const expectedBases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+    const expectedBases = stackBases(story, storiesById, branchPrefix, baseBranch)
     for (const subtask of story.subtasks ?? []) {
       if (prLookupFailed) { subtask.pr = 'unknown'; continue }
       const { pr, note } = matchPr(
-        subtask.number,
+        shortId(subtask.id),
         subtaskBranch(subtask, branchPrefix),
-        expectedBases.get(subtask.number) || baseBranch,
-        pulls)
+        expectedBases.get(subtask.id) || baseBranch,
+        pulls,
+        branchPrefix)
       if (note) notes.push(note)
       subtask.pr = pr
     }
@@ -474,6 +447,41 @@ function dropCommandsNamingMissingPaths(commands, missingPaths) {
   return { kept, dropped }
 }
 
+// ── milestone addressing ─────────────────────────────────────────────────────
+// `milestone` may be a positive integer (a legacy numeric milestone), a brd
+// card id, or a title substring — census.mjs's findMilestone() accepts all
+// three and fails loudly on ambiguity. Only the numeric form has an
+// unambiguous branch-prefix default (`m<milestone>`); naively deriving one
+// from a title would produce an invalid git ref (`mMilestone 12: CSV
+// export`), so that default is numeric-only. resolveBranchPrefix() below
+// requires an explicit branchPrefix for anything else, rather than guessing.
+function resolveMilestone(milestoneArg) {
+  if (milestoneArg === undefined || milestoneArg === null || String(milestoneArg).trim().length === 0) {
+    throw new Error(
+      'orchestrator needs args.milestone as a positive integer, a brd card id, or a title substring, '
+      + 'e.g. args: {"repo":"owner/name","repoDir":"/abs/path","milestone":4,"baseBranch":"main","nonce":"<now>"}')
+  }
+  const asNumber = Number(milestoneArg)
+  const isNumeric = Number.isInteger(asNumber) && asNumber > 0
+  return { milestone: isNumeric ? asNumber : String(milestoneArg).trim(), isNumeric }
+}
+
+function resolveBranchPrefix(branchPrefixArg, milestone, isNumeric) {
+  if (typeof branchPrefixArg === 'string' && branchPrefixArg.length > 0) return branchPrefixArg
+  if (isNumeric) return `m${milestone}`
+  throw new Error(
+    `orchestrator needs args.branchPrefix — milestone ${JSON.stringify(milestone)} is not a positive integer, `
+    + 'so there is no safe default to derive a branch prefix from it (a title or card id would produce an '
+    + 'invalid git ref). Pass branchPrefix explicitly, e.g. "m12".')
+}
+
+// A milestone title/id can contain spaces or shell metacharacters; the trigger
+// step below hands this straight to a shell, so it must be quoted rather than
+// interpolated bare the way the numeric form always was.
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
+
 // PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
@@ -489,10 +497,7 @@ const repoDir = opts.repoDir
 if (typeof repoDir !== 'string' || !repoDir.startsWith('/')) {
   throw new Error('orchestrator needs args.repoDir as an absolute path to the checkout')
 }
-const milestoneNumber = Number(opts.milestone ?? opts.milestoneNumber)
-if (!Number.isInteger(milestoneNumber) || milestoneNumber <= 0) {
-  throw new Error('orchestrator needs a milestone NUMBER, e.g. args: {"repo":"owner/name","repoDir":"/abs/path","milestone":4,"baseBranch":"main","nonce":"<now>"}')
-}
+const { milestone, isNumeric: milestoneIsNumeric } = resolveMilestone(opts.milestone ?? opts.milestoneNumber)
 // Never defaulted: nothing maps a milestone to a branch, and guessing would
 // target the wrong integration branch.
 const baseBranch = opts.baseBranch
@@ -528,12 +533,12 @@ if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
     + 'stacked PRs and never merges, so there is nothing to auto-merge and no conflicts to resolve mid-run.')
 }
 const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
-// Branch names carry their milestone: subtask #13 of milestone 12 lives on
-// `m12/task-13`, worktree `.claude/worktrees/m12/task-13`.
+// Branch names carry their milestone: a subtask card of milestone 12 lives on
+// `m12/task-<slug>-<shortid>` (taskBranch()), worktree
+// `.claude/worktrees/m12/task-<slug>-<shortid>`.
 //
-// This is NOT collision avoidance — issue numbers are already unique per repo,
-// so two milestones can never claim the same subtask number, and two runs of
-// the SAME milestone would share this prefix anyway. It buys legibility and
+// This is NOT collision avoidance — card ids are already unique, and two runs
+// of the SAME milestone would share this prefix anyway. It buys legibility and
 // bulk cleanup: `git branch --list "m12/*"` and `rm -rf .claude/worktrees/m12`
 // each address exactly one milestone, which matters once a repo has several in
 // flight.
@@ -542,10 +547,7 @@ const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
 // explicit. Whatever it is, it must stay CONSTANT for the life of a milestone:
 // names are derived from it, so changing it points the run at addresses where
 // nothing exists (matchPr halts on a merged PR found under the old name).
-const branchPrefix = typeof opts.branchPrefix === 'string'
-  ? opts.branchPrefix
-  : `m${milestoneNumber}/task-`
-const ordinalPattern = typeof opts.ordinalPattern === 'string' ? opts.ordinalPattern : DEFAULT_ORDINAL
+const branchPrefix = resolveBranchPrefix(opts.branchPrefix, milestone, milestoneIsNumeric)
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 // Caps how many stories within one DAG level are in flight at once — separate
 // from the harness's own global agent() concurrency cap, which throttles
@@ -556,7 +558,6 @@ const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <no
 const maxConcurrentStories = Number.isInteger(opts.maxConcurrentStories) && opts.maxConcurrentStories > 0
   ? opts.maxConcurrentStories
   : 4
-const [owner, repoName] = repo.split('/')
 
 // Workflow scripts cannot locate their own directory, so the sibling script
 // must be named explicitly — no default: this repo can be checked out at any
@@ -603,41 +604,11 @@ const triggerAgentType = typeof opts.triggerAgentType === 'string'
   : 'leave-me-alone:command-runner'
 const triggerAgent = triggerAgentType ? { agentType: triggerAgentType } : {}
 
-// Only needed when the board is given as a NUMBER — resolved ids skip the
-// lookup entirely, and unlike a census those are stable config, not a snapshot.
-const projectScript = typeof opts.projectScript === 'string' && opts.projectScript.startsWith('/')
-  ? opts.projectScript
-  : null
-
 const taskScript = typeof opts.taskScript === 'string' && opts.taskScript.startsWith('/')
   ? opts.taskScript
   : (() => { throw new Error(
       'orchestrator needs args.taskScript as an absolute path to this checkout\'s workflows/task.js '
       + '(e.g. "<repo>/workflows/task.js") — there is no default, since this repo can be checked out anywhere.') })()
-
-// The board is REQUIRED. There is no boardless mode: a run that quietly stops
-// moving cards is indistinguishable from one that never had a board, and a
-// forgotten args.project once left merged subtasks in Backlog for weeks.
-//
-// Resolution happens once, before any work exists, so failing here is free —
-// no worktrees, no branches, no PRs. Card MOVES stay best-effort, because by
-// the time one runs there is a real PR that a bookkeeping hiccup must not undo.
-const projectArg = opts.project && typeof opts.project === 'object' ? opts.project : null
-if (!projectArg) {
-  throw new Error(
-    'orchestrator needs args.project (e.g. {"number":13}) so subtask cards move '
-    + 'Backlog -> In progress -> In review -> Done.')
-}
-if (opts.boardless !== undefined) {
-  throw new Error(
-    'orchestrator: args.boardless is no longer supported — the board is required. '
-    + 'A run that silently stops moving cards looks exactly like a run that never had a board.')
-}
-const statusField = (projectArg && projectArg.statusField) || 'Status'
-const optionNames = {
-  backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done',
-  ...((projectArg && projectArg.options) || {}),
-}
 
 // agent() can throw when the model returns without calling StructuredOutput —
 // a transient harness fault, not a real blocker (halted a full run,
@@ -656,24 +627,10 @@ async function callAgent(prompt, agentOpts) {
   }
 }
 
-// Same retry behaviour as callAgent, but a final failure returns null instead
-// of throwing — for work whose failure should degrade the run, not end it.
-async function callAgentSoftly(prompt, agentOpts) {
-  try {
-    return await callAgent(prompt, agentOpts)
-  } catch (err) {
-    log(`agent ${agentOpts.label} failed: ${err && err.message ? err.message : String(err)}`)
-    return null
-  }
-}
-
-// ── 1. Configure — board ids BY NAME ────────────────────────────────────────
-// ── 2. Detect — raw GitHub state + verification commands; no judgement ──────
-// Started BEFORE the board lookup and awaited after it. The two share no data —
-// nothing in this prompt refers to the board — so running them in sequence just
-// added the shorter call's latency to the longer one's. They stay separate
-// dispatches on purpose: a board failure must not be able to stop a milestone,
-// and merging them would put every board hiccup on the critical path.
+// ── Detect — raw GitHub state + verification commands; no judgement ─────────
+// Dispatched before phase('Configure') is even reached and awaited after it —
+// there is no longer anything for Configure to do first, so this is simply
+// started as early as possible.
 //
 // Each call passes its phase explicitly, so the progress grouping does not
 // depend on which one happens to be running when phase() was last called.
@@ -709,7 +666,7 @@ const detectVerificationStep = index => `${index}. Discover this repo's OWN veri
 // What remains is the one instruction a model still needs against its own
 // reflexes: hand the bytes back untouched rather than tidying them.
 const DETECT_TRIGGER_STEP = `Run this command and return its stdout EXACTLY as printed:
-   bun ${detectScript} --repo ${repo} --milestone ${milestoneNumber} --repo-dir ${repoDir} --compact
+   bun ${detectScript} --repo ${repo} --milestone ${shellQuote(milestone)} --repo-dir ${repoDir} --compact
 
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — report it, do not retry or work around it.`
 
@@ -723,14 +680,14 @@ const detectPrompt = detectSteps.length === 1
   ? `${DETECT_TRIGGER_STEP}
 
 [cache-buster, ignore: ${nonce}]`
-  : `Detect the remaining work on ${repo} milestone #${milestoneNumber}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
+  : `Detect the remaining work on ${repo} milestone ${JSON.stringify(milestone)}, checkout at ${repoDir}. Read state only — do NOT create, close, edit, comment on, or merge anything.
 
 ${detectSteps.join('\n\n')}
 
 Return the raw structure. No summarizing, no judging what is "done". [cache-buster, ignore: ${nonce}]`
 
 const detectPromise = callAgent(detectPrompt,
-  { label: `detect:m${milestoneNumber}`, phase: 'Detect', model: 'haiku', ...triggerAgent, schema: {
+  { label: `detect:${milestone}`, phase: 'Detect', model: 'haiku', ...triggerAgent, schema: {
     type: 'object',
     required: ['ok', 'stdout', ...(providedVerification ? [] : ['verification'])],
     properties: {
@@ -755,68 +712,9 @@ const detectPromise = callAgent(detectPrompt,
 
 phase('Configure')
 
-let board = null
-const makeBoard = (id, fieldId, optionIds) =>
-  ({ id, fieldId, optionIds, optionNames, statusField, number: projectArg && projectArg.number })
-
-if (hasResolvedBoardIds(projectArg)) {
-  // Nothing to look up. Ids are stable for the life of a board, so a caller
-  // that has them (from a previous run's log, or the setup-project skill)
-  // skips this dispatch entirely.
-  board = makeBoard(projectArg.id, projectArg.fieldId, projectArg.optionIds)
-  log(`board ids supplied by caller — no lookup dispatched (project ${projectArg.id})`)
-} else if (Number.isInteger(Number(projectArg.number)) && !projectScript) {
-  throw new Error(
-    'orchestrator: `project` was given as a number but args.projectScript is missing, so there is '
-    + 'no deterministic way to resolve its ids (there is no agent fallback). Pass projectScript as '
-    + 'an absolute path to scripts/resolve.mjs, or pass the resolved {id, fieldId, optionIds} block.')
-} else if (Number.isInteger(Number(projectArg.number))) {
-  // Softly, because "the board is best-effort" was only half true: a RETURNED
-  // failure was logged and the run survived, but a THROWN one (callAgent gives
-  // up after one retry) propagated and killed the milestone. Card bookkeeping
-  // must never be able to do that.
-  const resolved = await callAgentSoftly(`Run this command and return its stdout EXACTLY as printed:
-   bun ${projectScript} --owner ${owner} --number ${projectArg.number} --compact
-
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. It exits non-zero when it finds no project — that is a normal answer, not a reason to retry or improvise.
-
-[cache-buster, ignore: ${nonce}]`,
-    { label: `resolve-project:${projectArg.number}`, phase: 'Configure', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
-      type: 'object', required: ['stdout'],
-      properties: {
-        stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
-        error: { type: 'string', description: 'the command\'s stderr, when it failed' },
-      },
-    } })
-
-  // Board bookkeeping is not worth failing a milestone over, but a silent
-  // downgrade is worse than a loud one.
-  let lookup = null
-  try {
-    lookup = JSON.parse(printableOnly(String((resolved && resolved.stdout) ?? '')))
-  } catch (err) {
-    throw new Error(`orchestrator: ${projectScript} returned output that is not JSON (${err.message}). `
-      + `First 200 characters: ${String((resolved && resolved.stdout) ?? '').slice(0, 200)}`)
-  }
-  if (!lookup || !lookup.found || !lookup.id) {
-    throw new Error(`orchestrator: could not resolve project ${projectArg.number} — `
-      + `${(lookup && lookup.missing) || (resolved && resolved.error) || 'the resolver returned no project'} `
-      + '(see the setup-project skill)')
-  }
-  const ids = resolveBoardIds(lookup.fields, statusField, optionNames)
-  if (!ids.ok) throw new Error(`orchestrator: ${ids.missing} (see the setup-project skill)`)
-  board = makeBoard(lookup.id, ids.fieldId, ids.optionIds)
-  log(`board resolved: project ${projectArg.number} "${lookup.title || ''}" → ${lookup.id}`)
-  log(`board ids for reuse — pass these back to skip this lookup next run: ${JSON.stringify({ id: board.id, fieldId: board.fieldId, optionIds: board.optionIds })}`)
-} else {
-  throw new Error(
-    'orchestrator: `project` was passed without a usable `number` and without a complete '
-    + '{id, fieldId, optionIds:{backlog,inProgress,inReview,done}} block. Pass one or the other.')
-}
-
-// Detect was started before the board lookup; collect it now. A rejection is
-// rethrown with its original error — unlike the board, a failed census means
-// nothing can be dispatched safely.
+// Detect was already dispatched (see above); collect it now. A rejection is
+// rethrown with its original error — a failed census means nothing can be
+// dispatched safely.
 const detectOutcome = await detectPromise
 if (detectOutcome.error) throw detectOutcome.error
 if (!detectOutcome.value) throw new Error('detect agent died')
@@ -862,10 +760,10 @@ const prLookupFailed = census.prLookupFailed === true
 if (prLookupFailed) {
   log('detect: the PR lookup failed after retries — every subtask is treated as unverifiable rather than unstarted')
 }
-const storiesByNumber = new Map(census.stories.map(story => [story.number, story]))
+const storiesById = new Map(census.stories.map(story => [story.id, story]))
 assertNoBlockerCycles(census.stories)
 for (const note of attachPullRequests(
-  census.stories, pullRequests, prLookupFailed, branchPrefix, ordinalPattern, baseBranch)) {
+  census.stories, pullRequests, prLookupFailed, branchPrefix, baseBranch)) {
   log(note)
 }
 
@@ -874,7 +772,7 @@ for (const note of attachPullRequests(
 // merged work twice on 2026-08-17). Stopping costs one re-run.
 const unknownPrs = census.stories.flatMap(story =>
   (story.subtasks ?? []).filter(subtask => subtask.pr === 'unknown')
-    .map(subtask => `#${subtask.number} (story #${story.number})`))
+    .map(subtask => `#${subtask.id} (story #${story.id})`))
 if (unknownPrs.length > 0) {
   throw new Error(
     `orchestrator: PR lookup failed for ${unknownPrs.length} subtask(s) — ${unknownPrs.join(', ')}. `
@@ -911,41 +809,40 @@ const suiteBlock = suiteCmds.length
   ? suiteCmds.map(command => `  - ${command}`).join('\n')
   : '  (NOT DOCUMENTED — find this repo\'s real full-suite command before claiming anything passes)'
 
-const levels = computeLevels(census.stories, ordinalPattern)
-log(`milestone #${milestoneNumber} "${census.milestoneTitle || ''}": ${census.stories.length} stories, ${levels.length} dependency level(s)`)
+const levels = computeLevels(census.stories)
+log(`milestone ${JSON.stringify(milestone)} "${census.milestoneTitle || ''}": ${census.stories.length} stories, ${levels.length} dependency level(s)`)
 
 if (DRY) {
   return {
-    repo, milestone: milestoneNumber, milestoneTitle: census.milestoneTitle, baseBranch,
+    repo, milestone, milestoneTitle: census.milestoneTitle, baseBranch,
     mode: 'dryRun',
-    board: { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds },
     verification,
     plan: levels.map((levelStories, levelIndex) => ({
       level: levelIndex,
       stories: levelStories.map(story => {
-        const bases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
+        const bases = stackBases(story, storiesById, branchPrefix, baseBranch)
         return {
-          story: story.number, title: story.title,
-          root: storyRoot(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch),
-          subtasks: remainingSubtasks(story, ordinalPattern).map(subtask => ({
-            number: subtask.number, title: subtask.title, state: subtask.state,
-            branch: `${branchPrefix}${subtask.number}`,
+          story: story.id, title: story.title,
+          root: storyRoot(story, storiesById, branchPrefix, baseBranch),
+          subtasks: remainingSubtasks(story).map(subtask => ({
+            id: subtask.id, title: subtask.title, status: subtask.status,
+            branch: subtaskBranch(subtask, branchPrefix),
             // The whole point of a dry run in stacked mode: check this column.
-            prTargets: bases.get(subtask.number) || baseBranch,
+            prTargets: bases.get(subtask.id) || baseBranch,
             prExisting: subtask.pr || null,
           })),
         }
       }),
     })),
-    alreadyDone: census.stories.filter(story => remainingSubtasks(story, ordinalPattern).length === 0).map(story => story.number),
-    note: 'dryRun: nothing was dispatched, no board or GitHub write happened. One worktree/branch/PR per SUBTASK, '
+    alreadyDone: census.stories.filter(story => remainingSubtasks(story).length === 0).map(story => story.id),
+    note: 'dryRun: nothing was dispatched, no GitHub write happened. One worktree/branch/PR per SUBTASK, '
       + 'dispatched sequentially within each story. Each PR targets its stack parent (prTargets), NOT the milestone base — '
       + 'verify that column before a real run. Nothing is ever merged.',
   }
 }
 
 if (levels.length === 0) {
-  return { repo, milestone: milestoneNumber, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks' }
+  return { repo, milestone, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks' }
 }
 
 // ── halt flag ────────────────────────────────────────────────────────────────
@@ -966,10 +863,10 @@ function halt(payload) {
 // One dispatch, one PR, no merge. `stackBase` is this subtask's parent branch —
 // the previous subtask's, or the story's root for the first one.
 async function runSubtask(levelIndex, story, subtask, stackBase) {
-  if (halted) return { subtask: subtask.number, skipped: 'halted' }
+  if (halted) return { subtask: subtask.id, skipped: 'halted' }
 
-  // Detect matches PRs by number-suffix, so a resumed PR's real head ref can
-  // carry an older prefix — prefer it over the freshly-derived name.
+  // Branch is always the freshly-derived name, never a resumed PR's real head
+  // ref — see subtaskBranch's comment for why that was deliberately dropped.
   const branch = subtaskBranch(subtask, branchPrefix)
 
   // A PR already exists against the right base, so this subtask is done for this
@@ -977,7 +874,7 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
   // merge, nothing to close: the issue stays open and the card stays wherever
   // task.js left it, until a human merges the stack.
   if (subtask.pr && typeof subtask.pr === 'object') {
-    return { subtask: subtask.number, story: story.number, pr: subtask.pr.number, branch,
+    return { subtask: subtask.id, story: story.id, pr: subtask.pr.number, branch,
       base: stackBase, stacked: true, note: 'PR already open against its stack parent — nothing to redo' }
   }
 
@@ -992,13 +889,16 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     // it for all three of: the worktree cut point, Review's diff base, and the
     // PR target — which is exactly what stacking needs, and why task.js required
     // no change for this mode.
+    //
+    // task.js now takes a brd card id (`card`) and the branch this run already
+    // derived (`branch`), rather than a GitHub issue number and its own
+    // board-move config — it moves the card itself via rollup.mjs.
     dispatched = await workflow({ scriptPath: taskScript }, {
-      repo, repoDir, issue: subtask.number, baseBranch: stackBase, branchPrefix, coauthor, verification,
+      repo, repoDir, card: subtask.id, branch, baseBranch: stackBase, coauthor, verification,
       // Same checkout's scripts/, derived from detectScript so there is one
       // path to get wrong instead of two.
       scriptsDir: detectScript.slice(0, detectScript.lastIndexOf('/')),
       triggerAgentType,
-      project: { id: board.id, fieldId: board.fieldId, optionIds: board.optionIds, optionNames, statusField },
     })
   } catch (err) {
     thrown = err
@@ -1011,9 +911,9 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     const hint = message.includes(taskScript)
       ? ` — task.js was not readable at ${taskScript}; pass args.taskScript if these workflows live elsewhere on this machine`
       : ''
-    halt(escalation({ level: levelIndex, story: story.number, subtask: subtask.number, pr: null, baseBranch: stackBase, trigger: 'blocked',
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: null, baseBranch: stackBase, trigger: 'blocked',
       attempts: [{ attempt: 0, resolved: false, detail: `task workflow threw: ${message}${hint}` }] }))
-    return { subtask: subtask.number, escalated: true }
+    return { subtask: subtask.id, escalated: true }
   }
 
   if (!dispatched || dispatched.refused || dispatched.blocked || !dispatched.pr) {
@@ -1035,21 +935,32 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     if (dispatched && dispatched.existingPr) {
       attempts.push({ attempt: 0, resolved: false, detail: `a PR (#${dispatched.existingPr}) already exists on branch ${branch} and is being driven by something other than this run` })
     }
-    halt(escalation({ level: levelIndex, story: story.number, subtask: subtask.number, pr: dispatched && dispatched.pr, baseBranch: stackBase, trigger, attempts }))
-    return { subtask: subtask.number, escalated: true }
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: dispatched && dispatched.pr, baseBranch: stackBase, trigger, attempts }))
+    return { subtask: subtask.id, escalated: true }
   }
 
   // Belt and braces with task.js's own check: a non-numeric PR reference would
-  // corrupt the stack geometry every later subtask is computed from.
+  // corrupt the stack geometry every later subtask is computed from. PRs
+  // themselves are still real GitHub PRs with numeric identifiers — only the
+  // subtask/story identity moved to card ids.
   const prNumber = Number(dispatched.pr)
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
-    halt(escalation({ level: levelIndex, story: story.number, subtask: subtask.number, pr: null, baseBranch: stackBase, trigger: 'blocked',
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: null, baseBranch: stackBase, trigger: 'blocked',
       attempts: [{ attempt: 0, resolved: false, detail: `PR reference was not a number (${typeof dispatched.pr}) — refusing to stack the next subtask on it` }] }))
-    return { subtask: subtask.number, escalated: true }
+    return { subtask: subtask.id, escalated: true }
   }
 
-  return { subtask: subtask.number, story: story.number, pr: prNumber,
-    branch: dispatched.branch || branch, base: stackBase, stacked: true, plan: dispatched.plan }
+  // task.js's own status write is best-effort so a PR that is already open and
+  // green is never sunk by it — but that failure must not vanish into a `done:
+  // true` run whose board never actually moved. Carry it through verbatim.
+  if (dispatched.statusWritten === false) {
+    log(`subtask ${subtask.id}: PR #${prNumber} is open, but the card's status was NOT written — ${dispatched.statusWriteError || '(no detail)'}`)
+  }
+
+  return { subtask: subtask.id, story: story.id, pr: prNumber,
+    branch: dispatched.branch || branch, base: stackBase, stacked: true, plan: dispatched.plan,
+    statusWritten: dispatched.statusWritten !== false,
+    ...(dispatched.statusWriteError ? { statusWriteError: dispatched.statusWriteError } : {}) }
 }
 
 // ── level loop + pipeline() barrier ─────────────────────────────────────────
@@ -1058,7 +969,7 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
   if (halted) break
   phase('Dispatch')
   const level = levels[levelIndex]
-  log(`level ${levelIndex}: dispatching ${level.length} story/stories, up to ${maxConcurrentStories} at once — ${level.map(story => `#${story.number}`).join(', ')}`)
+  log(`level ${levelIndex}: dispatching ${level.length} story/stories, up to ${maxConcurrentStories} at once — ${level.map(story => `#${story.id}`).join(', ')}`)
   // mapWithConcurrency, not pipeline(): the harness caps agent() calls but not
   // story lanes, and each lane opens a worktree and runs a whole task.js
   // pipeline. One story per item; that story's subtasks run SEQUENTIALLY inside
@@ -1069,17 +980,17 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     // still supplies the branch its successor stacks on. Computed once per
     // story; a shape this cannot decide (multi-blocker, cycle) throws here and
     // pipeline() turns it into a null result, caught as a halt below.
-    const bases = stackBases(story, storiesByNumber, branchPrefix, ordinalPattern, baseBranch)
-    for (const subtask of remainingSubtasks(story, ordinalPattern)) {
-      if (halted) { out.push({ subtask: subtask.number, skipped: 'halted' }); continue }
-      const stackBase = bases.get(subtask.number) || baseBranch
+    const bases = stackBases(story, storiesById, branchPrefix, baseBranch)
+    for (const subtask of remainingSubtasks(story)) {
+      if (halted) { out.push({ subtask: subtask.id, skipped: 'halted' }); continue }
+      const stackBase = bases.get(subtask.id) || baseBranch
       const subtaskResult = await runSubtask(levelIndex, story, subtask, stackBase)
       out.push(subtaskResult)
       // Subtask N+1 branches off N's PUSHED branch, so N must have produced one.
       // Nothing is merged — `stacked` is the success signal now, not `merged`.
       if (!subtaskResult || subtaskResult.stacked !== true) break
     }
-    return { story: story.number, root: bases.size ? [...bases.values()][0] : baseBranch, subtasks: out }
+    return { story: story.id, root: bases.size ? [...bases.values()][0] : baseBranch, subtasks: out }
   })
   // mapWithConcurrency maps a thrown/dead story callback to null
   // rather than propagating — treat that as a halt, or level N+1 would
@@ -1096,7 +1007,20 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
 // Escalation is returned, not thrown, so the payload reaches the top-level
 // session structurally intact. `halted` only stops NEW dispatch — in-flight
 // stages in the current level finish naturally.
-if (halted) return { repo, milestone: milestoneNumber, baseBranch, mode: 'stacked', ...halted, completed: results }
-return { repo, milestone: milestoneNumber, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
+if (halted) return { repo, milestone, baseBranch, mode: 'stacked', ...halted, completed: results }
+
+// A status write is best-effort per subtask (see runSubtask) so it never sinks
+// an open, green PR — but `done: true` must not read as "the board updated"
+// when it didn't. Count what silently failed and say so, rather than letting
+// a clean-looking run hide a board still at `todo`.
+const unwrittenSubtasks = results.flatMap(level => (level.stories ?? []))
+  .flatMap(story => (story && story.subtasks) || [])
+  .filter(subtask => subtask && subtask.statusWritten === false)
+
+return { repo, milestone, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
+  ...(unwrittenSubtasks.length > 0 ? { statusWriteFailures: unwrittenSubtasks.length } : {}),
   note: 'Nothing was merged. Each story is a stack of open PRs, each targeting the previous subtask\'s branch; '
-    + 'merge each stack bottom-up. Subtask issues are still OPEN and their cards sit at "In review" until you do.' }
+    + 'merge each stack bottom-up. Subtask cards already sit at "done" — done means the PR is open, not that it is merged.'
+    + (unwrittenSubtasks.length > 0
+        ? ` WARNING: ${unwrittenSubtasks.length} subtask(s) shipped a PR but the card status write failed — the board did not update for them; see each subtask's statusWriteError.`
+        : '') }

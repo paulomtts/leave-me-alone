@@ -2,10 +2,10 @@
 
 Two Workflow scripts and the deterministic helpers they drive.
 
-- **orchestrator** — one GitHub milestone, end to end, as a stack of pull requests. Computes the
+- **orchestrator** — one brd milestone card, end to end, as a stack of pull requests. Computes the
   story dependency DAG, dispatches each level's stories in parallel, runs each story's subtasks
   sequentially, and full-stops on the first escalation. **Never merges anything.**
-- **task** — one subtask issue, end to end, in its own worktree and branch: explore, spec, review the
+- **task** — one subtask card, end to end, in its own worktree and branch: explore, spec, review the
   spec, plan, review the plan, implement under strict TDD, review the diff, verify, open a PR.
   **Stops at the PR.**
 
@@ -29,11 +29,12 @@ the old scripts, and an old `orchestrator.js` has no idea it is old. The hook st
 `~/.claude/workflows/.synced-version` and says so when the version moves, but it cannot close the
 gap — a hook cannot run before the update it reacts to. **Update, restart, then run a milestone.**
 
-**Requires `bun`, `gh` (authenticated with the `project` scope), `git`, and the `superpowers`
+**Requires `bun`, `gh` (authenticated), `git`, `brd`, and the `superpowers`
 plugin.** The helper scripts are invoked as `bun <script>.mjs`, and `superpowers:writing-plans`
 defines the plan format Implement and Review both assume — Plan reports whether it actually invoked
-that skill, and the run stops if it did not. `node` is needed only for this repo's test suite. A GitHub Projects v2 board — there is no boardless mode. Board setup and the
-milestone conventions are the `setup-project` and `setup-milestone` skills.
+that skill, and the run stops if it did not. `node` is needed only for this repo's test suite. Story
+and subtask state lives in `brd`, not a GitHub Projects v2 board — status moves go through
+`scripts/rollup.mjs`. Milestone conventions are the `setup-milestone` skill.
 
 ## Helper scripts
 
@@ -42,10 +43,9 @@ Each is also usable standalone for inspecting or debugging a run.
 
 | script | what it answers |
 |---|---|
-| `detect.mjs` | the whole milestone census: stories, `blockedBy`, sub-issues, PRs. Also does the ONE `git fetch` + `worktree prune` for the run |
-| `resolve.mjs` | a project number → the node ids the mutation API needs |
+| `detect.mjs` | the whole milestone census from brd (one `brd tree`), plus the PR listing from gh. Also does the ONE git fetch + worktree prune for the run |
 | `worktree.mjs` | create a subtask's worktree idempotently; report what was already there. Never resets, deletes or commits |
-| `plan-check.mjs` | is there a saved, validated plan for this issue? |
+| `plan-check.mjs` | is there a saved, validated plan for this card? |
 | `ship.mjs` | verify → push → open the PR. Nothing is pushed after a red command |
 | `check-workflows.mjs` | do the workflow scripts still parse? |
 
@@ -57,8 +57,6 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
   nonce: "<current timestamp>",
   taskScript:    "<repo>/workflows/task.js",       // required, absolute
   detectScript:  "<repo>/scripts/detect.mjs",      // required, absolute
-  projectScript: "<repo>/scripts/resolve.mjs",     // required when project is a number
-  project: { number: 13 },                          // or the resolved {id, fieldId, optionIds}
   verification: { fullSuite: ["npm test"], typecheck: "", lint: [] },
   dryRun: true,
 })
@@ -69,10 +67,8 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 | `repo`, `repoDir`, `milestone`, `baseBranch` | yes | no defaults; `baseBranch` is never guessed |
 | `nonce` | yes | busts the Detect cache so a re-run re-reads GitHub |
 | `taskScript`, `detectScript` | yes | absolute paths; this repo can be checked out anywhere |
-| `projectScript` | when `project.number` | omit only if you pass resolved ids |
-| `project` | yes | `{number}` or `{id, fieldId, optionIds}`. No boardless mode |
 | `verification` | no | supply it and Detect becomes a pure trigger |
-| `branchPrefix` | no | defaults to `m<milestone>/task-`. **Constant for a milestone's life** |
+| `branchPrefix` | no | defaults to `m<milestone>`. **Constant for a milestone's life** |
 | `maxConcurrentStories` | no | default 4 |
 | `triggerAgentType` | no | default `leave-me-alone:command-runner`; `""` for the default subagent |
 | `dryRun` | no | returns the plan and writes nothing |
@@ -81,48 +77,43 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 
 | phase | agents | what |
 |---|---|---|
-| Configure | 0–1 | `resolve.mjs` → board ids. 0 if you pass them |
-| Detect | 1 | `detect.mjs` → the census, plus the run's single fetch/prune |
+| Configure | 0 | nothing to resolve; there is no board. Detect (below) is already dispatched by this point |
+| Detect | 1 | `detect.mjs` → the census, plus the run's single fetch/prune, plus verification-command discovery |
 | — | 0 | cycles, levels, branch names, PR bases, PR matching, verification filtering |
 | Dispatch | 0 | `workflow(task.js)` per subtask — the agents are all inside `task.js` |
 
-Configure and Detect run **concurrently**; they share no data. A board failure disables nothing —
-it stops the run, because a milestone whose cards silently never move looks exactly like one that
-never ran.
-
 ### dryRun
 
-Returns the resolved board ids, the discovered verification commands, the dependency levels, and per
-subtask its `branch` and **`prTargets`**. Read that column: each subtask should target the previous
-one's branch, and a story's first subtask should target its blocker's tip. A blocked story rooted at
-`baseBranch` means a missing `blockedBy` edge.
+Returns the discovered verification commands, the dependency levels, and per subtask its `branch` and
+**`prTargets`**. Read that column: each subtask should target the previous one's branch, and a
+story's first subtask should target its blocker's tip. A blocked story rooted at `baseBranch` means a
+missing `blockedBy` edge.
 
 ## task
 
-Invoked per subtask by the orchestrator, which forwards `scriptsDir`, the resolved `project`,
-`verification`, `triggerAgentType` and the subtask's own `baseBranch` — its **stack parent**, not the
-milestone base.
+Invoked per subtask by the orchestrator, which forwards `scriptsDir`, `verification`,
+`triggerAgentType`, the branch it already derived, and the subtask's own `baseBranch` — its **stack
+parent**, not the milestone base.
 
 | arg | required | notes |
 |---|---|---|
-| `repo`, `repoDir`, `issue`, `baseBranch` | yes | `baseBranch` is this subtask's stack parent |
+| `repo`, `repoDir`, `card`, `branch`, `baseBranch` | yes | `card` is the brd card id (UUID); `branch` is computed once, by the orchestrator, and forwarded — `task` does not derive its own; `baseBranch` is this subtask's stack parent |
 | `scriptsDir` | yes | absolute path to `scripts/` |
-| `project` | yes | resolved ids only; `task` never resolves them itself |
 | `verification` | no | otherwise Explore discovers it |
 | `plansDir`, `specsDir` | no | default under the **worktree**, so the PR carries them |
-| `branchPrefix`, `coauthor`, `triggerAgentType` | no | |
+| `coauthor`, `triggerAgentType` | no | |
 | `allowNoVerification` | no | opt in to running with no test suite. Refused otherwise |
 
 ### Phases
 
 | # | phase | agent type | skill | what |
 |---|---|---|---|---|
-| 1 | Explore | `leave-me-alone:repo-reader` | — | issue, parent story, repo docs, the code it touches. Never writes |
+| 1 | Explore | `leave-me-alone:repo-reader` | — | card, parent story, repo docs, the code it touches. Never writes |
 | 2 | Worktree | `leave-me-alone:command-runner` | — | `worktree.mjs`. Must precede anything that writes |
 | 3 | plan-check | `leave-me-alone:command-runner` | — | `plan-check.mjs`. A validated plan skips 4–7 |
-| 4 | Spec | `leave-me-alone:spec-author` | — | writes `docs/superpowers/specs/issue-N-design.md`. No shell |
+| 4 | Spec | `leave-me-alone:spec-author` | — | writes `docs/superpowers/specs/task-<slug>-<shortid>-design.md`. No shell |
 | 5 | ValidateSpec | `leave-me-alone:plan-critic` | — | corrects the spec **in place**, before anything is planned on it |
-| 6 | Plan | `leave-me-alone:plan-author` | `writing-plans` | writes `docs/superpowers/plans/issue-N.md` from the spec **on disk** |
+| 6 | Plan | `leave-me-alone:plan-author` | `writing-plans` | writes `docs/superpowers/plans/task-<slug>-<shortid>.md` from the spec **on disk** |
 | 7 | ValidatePlan | `leave-me-alone:plan-critic` | — | corrects the plan; adds `<!-- task-pipeline: validated -->` |
 | 8 | Implement | `leave-me-alone:code-worker` | TDD | commits spec+plan first, then strict TDD with `Plan-Hash` trailers |
 | 9 | Review | `leave-me-alone:code-worker` | TDD, debugging | reviews the diff, fixes, reports three raw numbers |
@@ -148,8 +139,8 @@ Decisions live in the script, off values the agents merely report:
 
 ### Returns
 
-`{ issue, pr, branch, worktree, plan, tests }` on success, or
-`{ issue, refused|blocked, reason|detail, … }` when a gate stopped it. `blocked` is one of
+`{ card, pr, branch, worktree, plan, tests }` on success, or
+`{ card, refused|blocked, reason|detail, … }` when a gate stopped it. `blocked` is one of
 `verification`, `validation`, `implement`, `review`, `tests`, `pr`.
 
 ## Why per-subtask, not per-story
@@ -163,10 +154,14 @@ wrong base counts as **not** done, deliberately.
 
 ## Notes
 
-- **Branch names are derived, never discovered:** `branchPrefix + issue number`. A merged PR found
-  under a different name halts the run rather than being re-implemented.
+- **Branch names are derived, never discovered:** `<branchPrefix>/task-<slug>-<shortid>`, where
+  `shortid` is the first 8 hex characters of the card's UUID and `slug` is a readable form of its
+  title. Matching keys on the short id alone, so an edited card title never orphans its PR. A merged
+  PR found under a different name halts the run rather than being re-implemented.
 - **Subtask order is the PR targets.** Reordering after PRs exist re-points the bases and those PRs
-  read as wrong-base. Give every subtask an ordinal prefix.
+  read as wrong-base. Order comes from the `blocked_by` edges between sibling cards — chain a story's
+  subtasks with `--blocked-by <previous subtask id>`. Ordinal title prefixes are optional decoration;
+  nothing parses them.
 - **Only one blocker per story.** A stack roots on one parent; two stops the run.
 - **The shared checkout is touched once**, by `detect.mjs`, before dispatch. `task.js` is forbidden
   from running `fetch` or `worktree prune` against it — several subtasks share that `.git`, and a

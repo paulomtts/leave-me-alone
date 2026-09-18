@@ -1,16 +1,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, titleFromIssue, buildBody, verifyError, ship } from './ship.mjs'
+import { parseArgs, buildBody, verifyError, ship } from './ship.mjs'
 
-const ARGS = ['--repo=o/n', '--issue=23', '--branch=m2/task-23', '--base=main',
-              '--worktree=/wt', '--verify=npm test']
+const ARGS = ['--repo=o/n', '--card=a32af745', '--title=feat: write rows',
+              '--branch=m12/task-write-rows-a32af745', '--base=main', '--worktree=/wt', '--verify=npm test']
 
 test('every required argument is checked at the door', () => {
-  assert.equal(parseArgs(ARGS).issue, 23)
-  for (const drop of ['--repo=o/n', '--issue=23', '--branch=m2/task-23', '--base=main', '--worktree=/wt']) {
+  assert.equal(parseArgs(ARGS).card, 'a32af745')
+  for (const drop of ['--repo=o/n', '--card=a32af745', '--title=feat: write rows',
+    '--branch=m12/task-write-rows-a32af745', '--base=main', '--worktree=/wt']) {
     assert.throws(() => parseArgs(ARGS.filter(a => a !== drop)), /ship needs/, `dropping ${drop}`)
   }
   assert.throws(() => parseArgs([...ARGS, '--wat']), /unknown argument/)
+})
+
+test('parseArgs takes a card short id and a required title', () => {
+  assert.equal(parseArgs(ARGS).card, 'a32af745')
+  assert.equal(parseArgs(ARGS).title, 'feat: write rows')
+  assert.throws(() => parseArgs(ARGS.filter(a => !a.startsWith('--title'))), /--title/)
+  assert.throws(() => parseArgs(ARGS.filter(a => !a.startsWith('--card'))), /--card/)
 })
 
 test('--verify repeats, and an empty suite is refused outright', () => {
@@ -22,20 +30,18 @@ test('--verify repeats, and an empty suite is refused outright', () => {
     /refusing to open a PR nothing verified/)
 })
 
-test('the ordinal prefix is stripped from the PR title', () => {
-  assert.equal(titleFromIssue('21.1 feat: --json output'), 'feat: --json output')
-  assert.equal(titleFromIssue('L2.3.1 fix: thing'), 'fix: thing')
-  assert.equal(titleFromIssue('feat: no ordinal here'), 'feat: no ordinal here')
-  assert.equal(titleFromIssue(''), '')
-})
-
-test('the body is built from the branch commits, and always closes the issue', () => {
-  const body = buildBody(['feat: a', '', 'test: b'], 23)
+test('the body is built from the branch commits', () => {
+  const body = buildBody(['feat: a', '', 'test: b'], 'a32af745')
   assert.match(body, /- feat: a/)
   assert.match(body, /- test: b/)
-  assert.match(body, /Closes #23/)
   assert.doesNotMatch(body, /- \n/)              // blank subjects dropped
-  assert.match(buildBody([], 23), /no commit subjects found/)
+  assert.match(buildBody([], 'a32af745'), /no commit subjects found/)
+})
+
+test('the PR body references the card without implying a merge closes it', () => {
+  const body = buildBody(['feat: write rows'], 'a32af745')
+  assert.match(body, /brd card: a32af745/)
+  assert.doesNotMatch(body, /Closes #/)
 })
 
 // ── verifyError ──────────────────────────────────────────────────────────────
@@ -88,7 +94,6 @@ const fake = (routes, log = []) => async (command, opts = {}) => {
 const OK = [
   ['status --porcelain', ''],
   ['npm test', 'ok\n'],
-  ['issue view', '{"title":"23.1 feat: thing"}'],
   ['log origin/main..HEAD', 'feat: thing\ntest: thing\n'],
   ['pr create', 'https://github.com/o/n/pull/77\n'],
 ]
@@ -149,16 +154,19 @@ test('--head is always passed explicitly', async () => {
   const log = []
   await ship(parseArgs(ARGS), fake(OK, log))
   const create = log.find(c => c.includes('pr create'))
-  assert.match(create, /--head m2\/task-23/)
+  assert.match(create, /--head m12\/task-write-rows-a32af745/)
   assert.match(create, /--base main/)
 })
 
-test('an explicit --title overrides the derived one, and skips the issue lookup', async () => {
+test('the title is used verbatim — ordinal prefixes are no longer a convention', async () => {
+  // Use this file's own existing fake-runner helper and its call-log
+  // convention, rather than introducing a second one. A title beginning with
+  // digits is the case the deleted titleFromIssue regex would have mangled.
   const log = []
-  const got = await ship(parseArgs([...ARGS, '--title=fix: explicit']), fake(OK, log))
-  assert.equal(got.number, 77)
-  assert.match(log.find(c => c.includes('pr create')), /fix: explicit/)
-  assert.equal(log.filter(c => c.includes('issue view')).length, 0)
+  await ship({ ...parseArgs(ARGS), title: '1.2 feat: quoting' }, fake(OK, log))
+  const created = log.find(call => call.includes('pr create'))
+  assert.match(created, /1\.2 feat: quoting/)
+  assert.ok(!log.some(call => call.includes('issue view')), `looked the title up: ${log.join(' | ')}`)
 })
 
 test('a push that succeeds but yields no PR URL is reported, not silently passed', async () => {

@@ -11,7 +11,7 @@
 // This script has no opinions. Run it outside the sandbox and hand the JSON to
 // the orchestrator as `args.state`:
 //
-//   node scripts/detect.mjs --repo you/thing --milestone 12 > state.json
+//   node scripts/detect.mjs --repo you/thing --milestone <card id or title substring> > state.json
 //
 // Step 5 (discovering how a repo runs its tests) is deliberately NOT here: it
 // is reading comprehension over prose nobody standardised, which is the one
@@ -19,28 +19,22 @@
 // `args.verification` instead, or let the agent fall back to discovering it.
 
 import { ghRunner, gitRunner, jsonFrom, lastLine, parseNdjson, withRetries, readFlags } from './gh.mjs'
+import { brd, brdRunner } from './brd.mjs'
+import { findMilestone, flattenMilestone } from './census.mjs'
+import { shortId } from './naming.mjs'
 
 export { jsonFrom, lastLine, parseNdjson } from './gh.mjs'
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
-    '--repo': 'value', '--milestone': 'value', '--compact': 'boolean',
-    '--story-label': 'value', '--subtask-label': 'value', '--repo-dir': 'value',
+    '--repo': 'value', '--milestone': 'value', '--compact': 'boolean', '--repo-dir': 'value',
   })
-  const out = {
-    repo: flags['--repo'],
-    milestone: Number(flags['--milestone']),
-    compact: flags['--compact'] === true,
-    labels: {
-      story: flags['--story-label'] ?? 'story',
-      subtask: flags['--subtask-label'] ?? 'subtask',
-    },
-  }
+  const out = { repo: flags['--repo'], milestone: String(flags['--milestone'] ?? '').trim(), compact: flags['--compact'] === true }
   if (typeof out.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
     throw new Error('detect needs --repo owner/name')
   }
-  if (!Number.isInteger(out.milestone) || out.milestone <= 0) {
-    throw new Error('detect needs --milestone <positive integer>')
+  if (out.milestone.length === 0) {
+    throw new Error('detect needs --milestone <card id or title substring>')
   }
   const repoDir = flags['--repo-dir']
   if (repoDir !== undefined) {
@@ -82,54 +76,34 @@ export async function prepareCheckout(repoDir, git = gitRunner, wait) {
   return true
 }
 
-// Deliberately LOOSE — anything whose branch name contains any subtask number.
-// The orchestrator matches exactly (derived branch, graph-derived base) and
-// separately looks for near misses, so over-reporting here is free and
-// under-reporting is not.
-export function filterPullRequests(pulls, subtaskNumbers) {
-  const numbers = [...new Set((subtaskNumbers ?? []).map(String))]
+// Deliberately LOOSE — anything whose branch name contains any subtask's short
+// id. The orchestrator matches exactly and separately looks for near misses, so
+// over-reporting here is free and under-reporting is not.
+//
+// Takes already-resolved SHORT ids, not card ids: the caller resolves those
+// with shortId() before the PR-listing try/catch, so a malformed card id
+// aborts the run instead of being caught there and reported as prLookupFailed.
+export function filterPullRequests(pulls, subtaskShortIds) {
+  const ids = [...new Set(subtaskShortIds ?? [])]
   return (pulls ?? []).filter(pull => {
     const ref = String((pull && pull.ref) ?? '')
-    return numbers.some(number => ref.includes(number))
+    return ids.some(id => ref.includes(id))
   })
 }
 
-export async function detect({ repo, milestone, labels, repoDir, run = ghRunner, git = gitRunner, wait }) {
-  const [owner, name] = repo.split('/')
+export async function detect({ repo, milestone, repoDir, run = ghRunner, runBrd = brdRunner, git = gitRunner, wait }) {
   const prepared = await prepareCheckout(repoDir, git, wait)
 
-  const milestoneTitle = lastLine(await withRetries('detect: milestone lookup',
-    () => run(['api', `repos/${repo}/milestones/${milestone}`, '--jq', '.title']), { wait }))
-  if (!milestoneTitle) throw new Error(`detect: milestone #${milestone} on ${repo} has no title — wrong number or wrong repo?`)
+  // One local call replaces a milestone lookup, a story list, and two API calls
+  // per story. NOT wrapped in withRetries: brd is local, so a failure is real.
+  const roots = await brd(['tree'], { cwd: repoDir, run: runBrd })
+  const { milestoneTitle, stories } = flattenMilestone(findMilestone(roots, milestone))
 
-  const storyList = jsonFrom(await withRetries('detect: story list', () => run([
-    'issue', 'list', '--repo', repo, '--milestone', milestoneTitle,
-    '--label', labels.story, '--state', 'all', '--limit', '200',
-    '--json', 'number,title,state',
-  ]), { wait }))
-
-  const stories = []
-  for (const story of storyList) {
-    // An ERROR here is not "no dependencies" — that would be an empty nodes
-    // list. Letting a failed query become [] is how a milestone ends up flat,
-    // with every story dispatched at once against a base none has built on.
-    const blocked = jsonFrom(await withRetries(`detect: blockedBy for #${story.number}`, () => run([
-      'api', 'graphql', '-f',
-      'query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){blockedBy(first:50){nodes{number}}}}}',
-      '-f', `o=${owner}`, '-f', `r=${name}`, '-F', `n=${story.number}`,
-    ]), { wait }))
-    const blockedBy = (blocked?.data?.repository?.issue?.blockedBy?.nodes ?? []).map(node => node.number)
-
-    // Order is the stack geometry, so the endpoint's order is preserved exactly
-    // and titles are copied verbatim (their ordinal prefixes decide sorting).
-    const subs = jsonFrom(await withRetries(`detect: sub-issues of #${story.number}`,
-      () => run(['api', `repos/${repo}/issues/${story.number}/sub_issues`, '--paginate']), { wait }))
-    const subtasks = subs.map(sub => ({
-      number: sub.number, title: sub.title, state: String(sub.state ?? '').toUpperCase(),
-    }))
-
-    stories.push({ number: story.number, title: story.title, state: story.state, blockedBy, subtasks })
-  }
+  // Resolved BEFORE the try: shortId throws on a malformed card id, and that is a
+  // data-integrity bug, not a network condition. Inside the try it would be caught
+  // and reported as prLookupFailed — the same "a failed read looks like no data"
+  // collapse this module exists to avoid.
+  const subtaskShortIds = stories.flatMap(story => story.subtasks.map(sub => shortId(sub.id)))
 
   // REST, not `gh pr list`: the latter goes through GraphQL, which returned
   // empty results for genuinely-merged PRs during the 2026-08-17 incident.
@@ -141,7 +115,7 @@ export async function detect({ repo, milestone, labels, repoDir, run = ghRunner,
       '--jq', '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}',
     ]), { wait })
     const all = parseNdjson(raw)
-    pullRequests = filterPullRequests(all, stories.flatMap(story => story.subtasks.map(sub => sub.number)))
+    pullRequests = filterPullRequests(all, subtaskShortIds)
   } catch (err) {
     // NOT an empty list. "The API did not answer" and "there are no PRs" must
     // stay distinguishable, or merged work gets re-implemented.
