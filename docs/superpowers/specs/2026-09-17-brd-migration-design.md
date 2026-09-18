@@ -131,11 +131,19 @@ committed JSON file at `docs/board/<milestone>.json`. This is nearly free, since
 it is the same call the orchestrator already makes to read the board — one
 command with two destinations.
 
-The snapshot is a **record, not a restore path**: brd has no import command, so
-it makes state readable from a clone and rendersable by `setup-report`, but does
-not rehydrate a board elsewhere. That is an acceptable limit for the agreed
-requirement (a durable, readable history in git) and should not be quietly
-widened into a sync mechanism.
+Since brd #40 the snapshot is also a **restore path**: `brd import <file>`
+rebuilds a board from `brd tree` output. Verified round-trip on a fresh project —
+card ids, hierarchy, `blocked_by` edges, statuses and descriptions all survive,
+and a snapshot's derived `blocked` values are correctly mapped back to stored
+`todo` and re-derived rather than written literally (a card imported as
+`blocked` clears to `todo` once its blocker is marked `done`). Only timestamps
+are reassigned at import time, which matters solely for the creation-time
+tiebreaker between genuinely independent siblings.
+
+So a clone on another machine can run `brd init` followed by
+`brd import docs/board/<milestone>.json` and have the real board. It is still
+not *sync* — two machines diverging both hold valid boards with no merge path —
+and it should not be quietly widened into one.
 
 JSON also suits the stacked-PR flow better than `#35`'s binary database would
 have: it is diffable and conflict-resolvable. It should still be written on the
@@ -195,6 +203,37 @@ created, ship sets the card to `done`.
 orchestrator matches a root-level card by title substring, failing loudly on
 ambiguity, and also accepts a raw card id.
 
+### Branch naming and PR identity
+
+Today a branch is `branchPrefix` plus the GitHub **issue number**
+(`m12/task-14`), and `filterPullRequests` (`scripts/detect.mjs:85-95`) finds a
+subtask's PR by looking for that number inside a branch ref. brd has no issue
+numbers, so identity needs a replacement — a concern separate from the ordering
+one that `blocked_by` chaining now solves.
+
+A subtask's branch is `<branchPrefix>/task-<slug>-<shortid>`:
+
+```
+m12/task-write-rows-a32af745   ->  main
+m12/task-quoting-03a6dc10      ->  m12/task-write-rows-a32af745
+```
+
+- **`shortid`** is the first 8 hex characters of the card's UUID. It is stable
+  for the card's whole life, survives re-parenting and reordering, and is
+  derived rather than invented, so there is no convention to police.
+- **`slug`** is the card title, lowercased, non-alphanumerics collapsed to
+  single dashes, trimmed to at most 24 characters. It exists purely so
+  `git branch` and PR lists are readable.
+
+**Matching keys on `shortid` alone.** The slug is decoration and must never
+participate in identifying a PR, because a card title can be edited after its PR
+is open — which would otherwise orphan the PR and make finished work read as not
+done. This is the direct analogue of today's number-matching, and it is the one
+rule in this scheme that is load-bearing.
+
+`setup-milestone` verifies that the 8-character prefixes within a milestone are
+unique, and lengthens them if they somehow collide.
+
 ### Unchanged
 
 `scripts/worktree.mjs`; the branch and PR-base derivation (`computeLevels`,
@@ -212,10 +251,35 @@ exist, sub-issues are enabled — to three checks: `brd` is on `PATH`, the repo 
 registered (`brd init` if not), and, because PRs stay, a GitHub remote with `gh`
 authenticated.
 
-**`setup-milestone`** creates cards with `brd add --title … --parent …
---blocked-by …` instead of `gh issue create` plus labelling plus a sub-issue
-attach that required the child's *database* id specifically. It enforces the two
-surviving conventions above.
+**`setup-milestone`** needs a substantial rework, not a find-and-replace. Its
+173 lines split roughly 60/40, and the 60 percent that survives is the valuable
+part — the judgment about how to cut work.
+
+*Survives unchanged:* "Start from a spec, not from the milestone"; the sizing
+rules, including the hard "full suite is green with it alone" test; "Subtasks
+that ship no behavior" (docs, config, pure-refactor cards judged on their own
+terms); keeping same-level stories file-disjoint; and the worked example's
+reasoning, which needs only its identifiers restyled.
+
+*Rewritten:* Rule zero's discovery commands (`gh label list`, the milestones
+API, the project-views GraphQL query) collapse into reading `brd tree` for an
+existing milestone card. Sequence steps 1-8 become `brd add --parent` and
+`brd block`; the steps for attaching sub-issues by database id, adding every
+card to the board, and setting the `Status` field disappear entirely. The
+verification step reads the tree back instead of querying `blockedBy` per story.
+
+*Actively contradicts the new design and must change:* the gotcha stating that
+cards "sit at 'In review' until" a human merges (now `done` means the PR is
+open), and the two places mandating ordinal prefixes in titles.
+
+*New material it must carry:* the branch-naming scheme above; the rule that
+`brd next` is not the dispatch source; committing the snapshot; and the fact
+that a story's subtasks must be chained even when their diffs are independent.
+
+About eight of its twenty gotcha rows retire with the mechanics they warn about
+— wrong label names, the `Status`-options wipe, sub-issue links not implying
+execution order, and board-view filtering. The rows about breakdown quality all
+stay.
 
 **`setup-report`** renders from the committed board rather than live GitHub
 queries.
