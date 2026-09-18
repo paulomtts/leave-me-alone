@@ -112,6 +112,22 @@ function remainingSubtasks(story) {
   return (story.subtasks ?? []).filter(subtask => !isSubtaskDone(subtask))
 }
 
+// A story with zero remaining subtasks (every subtask already has an open PR
+// from a prior run, or the story itself is closed) never enters a dispatch
+// level — computeLevels drops it — so task.js never runs for it this run, and
+// nothing ever triggers rollup.mjs on its behalf. Its card, and the
+// milestone's, would keep whatever status they had, permanently.
+//
+// The fix is not a second status-writing path: it is triggering the one that
+// already exists. This picks WHICH subtask anchors that trigger — one whose
+// own status already reflects doneness, so re-asserting it is a genuine
+// no-op and only the walk up to its ancestors does real work. Returns null
+// when the story has nothing safe to anchor on (no subtasks, or none
+// individually marked done) — there is then nothing to reassert.
+function storyRollupAnchor(story) {
+  return (story.subtasks ?? []).find(isSubtaskDone) || null
+}
+
 function computeLevels(stories) {
   const doneIds = new Set(
     stories.filter(story => isStoryClosed(story) || remainingSubtasks(story).length === 0)
@@ -592,6 +608,12 @@ const detectScript = typeof opts.detectScript === 'string' && opts.detectScript.
       + 'repo can be checked out anywhere, and no fallback: the census is deterministic or it does '
       + 'not happen. It is run with `bun`.') })()
 
+// Same checkout's scripts/, derived from detectScript so there is one path to
+// get wrong instead of several — runSubtask forwards this to task.js, and the
+// already-complete-story rollup pass below dispatches rollup.mjs from it
+// directly.
+const scriptsDir = detectScript.slice(0, detectScript.lastIndexOf('/'))
+
 // Namespaced, because these types ship WITH this workflow in the same plugin:
 // an installed plugin registers its agents as `<plugin>:<name>`, and the bare
 // name only resolves if a copy also happens to sit in ~/.claude/agents/. Relying
@@ -851,8 +873,55 @@ if (DRY) {
   }
 }
 
+// ── the story-completion gap ─────────────────────────────────────────────────
+// A story with zero remaining subtasks never enters `levels` — computeLevels
+// drops it — so task.js never runs for it THIS run, and nothing ever triggers
+// rollup.mjs on its behalf. That story's card, and the milestone's, would
+// keep whatever status they had, permanently: dispatch is unaffected (this
+// run correctly does no work on it), but the board a human reads goes stale.
+//
+// The fix reuses rollup.mjs's own tested ancestry walk rather than writing a
+// second status path: for each such story, dispatch one rollup against an
+// already-done subtask (storyRollupAnchor), re-asserting that subtask's own
+// current status. rollup.mjs writes the card, then reads each ancestor fresh
+// and recomputes it from its REAL children — so this is safe even when the
+// anchor is not the only reason the story is done, and the walk still reaches
+// the milestone regardless.
+//
+// Same best-effort-but-visible contract as every other rollup dispatch: a
+// failure here must not sink a run whose PRs are all open and green, but must
+// not vanish either — it folds into statusWriteFailures below, exactly like a
+// per-subtask statusWriteError does.
+const alreadyCompleteStories = census.stories.filter(story => remainingSubtasks(story).length === 0)
+const staleRollupErrors = []
+for (const story of alreadyCompleteStories) {
+  const anchor = storyRollupAnchor(story)
+  if (!anchor) continue // nothing on this story is individually marked done — nothing safe to reassert
+  const rollupOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/rollup.mjs --card ${anchor.id} --status ${anchor.status} --repo-dir ${repoDir} --compact
+
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. This step is best-effort: report a failure via the schema's error field, do not retry it yourself, and do not let it change anything else.`,
+    { label: `rollup:story-${story.id}:already-complete`, phase: 'Dispatch', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+      type: 'object', required: ['stdout'],
+      properties: {
+        stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+        error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+      },
+    } })
+  if (!rollupOut) {
+    const msg = `rollup (already-complete story ${story.id}) agent died — card status was not rolled up`
+    log(msg)
+    staleRollupErrors.push(msg)
+  } else if (rollupOut.error) {
+    const msg = `rollup (already-complete story ${story.id}) failed: ${rollupOut.error}`
+    log(msg)
+    staleRollupErrors.push(msg)
+  }
+}
+
 if (levels.length === 0) {
-  return { repo, milestone, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks' }
+  return { repo, milestone, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks',
+    ...(staleRollupErrors.length > 0 ? { statusWriteFailures: staleRollupErrors.length } : {}) }
 }
 
 // ── halt flag ────────────────────────────────────────────────────────────────
@@ -905,9 +974,7 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     // board-move config — it moves the card itself via rollup.mjs.
     dispatched = await workflow({ scriptPath: taskScript }, {
       repo, repoDir, card: subtask.id, branch, baseBranch: stackBase, coauthor, verification,
-      // Same checkout's scripts/, derived from detectScript so there is one
-      // path to get wrong instead of two.
-      scriptsDir: detectScript.slice(0, detectScript.lastIndexOf('/')),
+      scriptsDir,
       triggerAgentType,
     })
   } catch (err) {
@@ -1027,10 +1094,19 @@ const unwrittenSubtasks = results.flatMap(level => (level.stories ?? []))
   .flatMap(story => (story && story.subtasks) || [])
   .filter(subtask => subtask && subtask.statusWritten === false)
 
+// Both kinds of status-write failure — a dispatched subtask's, and an
+// already-complete story's stale-rollup pass above — fold into the same
+// count, so a run whose board never updated says so regardless of which path
+// the failure came from.
+const totalStatusWriteFailures = unwrittenSubtasks.length + staleRollupErrors.length
+
 return { repo, milestone, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
-  ...(unwrittenSubtasks.length > 0 ? { statusWriteFailures: unwrittenSubtasks.length } : {}),
+  ...(totalStatusWriteFailures > 0 ? { statusWriteFailures: totalStatusWriteFailures } : {}),
   note: 'Nothing was merged. Each story is a stack of open PRs, each targeting the previous subtask\'s branch; '
     + 'merge each stack bottom-up. Subtask cards already sit at "done" — done means the PR is open, not that it is merged.'
     + (unwrittenSubtasks.length > 0
         ? ` WARNING: ${unwrittenSubtasks.length} subtask(s) shipped a PR but the card status write failed — the board did not update for them; see each subtask's statusWriteError.`
+        : '')
+    + (staleRollupErrors.length > 0
+        ? ` WARNING: ${staleRollupErrors.length} already-complete stor${staleRollupErrors.length === 1 ? 'y' : 'ies'} could not be rolled up — see the log for the rollup error(s).`
         : '') }

@@ -22,13 +22,13 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ORCHESTRATOR_PATH = join(HERE, 'orchestrator.js')
 
 const {
-  isSubtaskDone, remainingSubtasks, computeLevels,
+  isSubtaskDone, remainingSubtasks, computeLevels, storyRollupAnchor,
   assertNoBlockerCycles, subtaskBranch, storyRoot, stackBases, escalation,
   prMatchesSubtask, matchPr, attachPullRequests, dropCommandsNamingMissingPaths,
   shortId, slugify, taskStem, taskBranch,
   resolveMilestone, resolveBranchPrefix,
 } = await loadPure(ORCHESTRATOR_PATH, [
-  'isSubtaskDone', 'remainingSubtasks', 'computeLevels',
+  'isSubtaskDone', 'remainingSubtasks', 'computeLevels', 'storyRollupAnchor',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
   'prMatchesSubtask', 'normalizePr', 'matchPr', 'attachPullRequests',
   'dropCommandsNamingMissingPaths',
@@ -124,6 +124,26 @@ test('subtasks keep the order the census gave them — no re-sorting by title', 
   const s2 = { id: uid('10000004'), title: '1.1 write rows', status: 'todo', pr: null }
   const story = { id: uid('10000000'), status: 'todo', blockedBy: [], subtasks: [s1, s2] }
   assert.deepEqual(remainingSubtasks(story).map(s => s.id), [s1.id, s2.id])
+})
+
+// ── story-completion gap: rollup anchor ─────────────────────────────────────
+
+test('storyRollupAnchor picks an already-done subtask to reassert', () => {
+  const s1 = { id: uid('50000001'), title: 'a', status: 'todo', pr: openPr(9, 'task-1') }
+  const s2 = { id: uid('50000002'), title: 'b', status: 'todo', pr: null }
+  const story = { id: uid('50000000'), status: 'todo', blockedBy: [], subtasks: [s1, s2] }
+  assert.equal(storyRollupAnchor(story), s1)
+})
+
+test('storyRollupAnchor returns null when nothing on the story is done', () => {
+  const s1 = { id: uid('50000003'), title: 'a', status: 'todo', pr: null }
+  const story = { id: uid('50000000'), status: 'todo', blockedBy: [], subtasks: [s1] }
+  assert.equal(storyRollupAnchor(story), null)
+})
+
+test('storyRollupAnchor returns null for a story with no subtasks', () => {
+  const story = { id: uid('50000000'), status: 'done', blockedBy: [], subtasks: [] }
+  assert.equal(storyRollupAnchor(story), null)
 })
 
 // ── levels ──────────────────────────────────────────────────────────────────
@@ -641,4 +661,22 @@ test('a non-numeric milestone WITH an explicit branchPrefix is accepted verbatim
 
 test('an explicit branchPrefix wins even for a numeric milestone', () => {
   assert.equal(resolveBranchPrefix('custom', 12, true), 'custom')
+})
+
+// ── story-completion gap: dispatch wiring (source-level) ────────────────────
+// The dispatch itself sits outside the PURE region (it calls agent()), so this
+// is source-level, matching how phase 2 tested task.js's equivalent rollup
+// dispatches.
+test('a story whose subtasks are all already shipped still gets its card rolled up', () => {
+  const source = readFileSync(new URL('./orchestrator.js', import.meta.url), 'utf8')
+  // storyRollupAnchor's own definition also matches a bare `rollup.mjs` /
+  // `storyRollupAnchor(` search, so these assertions target the actual CALL
+  // site (an assignment) and the full --card invocation, not just the pure
+  // helper's presence.
+  assert.match(source, /const anchor = storyRollupAnchor\(/,
+    'the orchestrator must pick an anchor subtask for each already-complete story')
+  assert.match(source, /rollup\.mjs --card \$\{anchor\.id\}/,
+    "and must dispatch rollup.mjs against that anchor's full card id, re-asserting its own status")
+  assert.match(source, /statusWriteFailures/,
+    'and a failure here must surface the same way task.js\'s does, not vanish')
 })
