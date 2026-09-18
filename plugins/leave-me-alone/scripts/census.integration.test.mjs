@@ -38,12 +38,23 @@ test('census matches a real board, including inherited blocking', { skip: !hasBr
   addCard('docs: usage', ['--parent', storyB])
 
   const roots = await brd(['tree'], { cwd: repo, run: async args => brdCli(...args) })
-  const census = flattenMilestone(findMilestone(roots, 'CSV export'))
+
+  // The raw tree must show brd's ancestor-inherited status: `docs: usage` carries
+  // no blocker of its own, and is reported blocked purely through its parent story.
+  // Asserting this BEFORE the collapse is the point of this test — the flattened
+  // 'todo' below would look identical if brd had never inherited anything.
+  const rawMilestone = findMilestone(roots, 'CSV export')
+  const rawStoryB = rawMilestone.children.find(c => c.title === 'Story: Document it')
+  const rawDocs = rawStoryB.children.find(c => c.title === 'docs: usage')
+  assert.deepEqual(rawDocs.blocked_by, [], 'docs: usage must carry no blocker of its own')
+  assert.equal(rawDocs.status, 'blocked', 'brd must report the inherited blocked status')
+
+  const census = flattenMilestone(rawMilestone)
 
   assert.deepEqual(census.stories.map(s => s.title), ['Story: CSV writer', 'Story: Document it'])
   assert.deepEqual(census.stories[0].subtasks.map(s => s.title), ['feat: write rows', 'feat: quoting'])
   assert.deepEqual(census.stories[1].blockedBy, [storyA])
-  // brd reports docs: usage as `blocked` through its parent; the census flattens
-  // that to todo, because readiness is decided by the DAG walk.
+  // Collapsed counterpart of the raw assertion above: brd's inherited `blocked`
+  // becomes `todo` here, because readiness is decided by the DAG walk.
   assert.equal(census.stories[1].subtasks[0].status, 'todo')
 })
