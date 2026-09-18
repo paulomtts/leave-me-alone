@@ -11,6 +11,14 @@ input="$(cat)"
 cmd="$(jq -r '.tool_input.command // empty' <<<"$input")"
 [ -z "$cmd" ] && exit 0
 
+# grep -E is line-oriented: ^ and $ anchor per LINE, and -q succeeds if ANY
+# line matches. Every rule below relies on those anchors to bound what it
+# grants, so a multi-line command would let an unrelated line ride along on a
+# matching one — in either order. No legitimate command these workflows emit
+# spans lines, so refuse the whole class here rather than making every present
+# and future rule remember this.
+case "$cmd" in *$'\n'*) exit 0 ;; esac
+
 allow() {
   jq -n --arg reason "$1" '{
     hookSpecificOutput: {
