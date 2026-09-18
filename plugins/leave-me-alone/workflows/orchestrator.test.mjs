@@ -308,6 +308,15 @@ test('a missing or empty ref never matches', () => {
   for (const ref of [null, undefined, '']) assert.equal(prMatchesSubtask(ref, 1050), false)
 })
 
+test('a hex character before the short id is a boundary, not a match', () => {
+  // Short ids are hex, so 'f' is a legitimate id character, not a digit — the
+  // old /[0-9]/ boundary check let it through as "not a digit, so it must be a
+  // boundary." …deadbeefa1b2c3d4 ends with a1b2c3d4 preceded by 'f', which is
+  // exactly the false near miss #1050's guard was supposed to catch.
+  assert.equal(prMatchesSubtask('m12/task-rows-a1b2c3d4', 'a1b2c3d4'), true)
+  assert.equal(prMatchesSubtask('wip/deadbeefa1b2c3d4', 'a1b2c3d4'), false)
+})
+
 // ── matchPr: exact branch, exact base ───────────────────────────────────────
 
 const pr = (number, ref, base, over = {}) => ({ number, ref, base, url: `u/${number}`, state: 'open', ...over })
@@ -527,6 +536,20 @@ test('PRs match against the milestone-scoped branch', () => {
   const { pr: found } = matchPr(14, 'm12/task-14', 'm12/task-13',
     [pr(7, 'm12/task-14', 'm12/task-13')])
   assert.equal(found.number, 7)
+})
+
+test('one milestone prefix cannot match another milestone that starts with it', () => {
+  // m1 is a string-prefix of "m12/…", not a path-segment prefix of it. Without
+  // the trailing "/" anchor, a PR under m12 would be taken as m1's PRIMARY
+  // match, fail the base check, and return 'wrong-base' — which bypasses the
+  // merged-near-miss halt entirely. Anchored correctly, this run for m1 never
+  // treats the m12 PR as its own: it falls through to the near-miss path,
+  // finds the merged PR under a name that isn't m1's, and halts instead of
+  // silently re-implementing the card's already-merged work.
+  const pulls = [pr(7, 'm12/task-rows-a1b2c3d4', 'main', { merged_at: '2026-08-01T00:00:00Z' })]
+  const { pr: found } = matchPr('a1b2c3d4', 'm1/task-rows-a1b2c3d4', 'main', pulls, 'm1')
+  assert.notEqual(found, 7, 'a PR under m12 must not answer for a run under m1')
+  assert.equal(found, 'unknown', 'must be caught as a merged near miss and halt, not silently pass as no-PR')
 })
 
 test('adopting the prefix on a milestone with merged work HALTS, it does not redo it', () => {

@@ -311,7 +311,12 @@ function prMatchesSubtask(ref, subtaskShortId) {
   const suffix = String(subtaskShortId)
   if (suffix.length === 0 || !text.endsWith(suffix)) return false
   const before = text[text.length - suffix.length - 1]
-  return before === undefined || !/[0-9]/.test(before)
+  // Short ids are hex, so 'a'-'f' are legitimate id characters, not boundary
+  // punctuation. Checking only /[0-9]/ let …deadbeefa1b2c3d4 false-match short
+  // id a1b2c3d4 — 'f' isn't a digit, so the old check called it a boundary.
+  // Must stay /[0-9a-f]/i: widening further (letting 'g'-'z' or punctuation
+  // through) would start rejecting real boundaries like a leading '/' or '-'.
+  return before === undefined || !/[0-9a-f]/i.test(before)
 }
 
 // REST reports state lowercase and merged-ness as a merged_at timestamp;
@@ -349,10 +354,15 @@ function matchPr(subtaskShortId, expectedBranch, expectedBase, pulls, branchPref
   // carries the card's slug, and a slug is mutable board data — a title edit
   // must not orphan an open PR. Still scoped to THIS milestone's prefix, so a
   // ref outside it (a changed branchPrefix) still falls through to the
-  // near-miss path below rather than being treated as a match.
+  // near-miss path below rather than being treated as a match. The anchor is
+  // `${branchPrefix}/`, not a bare startsWith(branchPrefix): "m1" is a STRING
+  // prefix of "m12/…", so an unanchored check let a PR under milestone m12
+  // answer for a run under m1 — taken as primary, failed the base check, and
+  // returned 'wrong-base', which bypasses the merged-near-miss halt below
+  // (the one guard that stops a run from re-implementing merged work).
   const onBranch = all.filter(candidate =>
     candidate.ref === expectedBranch
-    || (candidate.ref.startsWith(branchPrefix) && candidate.ref.endsWith(`-${subtaskShortId}`)))
+    || (candidate.ref.startsWith(`${branchPrefix}/`) && candidate.ref.endsWith(`-${subtaskShortId}`)))
   if (onBranch.length > 0) {
     const onBase = onBranch.filter(candidate => candidate.base === expectedBase).sort(rank)
     if (onBase.length > 0) return { pr: onBase[0], note: null }
