@@ -16,8 +16,8 @@ import { loadPure } from './load-pure.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate, shortId, stemOf } = await loadPure(join(HERE, 'task.js'), [
-  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate', 'shortId', 'stemOf',
+const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate, shortId, stemOf, shellQuote } = await loadPure(join(HERE, 'task.js'), [
+  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate', 'shortId', 'stemOf', 'shellQuote',
 ])
 
 const BRANCH = 'task-42'
@@ -231,7 +231,34 @@ test('the inlined shortId matches the real naming.mjs', async () => {
   assert.throws(() => real('nope'))
 })
 
+test('the inlined shortId lowercases an uppercase UUID, matching naming.mjs', async () => {
+  // The parity test above uses an already-lowercase UUID, which cannot catch
+  // a dropped `.toLowerCase()` — plan-check.mjs validates `[0-9a-f]{8}` and
+  // would reject an uppercase id outright, so lowercasing is load-bearing.
+  const { shortId: real } = await import('../scripts/naming.mjs')
+  const upper = 'A32AF745-15EF-45CD-B52C-64C19AE82C17'
+  assert.equal(shortId(upper), 'a32af745')
+  assert.equal(shortId(upper), real(upper))
+})
+
 test('the artifact stem comes from the branch, so it cannot disagree with it', async () => {
   assert.equal(stemOf('m12/task-write-rows-a32af745'), 'task-write-rows-a32af745')
   assert.equal(stemOf('task-a32af745'), 'task-a32af745')
+})
+
+// ── shellQuote ────────────────────────────────────────────────────────────────
+// The one place a model-supplied string (a card's title) reaches a command
+// line an agent runs verbatim — exactly what the PURE region exists to pin.
+
+test('shellQuote wraps a plain string in single quotes', () => {
+  assert.equal(shellQuote('feat: write rows'), "'feat: write rows'")
+})
+
+test('shellQuote escapes an embedded single quote', () => {
+  // The standard shell trick: close the quote, emit an escaped quote, reopen.
+  assert.equal(shellQuote("it's a title"), "'it'\\''s a title'")
+})
+
+test('shellQuote coerces a non-string value', () => {
+  assert.equal(shellQuote(42), "'42'")
 })

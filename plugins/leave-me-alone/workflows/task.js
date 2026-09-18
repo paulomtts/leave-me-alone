@@ -301,6 +301,17 @@ const specsDir = typeof opts.specsDir === 'string' && opts.specsDir.startsWith('
   ? opts.specsDir.replace(/\/+$/, '')
   : `${WORKTREE}/docs/superpowers/specs`
 const STEM = stemOf(BRANCH)
+// plan-check.mjs matches a saved plan by comparing STEM's final dash-delimited
+// segment to this card's short id (see naming.mjs's taskBranch/taskStem,
+// which is what makes them agree in practice). They agree only because the
+// branch was built that way — nothing here enforces it — so a non-conforming
+// branch would write the plan where plan-check will never find it, silently
+// disabling the validated-plan checkpoint (Spec/Plan/Validate would re-run
+// every time). This can't be a hard stop (an operator may legitimately pass a
+// branch task.js didn't generate), so warn instead.
+if (STEM.split('-').pop() !== id) {
+  log(`branch ${BRANCH} does not end in this card's short id (${id}) — plan-check will never find the plan this run saves at ${PLAN_PATH}, so the validated-plan checkpoint will not fire on a resume`)
+}
 const PLAN_PATH = `${plansDir}/${STEM}.md`
 const SPEC_PATH = `${specsDir}/${STEM}-design.md`
 
@@ -479,8 +490,8 @@ const verificationStep = providedVerification
 
 const explorePrompt = `Explore ${repo} subtask card ${id} in ${repoDir} and report what the later stages need.
 
-1. \`brd show ${card}\` — read this card's title, description and parent_id for what the subtask asks for. If parent_id is empty (this card is a story or milestone, not a subtask), set refused=true with the reason and stop here (skip everything below, including the board step).
-2. Read the parent story with \`brd show <parent_id>\`, then \`brd tree <parent_id>\` to list its sibling subtasks and their statuses.
+1. \`cd ${repoDir} && brd show ${card}\` — read this card's title, description and parent_id for what the subtask asks for. If parent_id is empty, this card is a MILESTONE (the root of the hierarchy has no parent): set refused=true with that reason and stop here (skip everything below, including the board step).
+2. \`cd ${repoDir} && brd show <parent_id>\` (the value from step 1) — this is the parent, but brd's hierarchy is three levels (milestone -> story -> subtask), so a STORY also has a non-empty parent_id (its milestone). Check THIS card's own parent_id: if it is empty, the card from step 1 was a STORY, not a subtask — set refused=true with that distinct reason (name it as a story, not a milestone) and stop here. Only if it is non-empty (confirming step 1's card is genuinely a subtask, two levels down from the milestone) do you have the real parent story: its title/description came from this step's own \`brd show\`, and its siblings come from \`cd ${repoDir} && brd tree <parent_id>\` (parent_id from step 1) — list them with their statuses.
 3. Read this repo's own architecture/standards docs (check CLAUDE.md for an index) and any specs/ADRs the story or subtask cites.
 4. Locate the code the subtask touches: existing modules and sibling tests.
 ${verificationStep}
@@ -943,7 +954,9 @@ const verifyFlags = suiteCmds
 // stage, so it reads the title fresh from brd rather than threading it
 // through every earlier stage's return value.
 const titleOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   brd show ${card}
+   cd ${repoDir} && brd show ${card}
+
+brd resolves its database by walking up from the CURRENT directory looking for a marker, so this must run from ${repoDir} — this workflow is repo-agnostic and the driving session may sit somewhere else entirely; without the \`cd\` this fails with ProjectNotFoundError.
 
 It prints one line of JSON (an envelope: {"ok":true,"data":{...}}) that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
   { label: `card-title:${id}`, phase: 'Ship', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
@@ -958,9 +971,15 @@ if (!titleOut) throw new Error('card-title agent died')
 let cardTitle
 try {
   const envelope = JSON.parse(printableOnly(String(titleOut.stdout ?? '')))
-  cardTitle = envelope && envelope.ok === true && envelope.data && typeof envelope.data.title === 'string'
-    ? envelope.data.title.trim()
+  const rawTitle = envelope && envelope.ok === true && envelope.data && typeof envelope.data.title === 'string'
+    ? envelope.data.title
     : ''
+  // shellQuote is correct at the SHELL level, but the quoted result still
+  // lands inside a single prompt line the agent runs verbatim — a title
+  // containing a newline would split that line into a second, unintended
+  // command. Collapse all whitespace runs to one space rather than trusting
+  // a card's title to be single-line.
+  cardTitle = rawTitle.replace(/\s+/g, ' ').trim()
   if (!cardTitle) throw new Error('brd show did not return a usable data.title')
 } catch (err) {
   return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
