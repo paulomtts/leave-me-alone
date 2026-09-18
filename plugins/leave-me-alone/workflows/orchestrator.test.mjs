@@ -12,6 +12,10 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { loadPure } from './load-pure.mjs'
+import {
+  shortId as realShortId, slugify as realSlugify,
+  taskStem as realTaskStem, taskBranch as realTaskBranch,
+} from '../scripts/naming.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -20,11 +24,13 @@ const {
   assertNoBlockerCycles, storyRoot, stackBases, escalation,
   prMatchesSubtask, matchPr, attachPullRequests, dropCommandsNamingMissingPaths,
   resolveBoardIds, hasResolvedBoardIds,
+  shortId, slugify, taskStem, taskBranch,
 } = await loadPure(join(HERE, 'orchestrator.js'), [
   'isSubtaskDone', 'remainingSubtasks', 'computeLevels',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
   'prMatchesSubtask', 'normalizePr', 'matchPr', 'attachPullRequests',
   'dropCommandsNamingMissingPaths', 'resolveBoardIds', 'hasResolvedBoardIds',
+  'shortId', 'slugify', 'taskStem', 'taskBranch',
 ])
 
 // A card id is a UUID string; taskBranch() (inside orchestrator.js) derives its
@@ -36,6 +42,33 @@ const PREFIX = 'm12'
 const BASE = 'main'
 
 const mk = stories => new Map(stories.map(s => [s.id, s]))
+
+// ── drift alarm: orchestrator.js's inlined naming copy vs scripts/naming.mjs ──
+// orchestrator.js cannot `import` naming.mjs (workflow scripts have no module
+// resolution), so it carries its own copy of shortId/slugify/taskStem/
+// taskBranch. The only thing preventing that copy from drifting is this test:
+// if it drifts, detect.mjs (the real naming.mjs) and orchestrator.js (this
+// copy) disagree about what a branch is called, and the orchestrator hunts for
+// PRs at addresses detect never reports — a failure that looks like "no PRs
+// exist" rather than what it is. This is a drift alarm, not a re-test of
+// naming.mjs's own behavior — that lives in naming.test.mjs.
+test('the inlined naming copy in orchestrator.js agrees with scripts/naming.mjs', () => {
+  const cards = [
+    { id: uid('11111111'), title: 'abcdefghij klmnopqrst uvwxyz' },   // truncates at a word boundary
+    { id: uid('22222222'), title: '???' },                            // slugifies to nothing
+    { id: 'A32AF745-15EF-45CD-B52C-64C19AE82C17', title: 'anything' }, // uppercase-hex id
+  ]
+  for (const card of cards) {
+    assert.equal(shortId(card.id), realShortId(card.id))
+    assert.equal(slugify(card.title), realSlugify(card.title))
+    assert.equal(taskStem(card), realTaskStem(card))
+    assert.equal(taskBranch('m12', card), realTaskBranch('m12', card))
+  }
+
+  // A non-UUID id must throw in BOTH copies, identically.
+  assert.throws(() => shortId('nope'), /not a card id/)
+  assert.throws(() => realShortId('nope'), /not a card id/)
+})
 
 // ── doneness (stacked mode: an open PR means DONE) ──────────────────────────
 // isSubtaskDone reads only `pr` and `state` — no id involved.
@@ -72,9 +105,15 @@ test('remainingSubtasks drops done ones and skips a CLOSED story entirely', () =
 
 test('subtasks keep the order the census gave them — no re-sorting by title', () => {
   // Titles carry no ordinal any more; the census already ordered these by
-  // their blocked_by chain, so the orchestrator must not reorder them.
-  const s1 = { id: uid('10000003'), title: 'write rows', state: 'OPEN', pr: null }
-  const s2 = { id: uid('10000004'), title: 'quoting', state: 'OPEN', pr: null }
+  // their blocked_by chain, so the orchestrator must not reorder them. Titles
+  // are deliberately given ORDINAL-LOOKING prefixes in REVERSED order — '1.2'
+  // before '1.1' — so this assertion fails loudly if title-based sorting is
+  // ever reintroduced. (Titles free of any ordinal, as an earlier version of
+  // this test used, cannot distinguish "kept the census order" from "sorted
+  // and happened not to move" — the old orderSubtasks() would have passed it
+  // too.)
+  const s1 = { id: uid('10000003'), title: '1.2 quoting', state: 'OPEN', pr: null }
+  const s2 = { id: uid('10000004'), title: '1.1 write rows', state: 'OPEN', pr: null }
   const story = { id: uid('10000000'), state: 'OPEN', blockedBy: [], subtasks: [s1, s2] }
   assert.deepEqual(remainingSubtasks(story).map(s => s.id), [s1.id, s2.id])
 })
@@ -87,6 +126,17 @@ test('independent stories land in one level; a blocked story in the next', () =>
   const C = { id: uid('20000003'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('20000013'), title: 'c', state: 'OPEN' }] }
   const levels = computeLevels([A, B, C])
   assert.deepEqual(levels.map(l => l.map(s => s.id)), [[A.id, C.id], [B.id]])
+})
+
+test('computeLevels preserves the census order within a level — it does not re-sort story ids', () => {
+  // Passed in an order a naive alphabetical (or any other) re-sort of the ids
+  // would disturb: 'cccccccc', 'aaaaaaaa', 'bbbbbbbb' is not ascending, so a
+  // reintroduced sort would visibly reorder this level.
+  const C = { id: uid('cccccccc'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('c0000001'), title: 'c', state: 'OPEN' }] }
+  const A = { id: uid('aaaaaaaa'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('a0000001'), title: 'a', state: 'OPEN' }] }
+  const B = { id: uid('bbbbbbbb'), state: 'OPEN', blockedBy: [], subtasks: [{ id: uid('b0000001'), title: 'b', state: 'OPEN' }] }
+  const levels = computeLevels([C, A, B])
+  assert.deepEqual(levels.map(l => l.map(s => s.id)), [[C.id, A.id, B.id]])
 })
 
 test('a story whose blocker has no remaining work is unblocked immediately', () => {
@@ -386,6 +436,22 @@ test('every branch and base comes from the graph, with no PR consulted', () => {
   assert.deepEqual(notes, [])
   assert.equal(story.subtasks[0].pr.number, 20)
   assert.equal(story.subtasks[1].pr.number, 21)
+})
+
+test('a title edit does not orphan an open PR — the short id still matches under the OLD slug', () => {
+  // The slug half of a derived branch is decoration, not identity: a card's
+  // title can be edited after its PR is open. If the primary match were a
+  // literal string == against the freshly-derived branch (which now carries
+  // the CURRENT slug), an edited title would miss, fall through to the
+  // near-miss path, and report real work as unstarted.
+  const t1 = { id: uid('50000041'), title: 'first', state: 'OPEN' }   // title edited after the PR opened
+  const story = { id: uid('50000040'), blockedBy: [], subtasks: [t1] }
+  const staleBranch = `${PREFIX}/task-was-first-50000041`             // same short id, stale slug
+  const notes = attach([story], [
+    { number: 30, ref: staleBranch, base: 'main', merged_at: null, state: 'open' },
+  ])
+  assert.deepEqual(notes, [])
+  assert.equal(story.subtasks[0].pr.number, 30)
 })
 
 test('a whole stack built under an older prefix halts on its first merged PR', () => {

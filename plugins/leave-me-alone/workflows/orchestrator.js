@@ -341,19 +341,22 @@ function hasResolvedBoardIds(projectArg) {
 // Detect now fetches the PR list ONCE for the whole milestone and returns it
 // raw; the matching happens here, per subtask.
 
-// Not the matcher any more — the DIAGNOSTIC. Branches are derived, so a PR is
-// this subtask's only if its head ref is exactly the derived name. This answers
-// the narrower question "does some other branch end with this subtask's short
-// id?", which is what a changed branchPrefix looks like: `aq-a1b2c3d4`,
-// `wip/a1b2c3d4` and a bare `a1b2c3d4` are all near misses for card a1b2c3d4…,
-// while a DIFFERENT card's short id that merely ends the same is not.
-// matchPr() halts on a MERGED near miss rather than re-implementing finished
-// work (#1050); randomising or timestamping branchPrefix would make every run
-// one big near miss.
+// Not the matcher any more — the DIAGNOSTIC. Branches are derived, so this
+// checks whether some OTHER branch — outside the milestone's own prefix — ends
+// with this subtask's short id, which is what a changed branchPrefix looks
+// like: `aq-a1b2c3d4`, `wip/a1b2c3d4` and a bare `a1b2c3d4` are all near
+// misses for card a1b2c3d4…, while a DIFFERENT card's short id that merely
+// ends the same is not. matchPr() halts on a MERGED near miss rather than
+// re-implementing finished work (#1050); randomising or timestamping
+// branchPrefix would make every run one big near miss.
 //
 // Consistent with filterPullRequests() in detect.mjs (Task 6): both key on the
 // card's short id, never on the slug — a card's title can be edited after its
-// PR is open, and slug-based matching would orphan that PR.
+// PR is open, and slug-based matching would orphan that PR. This is also why
+// matchPr()'s PRIMARY match below is id-scoped, not a literal string == against
+// the derived branch: the slug half of that derived name is mutable board
+// data, and an exact-string match would silently re-classify a live PR as
+// unstarted the moment someone edits a card's title mid-milestone.
 function prMatchesSubtask(ref, subtaskShortId) {
   const text = String(ref ?? '')
   const suffix = String(subtaskShortId)
@@ -387,13 +390,20 @@ function normalizePr(raw) {
 // 'unknown' (doneness is unverifiable, which halts the run), or 'wrong-base' (a
 // PR exists on this branch but not on its stack parent, so it is not evidence
 // of doneness — #1133).
-function matchPr(subtaskShortId, expectedBranch, expectedBase, pulls) {
+function matchPr(subtaskShortId, expectedBranch, expectedBase, pulls, branchPrefix) {
   const all = (pulls ?? []).map(normalizePr)
   // Merged work first, then the most recent. Only ever applied WITHIN a group
   // that already agrees on branch and base, so it can never override either.
   const rank = (a, b) => (a.merged !== b.merged ? (a.merged ? -1 : 1) : b.number - a.number)
 
-  const onBranch = all.filter(candidate => candidate.ref === expectedBranch)
+  // The PRIMARY match: id-scoped, not a literal string ==. `expectedBranch`
+  // carries the card's slug, and a slug is mutable board data — a title edit
+  // must not orphan an open PR. Still scoped to THIS milestone's prefix, so a
+  // ref outside it (a changed branchPrefix) still falls through to the
+  // near-miss path below rather than being treated as a match.
+  const onBranch = all.filter(candidate =>
+    candidate.ref === expectedBranch
+    || (candidate.ref.startsWith(branchPrefix) && candidate.ref.endsWith(`-${subtaskShortId}`)))
   if (onBranch.length > 0) {
     const onBase = onBranch.filter(candidate => candidate.base === expectedBase).sort(rank)
     if (onBase.length > 0) return { pr: onBase[0], note: null }
@@ -448,7 +458,8 @@ function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, baseBr
         shortId(subtask.id),
         subtaskBranch(subtask, branchPrefix),
         expectedBases.get(subtask.id) || baseBranch,
-        pulls)
+        pulls,
+        branchPrefix)
       if (note) notes.push(note)
       subtask.pr = pr
     }
