@@ -79,8 +79,12 @@ export async function prepareCheckout(repoDir, git = gitRunner, wait) {
 // Deliberately LOOSE — anything whose branch name contains any subtask's short
 // id. The orchestrator matches exactly and separately looks for near misses, so
 // over-reporting here is free and under-reporting is not.
-export function filterPullRequests(pulls, subtaskIds) {
-  const ids = [...new Set((subtaskIds ?? []).map(id => shortId(id)))]
+//
+// Takes already-resolved SHORT ids, not card ids: the caller resolves those
+// with shortId() before the PR-listing try/catch, so a malformed card id
+// aborts the run instead of being caught there and reported as prLookupFailed.
+export function filterPullRequests(pulls, subtaskShortIds) {
+  const ids = [...new Set(subtaskShortIds ?? [])]
   return (pulls ?? []).filter(pull => {
     const ref = String((pull && pull.ref) ?? '')
     return ids.some(id => ref.includes(id))
@@ -95,6 +99,12 @@ export async function detect({ repo, milestone, repoDir, run = ghRunner, runBrd 
   const roots = await brd(['tree'], { cwd: repoDir, run: runBrd })
   const { milestoneTitle, stories } = flattenMilestone(findMilestone(roots, milestone))
 
+  // Resolved BEFORE the try: shortId throws on a malformed card id, and that is a
+  // data-integrity bug, not a network condition. Inside the try it would be caught
+  // and reported as prLookupFailed — the same "a failed read looks like no data"
+  // collapse this module exists to avoid.
+  const subtaskShortIds = stories.flatMap(story => story.subtasks.map(sub => shortId(sub.id)))
+
   // REST, not `gh pr list`: the latter goes through GraphQL, which returned
   // empty results for genuinely-merged PRs during the 2026-08-17 incident.
   let pullRequests = []
@@ -105,7 +115,7 @@ export async function detect({ repo, milestone, repoDir, run = ghRunner, runBrd 
       '--jq', '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}',
     ]), { wait })
     const all = parseNdjson(raw)
-    pullRequests = filterPullRequests(all, stories.flatMap(story => story.subtasks.map(sub => sub.id)))
+    pullRequests = filterPullRequests(all, subtaskShortIds)
   } catch (err) {
     // NOT an empty list. "The API did not answer" and "there are no PRs" must
     // stay distinguishable, or merged work gets re-implemented.

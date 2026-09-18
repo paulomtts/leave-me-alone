@@ -4,6 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseArgs, parseNdjson, filterPullRequests, jsonFrom, lastLine, detect } from './detect.mjs'
+import { shortId } from './naming.mjs'
 
 // A fake `gh`: matches on a distinctive fragment of the argv it is given.
 const fakeGh = (routes, log = []) => {
@@ -83,27 +84,27 @@ test('one object per line, blank lines ignored', () => {
 })
 
 // ── filterPullRequests ───────────────────────────────────────────────────────
+// Takes already-resolved SHORT ids, not card ids — the caller (detect()) is
+// the one that resolves card ids via shortId(), and does so BEFORE the
+// PR-listing try/catch so a malformed id aborts the run instead of being
+// caught there. See the "malformed card id" test in the detect suite below.
 
 test('filterPullRequests matches a subtask by its short id', () => {
   const pulls = [{ ref: 'm12/task-write-rows-cccccccc' }, { ref: 'm12/task-other-dddddddd' }]
-  assert.deepEqual(filterPullRequests(pulls, [SUB_ID]).map(p => p.ref), ['m12/task-write-rows-cccccccc'])
+  assert.deepEqual(filterPullRequests(pulls, [shortId(SUB_ID)]).map(p => p.ref), ['m12/task-write-rows-cccccccc'])
 })
 
 test('the filter never decides — exactness is the orchestrator\'s job', () => {
   // A branch that merely contains the short id as a substring is kept even if
   // it belongs to a different, longer id sharing the same prefix. Dropping it
   // here would hide it from the near-miss check that catches a prefix change.
-  const longer = 'cccccccc-1111-4000-8000-000000000000'
+  const longer = shortId('cccccccc-1111-4000-8000-000000000000')
   assert.equal(filterPullRequests([{ ref: 'task-ccccccccdead' }], [longer]).length, 1)
 })
 
 test('no subtasks means no pull requests', () => {
-  assert.deepEqual(filterPullRequests([{ ref: `task-${SUB_ID}` }], []), [])
-  assert.deepEqual(filterPullRequests(null, [SUB_ID]), [])
-})
-
-test('filterPullRequests throws on a malformed subtask id — that is a bug worth surfacing', () => {
-  assert.throws(() => filterPullRequests([{ ref: 'task-x' }], ['not-a-uuid']), /not a card id/)
+  assert.deepEqual(filterPullRequests([{ ref: `task-${shortId(SUB_ID)}` }], []), [])
+  assert.deepEqual(filterPullRequests(null, [shortId(SUB_ID)]), [])
 })
 
 // ── detect ───────────────────────────────────────────────────────────────────
@@ -132,6 +133,15 @@ test('a brd failure stops the run instead of yielding an empty milestone', async
     detect({ repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
       run: async () => '', runBrd: failing, git: async () => '' }),
     /ProjectNotFoundError/)
+})
+
+test('a malformed card id aborts the run rather than reading as a PR-lookup failure', async () => {
+  const brokenTree = JSON.parse(JSON.stringify(TREE))
+  brokenTree.data[0].children[0].children[0].id = 'not-a-uuid'
+  await assert.rejects(
+    detect({ repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
+      run: async () => '', runBrd: async () => JSON.stringify(brokenTree), git: async () => '' }),
+    /not a card id/)
 })
 
 test('a failed PR listing sets prLookupFailed, NOT an empty list', async () => {
