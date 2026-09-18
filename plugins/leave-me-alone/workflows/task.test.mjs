@@ -16,8 +16,8 @@ import { loadPure } from './load-pure.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate } = await loadPure(join(HERE, 'task.js'), [
-  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate',
+const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate, shortId, stemOf } = await loadPure(join(HERE, 'task.js'), [
+  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate', 'shortId', 'stemOf',
 ])
 
 const BRANCH = 'task-42'
@@ -216,4 +216,22 @@ test('drift is not claimed when either hash is unusable', () => {
   assert.equal(planHashMismatch('a1b2c3d4', ''), null)
   assert.equal(planHashMismatch('not-a-hash', 'a1b2c3d4'), null)
   assert.equal(planHashMismatch(null, null), null)
+})
+
+// ── card identity: shortId / stemOf ──────────────────────────────────────────
+// task.js inlines shortId rather than importing scripts/naming.mjs (a Workflow
+// script has no module resolution), so this pins the inlined copy to the real
+// one byte-for-byte in BEHAVIOR — no second copy to drift silently.
+
+test('the inlined shortId matches the real naming.mjs', async () => {
+  const { shortId: real } = await import('../scripts/naming.mjs')
+  const id = 'a32af745-15ef-45cd-b52c-64c19ae82c17'
+  assert.equal(shortId(id), real(id))
+  assert.throws(() => shortId('nope'))
+  assert.throws(() => real('nope'))
+})
+
+test('the artifact stem comes from the branch, so it cannot disagree with it', async () => {
+  assert.equal(stemOf('m12/task-write-rows-a32af745'), 'task-write-rows-a32af745')
+  assert.equal(stemOf('task-a32af745'), 'task-a32af745')
 })

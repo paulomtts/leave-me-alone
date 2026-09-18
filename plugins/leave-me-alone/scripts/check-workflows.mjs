@@ -44,7 +44,8 @@ export const SMOKE_ARGS = {
       optionIds: { backlog: 'a', inProgress: 'b', inReview: 'c', done: 'd' } },
   },
   'task.js': {
-    repo: 'o/n', repoDir: '/tmp/x', issue: 1, baseBranch: 'main',
+    repo: 'o/n', repoDir: '/tmp/x', card: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    branch: 'm1/task-fixture-aaaaaaaa', baseBranch: 'main',
     scriptsDir: '/tmp/x/scripts',
     project: { id: 'PVT_1', fieldId: 'F_1',
       optionIds: { backlog: 'a', inProgress: 'b', inReview: 'c', done: 'd' } },
