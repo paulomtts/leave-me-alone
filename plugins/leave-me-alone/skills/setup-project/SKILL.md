@@ -220,7 +220,6 @@ Workflow({ name: "orchestrator" }, args: {
   nonce: "<current timestamp>", dryRun: true,
   taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
   detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
-  projectScript: "/abs/path/to/leave-me-alone/scripts/resolve.mjs",
   project: { number: PROJ }
 })
 ```
@@ -242,7 +241,6 @@ either decides anything. Both are **triggers**: each runs one command and hands 
 ```jsonc
 "taskScript":    "~/.claude/workflows/task.js",
 "detectScript":  "~/.claude/workflows/scripts/detect.mjs",
-"projectScript": "~/.claude/workflows/scripts/resolve.mjs",
 "scriptsDir":    "~/.claude/workflows/scripts"
 ```
 
@@ -253,8 +251,8 @@ being split between `~/.claude` and a version-stamped plugin cache directory tha
 out anywhere. A missing or relative path fails at launch, and there is no agent-census fallback — the
 census is deterministic or it does not happen.
 
-`projectScript` is needed only when `project` is given as a `number`. Pass the resolved ids instead
-and no lookup happens at all. Without either, the board is disabled and the run says so.
+There is no resolver for GitHub project numbers any more, so `project` must be passed as a resolved
+`{id, fieldId, optionIds}` block. A `project` given as a bare `number` fails at launch.
 
 `bun` must be on PATH.
 
@@ -322,7 +320,6 @@ To inspect a board by hand — or to debug a run that came back wrong — the sa
 
 ```bash
 bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone 12
-bun ~/.claude/workflows/scripts/resolve.mjs --owner OWNER --number 13
 ```
 
 ## Skipping the id lookup

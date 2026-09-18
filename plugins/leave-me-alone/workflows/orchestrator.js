@@ -579,7 +579,6 @@ const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <no
 const maxConcurrentStories = Number.isInteger(opts.maxConcurrentStories) && opts.maxConcurrentStories > 0
   ? opts.maxConcurrentStories
   : 4
-const [owner, repoName] = repo.split('/')
 
 // Workflow scripts cannot locate their own directory, so the sibling script
 // must be named explicitly — no default: this repo can be checked out at any
@@ -670,17 +669,6 @@ async function callAgent(prompt, agentOpts) {
 
 [RETRY: a previous attempt returned no structured output and may have already performed some steps — verify current state before repeating any write. You MUST finish by returning the structured result.]`,
       { ...agentOpts, label: `${agentOpts.label}:retry` })
-  }
-}
-
-// Same retry behaviour as callAgent, but a final failure returns null instead
-// of throwing — for work whose failure should degrade the run, not end it.
-async function callAgentSoftly(prompt, agentOpts) {
-  try {
-    return await callAgent(prompt, agentOpts)
-  } catch (err) {
-    log(`agent ${agentOpts.label} failed: ${err && err.message ? err.message : String(err)}`)
-    return null
   }
 }
 
