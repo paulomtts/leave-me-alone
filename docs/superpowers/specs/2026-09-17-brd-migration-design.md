@@ -281,8 +281,50 @@ About eight of its twenty gotcha rows retire with the mechanics they warn about
 execution order, and board-view filtering. The rows about breakdown quality all
 stay.
 
-**`setup-report`** renders from the committed board rather than live GitHub
-queries.
+**`setup-report`** becomes a hybrid for the same reason `detect.mjs` does, and
+an earlier draft of this spec was wrong to call it a straight swap. It takes
+structure — stories, subtasks, DAG depth, status — from brd, but it also reads
+PR state and CI conclusions (`gh pr checks`) and infers states that have no
+direct signal. Those stay on `gh`. Its "Sources" section, which currently
+describes a Projects v2 board with story/subtask issues, is what changes; the
+rendering and the hard-won lessons in its notes do not.
+
+### Also affected
+
+Found by sweeping the plugin tree rather than by working outward from the
+workflows, and easy to miss:
+
+- **`hooks/auto-allow.sh`** — the permission allowlist. It covers read-only
+  `git`/`gh`/`docker` and the `gh` writes used by the setup skills, and mentions
+  `brd` nowhere. Unless brd is added, **every board call prompts**, which breaks
+  unattended runs — the entire point of the orchestrator. Reads (`tree`, `show`,
+  `list`, `next`, `projects`) and writes (`add`, `update`, `block`, `unblock`,
+  `import`) are all local-only and safe to allow. Conversely, the auto-allowed
+  `gh issue create` / `label create` / `project item-edit` writes can be narrowed
+  or dropped, which reduces the blast radius of the allowlist.
+- **`scripts/plan-check.mjs`** — requires `--issue <positive integer>` and
+  matches plan files named `*issue-<n>.md`. This is the same gap as branch
+  naming: an artifact keyed by an identifier brd does not have.
+- **Plan and spec artifact paths** (`workflows/task.js:256-257`) —
+  `issue-<n>.md` and `issue-<n>-design.md` become
+  `task-<slug>-<shortid>.md` and `task-<slug>-<shortid>-design.md`, matching the
+  branch scheme. `plan-check` keeps its exact-suffix matching, now on
+  `-<shortid>.md`, preserving the property that one card's plan cannot answer
+  for another's.
+- **`agents/repo-reader.md`** — described as reading "a repo and its GitHub
+  issues". Its description and prompt should say brd cards, since the
+  description drives when it gets dispatched.
+- **`scripts/check-workflows.mjs`** — smoke-loads the workflows against a fixture
+  args object (`milestone: 1`, `projectScript`, …). The fixture must track the
+  new argument shape or the check passes while the real call fails.
+- **`hooks/sync-workflows.sh`** — copies `workflows/*.js` and `scripts/*.mjs` by
+  glob, so removing `resolve.mjs` needs no edit here; but it never prunes, so a
+  stale `resolve.mjs` lingers in already-synced destinations. Harmless, worth a
+  one-line cleanup note. Its operator messages also describe milestone
+  semantics.
+- **`workflows/README.md`** — documents `resolve.mjs`, the `projectScript`
+  argument and `milestone: 12`, and states the run requires `gh` authenticated
+  **with the `project` scope**. That scope requirement disappears.
 
 ## Error handling
 
