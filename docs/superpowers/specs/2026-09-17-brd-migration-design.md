@@ -93,32 +93,54 @@ decoration, but nothing parses them.
 
 ## Storage and the durable record
 
-As of brd #35, a project's database lives at `.brd/board.db` inside the repo and
-is committed to git; the generated `.brd/.gitignore` excludes only
-`board.db-journal`. Board state therefore travels with the repo, satisfying the
-portability requirement natively. No JSON snapshot mechanism is needed.
+brd #35 briefly put the database in the repo at `.brd/board.db`; **brd #39
+reverted that**. Current behaviour, verified against the installed binary:
 
-This creates one hazard specific to these workflows. `find_project_db` walks up
-from the current directory looking for `.brd/board.db`. Because that file is now
-a tracked working-tree file, **every git worktree has its own copy**, checked out
-at whatever commit it branched from. Two rules follow:
+- The database is central, under `XDG_DATA_HOME`, named by the SHA-256 of the
+  project's resolved root path (`paths.project_db_path`).
+- `.brd` at the project root is an empty **marker file**, and `init_project`
+  appends `.brd` to the repo's `.gitignore`. It is deliberately not committed.
+- `find_marker` walks up from the current directory to locate that marker;
+  `resolve_project_db` hashes the marker's parent.
 
-1. **Every brd mutation targets the main checkout**, addressed by absolute path,
-   never inheriting a worktree's working directory. The board is a single live
-   store; worktree copies are stale artifacts.
-2. **`.brd/board.db` never enters a feature-branch commit.** Board state is
-   committed deliberately on the main branch, decoupled from the PR stack.
-   Otherwise each branch carries a divergent binary SQLite file — a conflict git
-   cannot resolve, in the middle of a stacked chain.
+This is good news for worktrees and bad news for portability.
 
-Rule 1 needs an active guard, not error handling: mutating from inside a
-worktree raises nothing, because `.brd/board.db` genuinely exists there. It
-succeeds against the wrong database. Before mutating, compare
-`git rev-parse --git-dir` with `--git-common-dir` and refuse when they differ.
+### Worktrees resolve correctly for free
 
-Rule 2 is a hazard rather than a convention, because inside a worktree
-`.brd/board.db` is a legitimately modified tracked file that any broad
-`git add` would sweep in silently.
+Subtask worktrees are created at `${repoDir}/.claude/worktrees/${BRANCH}`
+(`workflows/task.js:220`), i.e. nested inside the main checkout. The marker is
+untracked, so it never appears in a worktree; the upward walk therefore leaves
+the worktree, finds the main checkout's `.brd`, and every lane resolves to the
+same central database. Verified: a card created in the main checkout is visible
+from a nested worktree.
+
+A worktree created *outside* the repo fails loudly with
+`ProjectNotFoundError: no .brd marker found above …` rather than silently using
+a different board. Both directions are safe, so no guard comparing
+`git rev-parse --git-dir` against `--git-common-dir` is required.
+
+### Portability needs a committed snapshot
+
+Because the marker is gitignored and the data is central, **no board state
+travels with the repo**. A fresh clone on another machine has no marker, needs
+its own `brd init`, and starts empty.
+
+The durable-record requirement is therefore met on our side, not brd's: after a
+run, and on demand from `setup-report`, write `brd tree <milestone-id>` to a
+committed JSON file at `docs/board/<milestone>.json`. This is nearly free, since
+it is the same call the orchestrator already makes to read the board — one
+command with two destinations.
+
+The snapshot is a **record, not a restore path**: brd has no import command, so
+it makes state readable from a clone and rendersable by `setup-report`, but does
+not rehydrate a board elsewhere. That is an acceptable limit for the agreed
+requirement (a durable, readable history in git) and should not be quietly
+widened into a sync mechanism.
+
+JSON also suits the stacked-PR flow better than `#35`'s binary database would
+have: it is diffable and conflict-resolvable. It should still be written on the
+main branch rather than inside feature-branch commits, to keep board churn out
+of the review stack.
 
 ## Component changes
 
@@ -215,7 +237,9 @@ dispatched at once against a base none has built on." brd makes it easy to get
 right because the discriminator is explicit in the payload instead of inferred
 from an empty array.
 
-Failure modes to handle: `ProjectNotFoundError` (unregistered directory),
+Failure modes to handle: `ProjectNotFoundError` (no `.brd` marker above the
+working directory — the signature of an unregistered repo, a fresh clone, or a
+worktree placed outside the main checkout),
 `CardNotFoundError` (stale id), `InvalidStatusError` (avoided by never writing
 `blocked`), `CycleError` (reachable from `setup-milestone`).
 
@@ -247,7 +271,10 @@ Coverage the migration specifically needs:
   mutation was rejected; UUIDs retire that class.
 - The parent-status rollup helper.
 - The `ok:false` → throw path, per command.
-- The worktree guard refusing to mutate.
+- Board resolution from a nested worktree reaching the main checkout's board —
+  an integration test, since it depends on brd's marker walk rather than on our
+  own code.
+- The snapshot written after a run matching the live board.
 
 `resolve.test.mjs` is deleted with `resolve.mjs`.
 
@@ -256,6 +283,13 @@ Coverage the migration specifically needs:
 This design depends on brd #38 (merged), which added ancestor-blocking
 inheritance to `resolve_status` and `brd next --parent <id>`. Both are verified
 working in the installed binary.
+
+brd #39 (merged after it) reverted in-repo storage back to central,
+path-hash-keyed databases; the Storage section reflects the reverted behaviour,
+not #35's. Storage is the part of this design most exposed to upstream churn,
+having changed twice during the design itself — so re-verify marker resolution
+and the gitignore behaviour before implementing, rather than trusting this
+document.
 
 Only the inheritance fix is load-bearing here, and indirectly: it makes the
 board's own display agree with the orchestrator's view of readiness, so a human
