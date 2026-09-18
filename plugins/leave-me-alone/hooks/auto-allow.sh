@@ -27,9 +27,21 @@ if grep -qE '^(git (status|log|diff|show|branch|rev-parse|remote|fetch|stash lis
   allow "leave-me-alone: read-only/lifecycle command"
 fi
 
-# --- gh writes used by milestone / github-project-setup skills ------------
-if grep -qE '^gh (issue create|label create|project (create|item-add|item-edit)|api graphql|api .* -X (POST|PATCH|PUT))\b' <<<"$cmd"; then
-  allow "leave-me-alone: gh write used by milestone/github-project-setup skills"
+# --- brd: the local board -------------------------------------------------
+# Every subcommand reads or writes a local SQLite database: no network, nothing
+# outside the project's own board, so the whole CLI is allowed rather than a
+# read/write split.
+#
+# The `cd <dir> && ` prefix is matched explicitly because task.js's trigger
+# steps pin brd's working directory that way (brd resolves its project by
+# walking up from the cwd), and every pattern in this file is ^-anchored — a
+# bare `brd` rule would never match the commands that actually run.
+#
+# The prefix is deliberately narrow: no `;`, `&`, `|`, `$`, backtick or parens
+# inside the path or the trailing arguments, so it cannot become a way to
+# smuggle a second command — including via command substitution — through.
+if grep -qE '^(cd [^&|;$`()]+ && )?brd (init|projects|add|show|list|update|block|unblock|tree|next|import)( |$)[^&|;$`()]*$' <<<"$cmd"; then
+  allow "leave-me-alone: brd (local board, no network)"
 fi
 
 # --- git merge/push/rebase, only when NOT targeting main/master ------------
