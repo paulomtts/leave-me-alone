@@ -1,16 +1,16 @@
 export const meta = {
   name: 'task',
-  description: 'Drive ONE subtask issue end-to-end in its own worktree/branch: explore, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo, board, and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
+  description: 'Drive ONE subtask card end-to-end in its own worktree/branch: explore, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
-    { title: 'Explore', detail: 'issue + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card -> In progress', model: 'sonnet' },
+    { title: 'Explore', detail: 'card + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card status -> in_progress', model: 'sonnet' },
     { title: 'Worktree', detail: 'create the subtask worktree before anything writes into it', model: 'haiku' },
     { title: 'Spec', detail: 'scope, behavior, error paths, test list -> docs/superpowers/specs/, then adversarially reviewed BEFORE anything is planned on it', model: 'opus' },
     { title: 'Plan', detail: 'TDD implementation plan from the reviewed spec, via superpowers:writing-plans', model: 'opus' },
     { title: 'Validate', detail: 'adversarial plan review against the spec, fixes folded into the plan file', model: 'sonnet' },
     { title: 'Implement', detail: 'worktree + strict TDD, granular commits', model: 'sonnet' },
     { title: 'Review', detail: 'branch diff review, test-integrity gate, lint; fixes committed here; unresolved blockers stop the run', model: 'opus' },
-    { title: 'Ship', detail: 'clean-tree check + full verification, then push and open the PR (no merge); card -> In review', model: 'haiku' },
+    { title: 'Ship', detail: 'clean-tree check + full verification, then push and open the PR (no merge); card status -> done', model: 'haiku' },
   ],
 }
 
@@ -211,13 +211,6 @@ try {
 } catch (err) {
   throw new Error(`task workflow needs args.card as a brd card id (UUID) — ${err.message}`)
 }
-// Transitional alias: boardMoveInstructions below (and its findCard/setStatus
-// GraphQL) still closes over `issue` from when subtasks were numbered GitHub
-// issues. That whole board block is Task 7's rewrite to `brd update` — out of
-// scope here — so this alias only keeps the file from throwing a
-// ReferenceError before Task 7 lands; its GraphQL already cannot resolve a
-// card id and stays non-functional until that rewrite.
-const issue = card
 const repo = opts.repo
 if (typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) {
   throw new Error('task workflow needs args.repo as "owner/name"')
@@ -336,11 +329,6 @@ const DRY = opts.dryRun === true
 // The time gap between Detect and this run is covered where it actually
 // matters: Implement re-checks for a live PR on the branch before touching it.
 
-// project: fully resolved ids, passed down by the orchestrator. REQUIRED —
-// there is no boardless mode. A subtask that ships a PR while its card silently
-// stays in Backlog is indistinguishable from one that never ran.
-const project = opts.project && typeof opts.project === 'object' ? { ...opts.project } : null
-
 // agent() can throw when the model returns without calling StructuredOutput —
 // a transient harness fault, not a real blocker. Retry exactly once with an
 // amended prompt (distinct cache key); a second failure falls through to the
@@ -383,104 +371,6 @@ function printableOnly(text) {
   return String(text ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
 }
 
-// ── board — orchestrator-resolved ids only ───────────────────────────────────
-// Ids are NOT looked up here. The orchestrator resolves them once per milestone
-// in its Configure phase and forwards the resolved block to every subtask, so
-// this workflow only ever receives them ready-made — no dispatch, no GraphQL.
-//
-// An earlier version could also resolve them itself from a bare project.number,
-// for the standalone `/task 251` case. That path cost an agent dispatch on every
-// run and was never taken under the orchestrator, which is how this workflow is
-// actually driven. Pass the resolved block; there is no boardless mode.
-// (orchestrator.js still accepts a plain {number: N} — resolving by name is its
-// job, not this file's.)
-const DEFAULT_OPTION_NAMES = { backlog: 'Backlog', inProgress: 'In progress', inReview: 'In review', done: 'Done' }
-
-function resolveProject() {
-  if (!project) {
-    throw new Error(
-      'task workflow needs args.project with resolved ids {id, fieldId, optionIds} — the '
-      + 'orchestrator resolves them once per milestone and forwards them. There is no boardless mode.')
-  }
-  if (!(project.id && project.fieldId && project.optionIds)) {
-    throw new Error(
-      'task workflow was passed `project` without resolved ids (id/fieldId/optionIds). Let the '
-      + 'orchestrator resolve and forward them, or resolve them once yourself (see the '
-      + 'setup-project skill) and pass the whole block.')
-  }
-  return {
-    id: project.id, fieldId: project.fieldId, optionIds: project.optionIds,
-    statusField: project.statusField || 'Status',
-    optionNames: { ...DEFAULT_OPTION_NAMES, ...(project.optionNames || project.options || {}) },
-  }
-}
-const board = resolveProject()
-const optionNames = board.optionNames
-
-// This workflow only ever makes TWO card moves: "In progress" when Explore
-// accepts the subtask, and "In review" when its PR opens. An earlier version
-// also moved the card at spec->implement, but both of those stages map to the
-// SAME "In progress" option — the second mutation always wrote the value the
-// first had just written. "Backlog" belongs to milestone setup and "Done" to
-// the orchestrator's post-merge step; neither is this workflow's to write.
-//
-// Reusable prompt fragment for the board mutation — embeddable as the TAIL of
-// another stage's own agent call (Explore/PR) instead of a separate dispatch,
-// since that agent already has tool access and full context. Every call site
-// must frame this as best-effort and instruct the model not to let its failure
-// affect the stage's real return value.
-const [repoOwner, repoShortName] = repo.split('/')
-
-function boardMoveInstructions(optionKey, cached) {
-  const known = cached && typeof cached === 'object' ? cached : {}
-  const id = value => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : null)
-  const itemId = id(known.itemId)
-  const parentItemId = id(known.parentItemId)
-
-  const findCard = number => `gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){projectItems(first:10){nodes{id project{id}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${number} --jq '.data.repository.issue.projectItems.nodes[] | select(.project.id=="${board.id}") | .id'`
-  const setStatus = (idRef, optionId) => `gh api graphql -f query='mutation($i:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:"${board.id}",itemId:$i,fieldId:"${board.fieldId}",value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' -f i="${idRef}" -f o="${optionId}"`
-
-  // A project item id is stable for the life of the card, so re-resolving it in
-  // a later stage is a round trip that buys nothing. Explore resolves both ids
-  // and reports them; every stage after it is handed them. The only way a
-  // cached id goes bad is a card removed and re-added mid-run, which the
-  // stale-id fallback below covers.
-  const step1 = itemId
-    ? `1. This card's id was already resolved during exploration — use it as-is, do NOT look it up again:
-ITEM_ID="${itemId}"`
-    : `1. Find the card:
-ITEM_ID=$(${findCard(issue)})`
-
-  // The siblings' statuses are NOT cacheable: they are exactly what changes as
-  // the run progresses, which is the whole reason the parent gets re-mirrored.
-  const step3 = parentItemId
-    ? `3. Mirror the parent story. Its card id was also resolved during exploration:
-PARENT_ITEM_ID="${parentItemId}"
-You still need the siblings' CURRENT statuses, which change as the run progresses:
-${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
-Among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target "${optionNames.done}"; otherwise (a mix) target "${optionNames.inProgress}". Then run the step-2 mutation against $PARENT_ITEM_ID with the matching option id from this map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.
-If a mutation fails with a not-found/invalid-id error the cached id is stale (card removed and re-added): look that card up by its issue number with the same projectItems query, then retry once.`
-    : `3. Mirror the parent story. Fetch:
-${`gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){parent{number subIssues(first:50){nodes{projectItems(first:10){nodes{project{id} fieldValueByName(name:"${board.statusField}"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}}' -f o="${repoOwner}" -f r="${repoShortName}" -F n=${issue}`}
-If there is no parent, stop here. Otherwise, among the sub-issues' Status names on this project (missing value counts as "${optionNames.backlog}"), decide the parent's target status by PROGRESS, not by the least-advanced sibling: if EVERY sub-issue is "${optionNames.backlog}", target is "${optionNames.backlog}"; if EVERY sub-issue is "${optionNames.done}", target is "${optionNames.done}"; otherwise (a mix) target is "${optionNames.inProgress}". Then find the parent's card with the step-1-style query (its issue number) and set its Status with the step-2-style mutation using this option-id map: ${optionNames.backlog}=${board.optionIds.backlog} ${optionNames.inProgress}=${board.optionIds.inProgress} ${optionNames.inReview}=${board.optionIds.inReview} ${optionNames.done}=${board.optionIds.done}.`
-
-  const report = known.report === true
-    ? `
-
-Finally, return board.itemId, board.parentItemId (empty if no parent) and board.parentNumber (0 if none) — later stages reuse these instead of re-querying. Report them even if a mutation failed.`
-    : ''
-
-  return `
-Move the board card for ${repo} issue #${issue} to Status "${optionNames[optionKey]}", then mirror its parent story. Use ONLY the Status-setting mutation below — never create, close, edit, or delete anything.
-
-${step1}
-
-2. Set its Status (pass the option id with -f, NOT -F — -F coerces numeric-looking strings to int and the mutation rejects it):
-${setStatus('$ITEM_ID', board.optionIds[optionKey])}
-
-${step3}${report}`
-}
-
 // ── 1. explore ────────────────────────────────────────────────────────────────
 phase('Explore')
 const providedVerification = opts.verification && typeof opts.verification === 'object' ? opts.verification : null
@@ -490,24 +380,18 @@ const verificationStep = providedVerification
 
 const explorePrompt = `Explore ${repo} subtask card ${id} in ${repoDir} and report what the later stages need.
 
-1. \`cd ${repoDir} && brd show ${card}\` — read this card's title, description and parent_id for what the subtask asks for. If parent_id is empty, this card is a MILESTONE (the root of the hierarchy has no parent): set refused=true with that reason and stop here (skip everything below, including the board step).
+1. \`cd ${repoDir} && brd show ${card}\` — read this card's title, description and parent_id for what the subtask asks for. If parent_id is empty, this card is a MILESTONE (the root of the hierarchy has no parent): set refused=true with that reason and stop here (skip everything below).
 2. \`cd ${repoDir} && brd show <parent_id>\` (the value from step 1) — this is the parent, but brd's hierarchy is three levels (milestone -> story -> subtask), so a STORY also has a non-empty parent_id (its milestone). Check THIS card's own parent_id: if it is empty, the card from step 1 was a STORY, not a subtask — set refused=true with that distinct reason (name it as a story, not a milestone) and stop here. Only if it is non-empty (confirming step 1's card is genuinely a subtask, two levels down from the milestone) do you have the real parent story: its title/description came from this step's own \`brd show\`, and its siblings come from \`cd ${repoDir} && brd tree <parent_id>\` (parent_id from step 1) — list them with their statuses.
 3. Read this repo's own architecture/standards docs (check CLAUDE.md for an index) and any specs/ADRs the story or subtask cites.
 4. Locate the code the subtask touches: existing modules and sibling tests.
 ${verificationStep}
 6. Find this repo's own test-tier PLACEMENT rules — do NOT assume a taxonomy. Its testing standards doc usually says which tier owns what kind of test (e.g. "unit owns pure combinations, integration owns paths, e2e owns wiring, conformance owns real-vs-fake equivalence" is one repo's version — another repo's tiers and rules will differ). Cite the doc path and summarize its placement rule in one or two lines inside your summary — every later stage that writes a test needs this to place it correctly, not default to a habitual tier out of habit.
-${DRY ? '' : `
-7. Only if you did NOT refuse above, as a final best-effort step (do NOT let its failure change refused/summary/verification above — note it in summary instead): ${boardMoveInstructions('inProgress', { report: true })}`}
 
 Return: what card ${id} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`
 const exploreOpts = { label: `explore:${id}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: {
   type: 'object', required: ['refused', 'summary', 'verification'],
   properties: {
     refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
-    // Resolved once here so Ship does not re-query for ids that cannot change.
-    board: { type: 'object', properties: {
-      itemId: { type: 'string' }, parentItemId: { type: 'string' },
-      parentNumber: { type: 'integer' } } },
     verification: { type: 'object', required: ['fullSuite'], properties: {
       fullSuite: { type: 'array', items: { type: 'string' } },
       typecheck: { type: 'string' }, lint: { type: 'array', items: { type: 'string' } },
@@ -536,11 +420,27 @@ if (degenerate) {
   }
 }
 
-// Card ids are stable for the life of the card, so this is resolved once and
-// handed to every later stage instead of being looked up again per board move.
-const boardIds = (explore.board && typeof explore.board === 'object') ? explore.board : {}
-if (!boardIds.itemId) {
-  log('explore did not report a board item id — later card moves will resolve it themselves (one extra query per move)')
+// Explore accepted real work: roll the card's status to in_progress
+// deterministically, via rollup.mjs's own ancestry walk — not a prompt asking
+// a model to build GraphQL and reason out a parent rollup itself. Best-effort:
+// its failure must not change anything else this stage returns.
+if (!DRY) {
+  const rollupOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/rollup.mjs --card ${card} --status in_progress --repo-dir ${repoDir} --compact
+
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. This step is best-effort: report a failure via the schema's error field, do not retry it yourself, and do not let it change anything else.`,
+    { label: `rollup:${id}:in_progress`, phase: 'Explore', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+      type: 'object', required: ['stdout'],
+      properties: {
+        stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+        error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+      },
+    } })
+  if (!rollupOut) {
+    log('rollup (in_progress) agent died — card status was not rolled up')
+  } else if (rollupOut.error) {
+    log(`rollup (in_progress) failed: ${rollupOut.error}`)
+  }
 }
 
 const verification = providedVerification || explore.verification
@@ -765,7 +665,7 @@ Calibration: only flag what would cause a real problem during implementation. An
 
 If a plan defect traces back to the SPEC being wrong, say so in reason and set blockers=true rather than patching the plan around it: a plan that compensates for a bad spec hides the real problem from every later stage.
 
-Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust. Explore moves the card to "${optionNames.inProgress}" on a best-effort basis; do not touch the board here either way.
+Fold every CONFIRMED fix directly into the plan file (edit it), keeping its structure. On success (blockers=false), also prepend the exact line \`<!-- task-pipeline: validated -->\` as the very first line of the plan file, before anything else — this marks the plan as a durable checkpoint a resumed run can trust. Explore already rolled the card's status to in_progress on a best-effort basis; do not touch card status here either way.
 
 Return blockers=true only if something unresolvable remains (spec contradiction needing a human decision) with the reason.`,
     { label: `validate-plan:${id}`, phase: 'Validate', model: 'sonnet', agentType: 'leave-me-alone:plan-critic', schema: {
@@ -1000,10 +900,7 @@ const shipOut = await callAgent(`Run this command and return its stdout EXACTLY 
 
 This command runs the FULL verification suite before it pushes anything, which can take several minutes on a large repo — the Bash tool's own default timeout (2 minutes) is too short for it. You MUST call the Bash tool for this command with an explicit timeout of 600000 (its 10-minute maximum). Do not omit that parameter and do not rely on the default.
 
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.
-
-Only if that command printed \`"number"\` with a real PR number, do this as a final best-effort step (its failure must not change anything you return):
-${boardMoveInstructions('inReview', boardIds)}`,
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.`,
   { label: `ship:${id}`, phase: 'Ship', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {
@@ -1038,6 +935,28 @@ const prNumber = Number(ship.number)
 if (!Number.isInteger(prNumber) || prNumber <= 0) {
   return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
     detail: ship.detail || `verification passed but no usable PR number came back (url: ${String(ship.url ?? '').slice(0, 120)}). The branch ${ship.pushed ? 'WAS' : 'may not have been'} pushed — check before re-running.` }
+}
+
+// A PR is open — per the spec, that is what "done" means: a run never merges,
+// so it cannot observe anything later than "shipped", and "in_review" has no
+// occupant in this model. Deterministic, via rollup.mjs's own ancestry walk,
+// not a prompt asking a model to build GraphQL and reason out a parent rollup
+// itself. Best-effort: its failure must not change anything this stage returns.
+const rollupOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/rollup.mjs --card ${card} --status done --repo-dir ${repoDir} --compact
+
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. This step is best-effort: report a failure via the schema's error field, do not retry it yourself, and do not let it change anything else.`,
+  { label: `rollup:${id}:done`, phase: 'Ship', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
+    type: 'object', required: ['stdout'],
+    properties: {
+      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
+      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
+    },
+  } })
+if (!rollupOut) {
+  log('rollup (done) agent died — card status was not rolled up')
+} else if (rollupOut.error) {
+  log(`rollup (done) failed: ${rollupOut.error}`)
 }
 
 return { card, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan,

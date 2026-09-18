@@ -10,6 +10,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { loadPure } from './load-pure.mjs'
@@ -261,4 +262,28 @@ test('shellQuote escapes an embedded single quote', () => {
 
 test('shellQuote coerces a non-string value', () => {
   assert.equal(shellQuote(42), "'42'")
+})
+
+// ── no GraphQL survives ──────────────────────────────────────────────────────
+// task.js used to build GitHub GraphQL mutation strings and hand them to an
+// agent as a natural-language prompt to run verbatim. That is a string built
+// for an agent to execute, so the pure-region tests above cannot see it — it
+// has to be caught by reading the file as text.
+
+test('no GraphQL survives anywhere in task.js', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /updateProjectV2ItemFieldValue|projectItems|fieldValueByName/,
+    'a board mutation is still being built here')
+  assert.doesNotMatch(source, /api graphql/, 'a graphql call is still being built here')
+})
+
+test('the board argument and its option names are gone', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /DEFAULT_OPTION_NAMES|resolveProject|statusField/)
+})
+
+test('the status rollup goes through rollup.mjs, not a board mutation prompt', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  assert.match(source, /rollup\.mjs --card \$\{card\} --status in_progress --repo-dir \$\{repoDir\} --compact/)
+  assert.match(source, /rollup\.mjs --card \$\{card\} --status done --repo-dir \$\{repoDir\} --compact/)
 })
