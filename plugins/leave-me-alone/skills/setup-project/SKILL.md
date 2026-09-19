@@ -184,7 +184,7 @@ is a hard error rather than a silent fallback to the default subagent.
 
 | type | tools | used by |
 |---|---|---|
-| `leave-me-alone:command-runner` | Bash | the trigger steps: detect, resolve, plan-check, ship |
+| `leave-me-alone:command-runner` | Bash | the trigger steps: detect, worktree, plan-check, ship, rollup |
 | `leave-me-alone:repo-reader` | Bash, Read, Grep, Glob | Explore — never writes |
 | `leave-me-alone:spec-author` | Read, Write, Grep, Glob | Spec — no shell |
 | `leave-me-alone:plan-author` | Read, Write, Edit, Grep, Glob, Skill | Plan — invokes `superpowers:writing-plans` |
