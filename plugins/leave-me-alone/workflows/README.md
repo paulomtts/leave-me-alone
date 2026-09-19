@@ -51,6 +51,8 @@ Each is also usable standalone for inspecting or debugging a run.
 
 ## orchestrator
 
+A numeric milestone gets a default `branchPrefix`:
+
 ```jsonc
 Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
   repo: "owner/name", repoDir: "/abs/path", milestone: 12, baseBranch: "main",
@@ -62,13 +64,28 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 })
 ```
 
+Addressing the milestone by `brd` card id or title substring — the addressing this migration
+introduces — has no safe default to derive a branch prefix from, so `branchPrefix` becomes required:
+
+```jsonc
+Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
+  repo: "owner/name", repoDir: "/abs/path", milestone: "<brd card id or title substring>",
+  baseBranch: "main", nonce: "<current timestamp>",
+  taskScript:    "<repo>/workflows/task.js",       // required, absolute
+  detectScript:  "<repo>/scripts/detect.mjs",      // required, absolute
+  branchPrefix:  "m12",                            // required for a non-numeric milestone
+  verification: { fullSuite: ["npm test"], typecheck: "", lint: [] },
+  dryRun: true,
+})
+```
+
 | arg | required | notes |
 |---|---|---|
 | `repo`, `repoDir`, `milestone`, `baseBranch` | yes | no defaults; `baseBranch` is never guessed |
-| `nonce` | yes | busts the Detect cache so a re-run re-reads GitHub |
+| `nonce` | yes | busts the Detect cache so a re-run re-reads `brd`/`gh` state fresh |
 | `taskScript`, `detectScript` | yes | absolute paths; this repo can be checked out anywhere |
 | `verification` | no | supply it and Detect becomes a pure trigger |
-| `branchPrefix` | no | defaults to `m<milestone>`. **Constant for a milestone's life** |
+| `branchPrefix` | only for a non-numeric `milestone` | defaults to `m<milestone>` when `milestone` is a positive integer; otherwise required — there is no safe default to derive from a card id or title. **Constant for a milestone's life** |
 | `maxConcurrentStories` | no | default 4 |
 | `triggerAgentType` | no | default `leave-me-alone:command-runner`; `""` for the default subagent |
 | `dryRun` | no | returns the plan and writes nothing |

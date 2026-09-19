@@ -22,13 +22,13 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ORCHESTRATOR_PATH = join(HERE, 'orchestrator.js')
 
 const {
-  isSubtaskDone, remainingSubtasks, computeLevels,
+  isSubtaskDone, remainingSubtasks, computeLevels, storyRollupAnchor,
   assertNoBlockerCycles, subtaskBranch, storyRoot, stackBases, escalation,
   prMatchesSubtask, matchPr, attachPullRequests, dropCommandsNamingMissingPaths,
   shortId, slugify, taskStem, taskBranch,
   resolveMilestone, resolveBranchPrefix,
 } = await loadPure(ORCHESTRATOR_PATH, [
-  'isSubtaskDone', 'remainingSubtasks', 'computeLevels',
+  'isSubtaskDone', 'remainingSubtasks', 'computeLevels', 'storyRollupAnchor',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
   'prMatchesSubtask', 'normalizePr', 'matchPr', 'attachPullRequests',
   'dropCommandsNamingMissingPaths',
@@ -124,6 +124,26 @@ test('subtasks keep the order the census gave them — no re-sorting by title', 
   const s2 = { id: uid('10000004'), title: '1.1 write rows', status: 'todo', pr: null }
   const story = { id: uid('10000000'), status: 'todo', blockedBy: [], subtasks: [s1, s2] }
   assert.deepEqual(remainingSubtasks(story).map(s => s.id), [s1.id, s2.id])
+})
+
+// ── story-completion gap: rollup anchor ─────────────────────────────────────
+
+test('storyRollupAnchor picks an already-done subtask to reassert', () => {
+  const s1 = { id: uid('50000001'), title: 'a', status: 'todo', pr: openPr(9, 'task-1') }
+  const s2 = { id: uid('50000002'), title: 'b', status: 'todo', pr: null }
+  const story = { id: uid('50000000'), status: 'todo', blockedBy: [], subtasks: [s1, s2] }
+  assert.equal(storyRollupAnchor(story), s1)
+})
+
+test('storyRollupAnchor returns null when nothing on the story is done', () => {
+  const s1 = { id: uid('50000003'), title: 'a', status: 'todo', pr: null }
+  const story = { id: uid('50000000'), status: 'todo', blockedBy: [], subtasks: [s1] }
+  assert.equal(storyRollupAnchor(story), null)
+})
+
+test('storyRollupAnchor returns null for a story with no subtasks', () => {
+  const story = { id: uid('50000000'), status: 'done', blockedBy: [], subtasks: [] }
+  assert.equal(storyRollupAnchor(story), null)
 })
 
 // ── levels ──────────────────────────────────────────────────────────────────
@@ -306,6 +326,15 @@ test('the number must be a SUFFIX, not merely present', () => {
 
 test('a missing or empty ref never matches', () => {
   for (const ref of [null, undefined, '']) assert.equal(prMatchesSubtask(ref, 1050), false)
+})
+
+test('a hex character before the short id is a boundary, not a match', () => {
+  // Short ids are hex, so 'f' is a legitimate id character, not a digit — the
+  // old /[0-9]/ boundary check let it through as "not a digit, so it must be a
+  // boundary." …deadbeefa1b2c3d4 ends with a1b2c3d4 preceded by 'f', which is
+  // exactly the false near miss #1050's guard was supposed to catch.
+  assert.equal(prMatchesSubtask('m12/task-rows-a1b2c3d4', 'a1b2c3d4'), true)
+  assert.equal(prMatchesSubtask('wip/deadbeefa1b2c3d4', 'a1b2c3d4'), false)
 })
 
 // ── matchPr: exact branch, exact base ───────────────────────────────────────
@@ -529,6 +558,20 @@ test('PRs match against the milestone-scoped branch', () => {
   assert.equal(found.number, 7)
 })
 
+test('one milestone prefix cannot match another milestone that starts with it', () => {
+  // m1 is a string-prefix of "m12/…", not a path-segment prefix of it. Without
+  // the trailing "/" anchor, a PR under m12 would be taken as m1's PRIMARY
+  // match, fail the base check, and return 'wrong-base' — which bypasses the
+  // merged-near-miss halt entirely. Anchored correctly, this run for m1 never
+  // treats the m12 PR as its own: it falls through to the near-miss path,
+  // finds the merged PR under a name that isn't m1's, and halts instead of
+  // silently re-implementing the card's already-merged work.
+  const pulls = [pr(7, 'm12/task-rows-a1b2c3d4', 'main', { merged_at: '2026-08-01T00:00:00Z' })]
+  const { pr: found } = matchPr('a1b2c3d4', 'm1/task-rows-a1b2c3d4', 'main', pulls, 'm1')
+  assert.notEqual(found, 7, 'a PR under m12 must not answer for a run under m1')
+  assert.equal(found, 'unknown', 'must be caught as a merged near miss and halt, not silently pass as no-PR')
+})
+
 test('adopting the prefix on a milestone with merged work HALTS, it does not redo it', () => {
   // The migration case, and the reason this is not a free rename: a milestone
   // built under a bare "task-" has its finished PRs at the old addresses. The
@@ -618,4 +661,36 @@ test('a non-numeric milestone WITH an explicit branchPrefix is accepted verbatim
 
 test('an explicit branchPrefix wins even for a numeric milestone', () => {
   assert.equal(resolveBranchPrefix('custom', 12, true), 'custom')
+})
+
+// ── story-completion gap: dispatch wiring (source-level) ────────────────────
+// The dispatch itself sits outside the PURE region (it calls agent()), so this
+// is source-level, matching how phase 2 tested task.js's equivalent rollup
+// dispatches.
+test('a story whose subtasks are all already shipped still gets its card rolled up', () => {
+  const source = readFileSync(new URL('./orchestrator.js', import.meta.url), 'utf8')
+  // storyRollupAnchor's own definition also matches a bare `rollup.mjs` /
+  // `storyRollupAnchor(` search, so these assertions target the actual CALL
+  // site (an assignment) and the full --card invocation, not just the pure
+  // helper's presence.
+  assert.match(source, /const anchor = storyRollupAnchor\(/,
+    'the orchestrator must pick an anchor subtask for each already-complete story')
+  assert.match(source, /rollup\.mjs --card \$\{anchor\.id\}/,
+    "and must dispatch rollup.mjs against that anchor's full card id, re-asserting its own status")
+  assert.match(source, /statusWriteFailures/,
+    'and a failure here must surface the same way task.js\'s does, not vanish')
+})
+
+test('a halted run still reports stale-rollup failures, not just per-subtask ones', () => {
+  // Regression pin: the halted-escalation return used to spread `...halted`
+  // and `completed` only, dropping staleRollupErrors entirely — a stale-rollup
+  // failure that happened before a later story escalated would vanish rather
+  // than surface, unlike a per-subtask statusWriteError (which survives
+  // nested inside `completed.stories[].subtasks[]`, even though its count
+  // does not). Pin the halted return so it folds staleRollupErrors in the
+  // same additive way the other two return shapes already do.
+  const source = readFileSync(ORCHESTRATOR_PATH, 'utf8')
+  assert.match(source,
+    /if \(halted\) return \{ repo, milestone, baseBranch, mode: 'stacked', \.\.\.halted, completed: results,\n\s*\.\.\.\(staleRollupErrors\.length > 0 \? \{ statusWriteFailures: staleRollupErrors\.length \} : \{\}\) \}/,
+    'the top-level halted-run return must fold staleRollupErrors into statusWriteFailures, the same key the other two returns use — a stale-rollup failure that happened before a later story escalated must not vanish')
 })

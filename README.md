@@ -8,9 +8,9 @@ Personal Claude Code plugin marketplace.
 |---|---|---|
 | **bun** | every helper script runs under it — the workflows literally invoke `bun <script>.mjs` | the run stops at its first trigger step |
 | **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
-| **gh**, authenticated | PRs | resolution fails at launch |
+| **gh**, authenticated | opening/checking/merging PRs | fails at the first PR step, not at launch — there is no board-id resolution step anymore |
 | **git** | worktrees, branches, stacked bases | — |
-| **brd** | the local kanban board: stories, subtasks, `blockedBy` | resolution fails at launch |
+| **brd**, initialized (`brd init`) | the local kanban board: stories, subtasks, `blockedBy` | fails at Detect |
 
 Claude Code has no plugin dependency mechanism — no `dependencies` key exists in any `plugin.json`
 or `marketplace.json`, including Anthropic's own — so the plugin cannot pull superpowers in for you.
@@ -52,8 +52,8 @@ Push changes to this repo, then in Claude Code:
 - `dispatch` — /dispatch, launch a subagent pinned to a specific model
 - `explain` — /explain, plain-language explanation + ASCII architecture diagram
 - `qa` — /qa, stress-test one component/screen area: plan interactions from its actual code, drive them in Chrome, report findings + a recommendation
-- `setup-project` — preps a repo's GitHub Projects v2 board for the orchestrator/task workflows
-- `setup-milestone` — sets up a GitHub milestone with story issues + sub-issue subtasks
+- `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
+- `setup-milestone` — turns a spec into a `brd` milestone card with story and subtask cards
 - `setup-report` — renders an in-flight-work progress dashboard as an Artifact
 - `smoke` — /smoke, rebuild + drive the app in Chrome to smoke-test recent work
 
@@ -67,15 +67,23 @@ edit required.
 `hooks/auto-allow.sh` runs on every `Bash` call and auto-allows, without prompting
 or invoking the classifier:
 
-- **Read-only / lifecycle**: `git status|log|diff|show|branch|rev-parse|remote|fetch|stash list|blame|describe`,
+- **Read-only / lifecycle**: `git status|log|diff|show|rev-parse|fetch|stash list|blame|describe`,
   `gh auth status|refresh`, `gh issue/pr list|view`, `gh pr checks`, `gh project list|view|item-list`,
   `gh label list`, `gh repo view`, `docker compose build|up|down|ps|logs`, `docker ps`, `ss -ltn`, `lsof -iTCP`.
-- **GitHub writes** used by `setup-milestone` / `setup-project`: `gh issue create`, `gh label create`,
-  `gh project create`, `gh project item-add|item-edit`, `gh api graphql`, `gh api ... -X POST|PATCH|PUT`.
+  `git branch` and `git remote` are deliberately excluded — both have destructive forms
+  (`git branch -D main`, `git remote add`) and this rule grants no argument checking beyond
+  "nothing can be chained after the matched verb", so there's no safe way to half-admit them.
+- **`brd`**: the whole CLI (`init`, `add`, `show`, `list`, `update`, `block`, `unblock`, `tree`, `next`,
+  `import`, …), including a `cd <dir> &&` prefix — it only ever touches the local board, so there's no
+  read/write split to make.
 - **git merge/push/rebase and `gh pr merge`** — allowed *only* when the target branch is not `main`/`master`.
   For `git merge|push|rebase` this is a text check on the command; for `gh pr merge` (which often doesn't
   name the branch at all) the hook calls `gh pr view --json baseRefName` to resolve the PR's actual base
   before deciding.
+
+Every rule above also refuses anything chained, substituted, or redirected after the matched verb
+(`;`, `&`, `|`, `` $ ``, `` ` ``, `(`, `)`, `<`, `>`) — a rule grants exactly the bare command it names,
+never a second command riding along on it.
 
 Anything not matched falls through untouched — normal permission/classifier behavior applies. Everything
 targeting `main`/`master` always falls through too, on purpose.
