@@ -113,9 +113,11 @@ test('brd delete is NOT auto-allowed, and a new subcommand defers by default', (
   assert.equal(decide('brd delete a32af745-15ef-45cd-b52c-64c19ae82c17'), null)
   assert.equal(decide('brd delete a32af745-15ef-45cd-b52c-64c19ae82c17 --cascade'), null)
   assert.equal(decide('cd /abs/repo && brd delete a32af745-15ef-45cd-b52c-64c19ae82c17'), null)
-  // A subcommand brd does not have yet must also land deferred rather than
-  // riding in on a permissive pattern.
-  assert.equal(decide('brd nuke --everything'), null)
+  // Any subcommand not in the list — including one brd may add later — must
+  // land deferred rather than riding in on a permissive pattern. The name is
+  // deliberately a non-existent placeholder: the claim is that the allowlist
+  // is CLOSED, not that any particular verb is dangerous.
+  assert.equal(decide('brd not-a-real-subcommand'), null)
 })
 
 test('brd is allowed when the working directory is pinned, which is how task.js calls it', () => {
