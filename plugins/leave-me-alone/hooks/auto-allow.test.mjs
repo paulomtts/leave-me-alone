@@ -101,6 +101,21 @@ test('brd is allowed — local board, no network', () => {
   // brackets — those are excluded below as a redirection metacharacter.
   assert.equal(decide('brd update a32af745-15ef-45cd-b52c-64c19ae82c17 --status done'), 'allow')
   assert.equal(decide('brd init --name thing'), 'allow')
+  assert.equal(decide('brd prompt'), 'allow')
+})
+
+test('brd delete is NOT auto-allowed, and a new subcommand defers by default', () => {
+  // Not an oversight — the rule enumerates subcommands precisely so this
+  // stays true. `delete` is irreversible and `--cascade` takes a whole
+  // milestone subtree, with no automatic snapshot to restore from. If a
+  // future change adds it to the alternation, this test is the thing that
+  // has to be deleted first, deliberately.
+  assert.equal(decide('brd delete a32af745-15ef-45cd-b52c-64c19ae82c17'), null)
+  assert.equal(decide('brd delete a32af745-15ef-45cd-b52c-64c19ae82c17 --cascade'), null)
+  assert.equal(decide('cd /abs/repo && brd delete a32af745-15ef-45cd-b52c-64c19ae82c17'), null)
+  // A subcommand brd does not have yet must also land deferred rather than
+  // riding in on a permissive pattern.
+  assert.equal(decide('brd nuke --everything'), null)
 })
 
 test('brd is allowed when the working directory is pinned, which is how task.js calls it', () => {
