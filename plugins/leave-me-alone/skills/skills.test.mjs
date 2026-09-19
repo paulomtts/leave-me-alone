@@ -38,9 +38,27 @@ test('the skills describe the status model that actually ships', () => {
     // report. Case-insensitive — the previous guard was satisfied by
     // lowercasing while the claim stayed false.
     assert.doesNotMatch(source, /in[ _]review/i, `${name} still promises in_review`)
+    // Known blind spot: this is a substring/adjacency match with no negation
+    // awareness. A sentence that deliberately DENIES the claim — e.g. "a card
+    // never reaches `done` on its own" — still contains the matched phrase and
+    // would pass this assertion while being false. Not reachable by an
+    // accidental regression, but worth recording rather than papering over
+    // with a "cleverer" regex — this guard's history is three attempts, each
+    // defeated in a new way.
     assert.match(source, /card(?:'s)? reach(?:es|ing)? `?done`?/i,
       `${name} must tie a card to reaching done, not just contain the bare word`)
   }
+})
+
+const root = readFileSync(fileURLToPath(new URL('../../../README.md', import.meta.url)), 'utf8')
+
+test('the root README tells an operator to run brd init', () => {
+  assert.match(root, /brd init/)
+})
+
+test('the root README no longer describes a board or a migration in flight', () => {
+  assert.doesNotMatch(root, /Projects v2|read:project/)
+  assert.doesNotMatch(root, /Phase 2|not yet migrated/i)
 })
 
 test('setup-milestone owns the two rules nothing in code enforces at creation', () => {

@@ -10,7 +10,7 @@ Personal Claude Code plugin marketplace.
 | **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
 | **gh**, authenticated | PRs | resolution fails at launch |
 | **git** | worktrees, branches, stacked bases | — |
-| **brd** | the local kanban board: stories, subtasks, `blockedBy` | resolution fails at launch |
+| **brd**, initialized (`brd init`) | the local kanban board: stories, subtasks, `blockedBy` | fails at Detect |
 
 Claude Code has no plugin dependency mechanism — no `dependencies` key exists in any `plugin.json`
 or `marketplace.json`, including Anthropic's own — so the plugin cannot pull superpowers in for you.
@@ -52,8 +52,8 @@ Push changes to this repo, then in Claude Code:
 - `dispatch` — /dispatch, launch a subagent pinned to a specific model
 - `explain` — /explain, plain-language explanation + ASCII architecture diagram
 - `qa` — /qa, stress-test one component/screen area: plan interactions from its actual code, drive them in Chrome, report findings + a recommendation
-- `setup-project` — preps a repo's GitHub Projects v2 board for the orchestrator/task workflows
-- `setup-milestone` — sets up a GitHub milestone with story issues + sub-issue subtasks
+- `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
+- `setup-milestone` — turns a spec into a `brd` milestone card with story and subtask cards
 - `setup-report` — renders an in-flight-work progress dashboard as an Artifact
 - `smoke` — /smoke, rebuild + drive the app in Chrome to smoke-test recent work
 
@@ -70,8 +70,9 @@ or invoking the classifier:
 - **Read-only / lifecycle**: `git status|log|diff|show|branch|rev-parse|remote|fetch|stash list|blame|describe`,
   `gh auth status|refresh`, `gh issue/pr list|view`, `gh pr checks`, `gh project list|view|item-list`,
   `gh label list`, `gh repo view`, `docker compose build|up|down|ps|logs`, `docker ps`, `ss -ltn`, `lsof -iTCP`.
-- **GitHub writes** used by `setup-milestone` / `setup-project`: `gh issue create`, `gh label create`,
-  `gh project create`, `gh project item-add|item-edit`, `gh api graphql`, `gh api ... -X POST|PATCH|PUT`.
+- **`brd`**: the whole CLI (`init`, `add`, `show`, `list`, `update`, `block`, `unblock`, `tree`, `next`,
+  `import`, …), including a `cd <dir> &&` prefix — it only ever touches the local board, so there's no
+  read/write split to make.
 - **git merge/push/rebase and `gh pr merge`** — allowed *only* when the target branch is not `main`/`master`.
   For `git merge|push|rebase` this is a text check on the command; for `gh pr merge` (which often doesn't
   name the branch at all) the hook calls `gh pr view --json baseRefName` to resolve the PR's actual base
