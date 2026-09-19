@@ -1,6 +1,6 @@
 {
   "name": "leave-me-alone",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "private": true,
   "description": "Test manifest for this plugin repo. The plugin itself ships no JS dependencies and is not published to npm — this file exists so the repo states its own verification command in a place tools can read, rather than only in README prose.",
   "scripts": {
