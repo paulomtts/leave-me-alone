@@ -12,11 +12,14 @@ cmd="$(jq -r '.tool_input.command // empty' <<<"$input")"
 [ -z "$cmd" ] && exit 0
 
 # grep -E is line-oriented: ^ and $ anchor per LINE, and -q succeeds if ANY
-# line matches. Every rule below relies on those anchors to bound what it
-# grants, so a multi-line command would let an unrelated line ride along on a
-# matching one — in either order. No legitimate command these workflows emit
-# spans lines, so refuse the whole class here rather than making every present
-# and future rule remember this.
+# line matches. That bounds where a match can START, but nothing about ^/$
+# stops a SECOND command from riding along after a match on the same line —
+# only an explicit tail restriction (no `&|;$`()<>` after the matched verb)
+# does that. Every rule below is written to carry that tail restriction
+# itself; this guard only rules out the separate multi-line case, where an
+# unrelated line could ride along on a matching one in either order. No
+# legitimate command these workflows emit spans lines, so refuse the whole
+# class here rather than making every present and future rule remember this.
 case "$cmd" in *$'\n'*) exit 0 ;; esac
 
 allow() {
@@ -31,7 +34,17 @@ allow() {
 }
 
 # --- read-only / lifecycle commands ---------------------------------------
-if grep -qE '^(git (status|log|diff|show|branch|rev-parse|remote|fetch|stash list|blame|describe)\b|gh (auth (status|refresh)|issue (list|view)|pr (list|view|checks)|project (list|view|item-list)|label list|repo view)\b|docker (compose (build|up|down|ps|logs)|ps)\b|ss -ltn\b|lsof -iTCP\b)' <<<"$cmd"; then
+# `git branch` and `git remote` are deliberately NOT in this list: both have
+# destructive forms (`git branch -D main`, `git branch -f foo origin/x`,
+# `git remote add evil https://...`) that are not read-only, and there is no
+# safe way to admit only their read-only invocations without a separate,
+# narrower rule than this one. Dropped rather than special-cased: a deferred
+# command costs a prompt, a wrongly-allowed one does not.
+#
+# The trailing `[^&|;$`()<>]*$` mirrors the brd rule below: it bounds what
+# can follow a matched verb on the same line, so nothing can be chained,
+# substituted, or redirected after it.
+if grep -qE '^(git (status|log|diff|show|rev-parse|fetch|stash list|blame|describe)|gh (auth (status|refresh)|issue (list|view)|pr (list|view|checks)|project (list|view|item-list)|label list|repo view)|docker (compose (build|up|down|ps|logs)|ps)|ss -ltn|lsof -iTCP)( |$)[^&|;$`()<>]*$' <<<"$cmd"; then
   allow "leave-me-alone: read-only/lifecycle command"
 fi
 
@@ -58,7 +71,11 @@ if grep -qE '^(cd [^&|;$`()<>]+ && )?brd (init|projects|add|show|list|update|blo
 fi
 
 # --- git merge/push/rebase, only when NOT targeting main/master ------------
-if grep -qE '^git (merge|push|rebase)\b' <<<"$cmd"; then
+# The tail restriction is applied BEFORE the main/master text check, so
+# nothing can be chained after the branch name to ride along once that check
+# passes (e.g. `git merge feature-x; rm -rf /tmp/zz` never reaches the
+# main/master check at all — it fails the tail restriction first).
+if grep -qE '^git (merge|push|rebase)( |$)[^&|;$`()<>]*$' <<<"$cmd"; then
   if grep -qE '\b(main|master)\b' <<<"$cmd"; then
     exit 0  # names main/master explicitly -> defer to normal prompt/classifier
   fi
@@ -66,7 +83,9 @@ if grep -qE '^git (merge|push|rebase)\b' <<<"$cmd"; then
 fi
 
 # --- gh pr merge: resolve the PR's actual base branch, don't trust the text -
-if grep -qE '^gh pr merge\b' <<<"$cmd"; then
+# Same tail restriction, for the same reason: without it, whatever base
+# `gh pr view` resolves to, a chained second command rides along for free.
+if grep -qE '^gh pr merge( |$)[^&|;$`()<>]*$' <<<"$cmd"; then
   pr_ref="$(sed -E 's/^gh pr merge[[:space:]]+([^ ]+).*/\1/' <<<"$cmd")"
   [[ "$pr_ref" == -* || "$pr_ref" == "gh" ]] && pr_ref=""  # no positional arg -> current branch's PR
   base="$(gh pr view ${pr_ref:+"$pr_ref"} --json baseRefName -q .baseRefName 2>/dev/null || true)"

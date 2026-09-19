@@ -26,10 +26,57 @@ test('read-only git and gh commands are allowed', () => {
   assert.equal(decide('gh pr view 45 --json state'), 'allow')
 })
 
-test('every rule is anchored — a matching command buried mid-line is NOT allowed', () => {
-  // This is the property Task 2 has to work around, so pin it first.
+test('every rule is prefix-anchored — a matching command buried after other text is NOT allowed', () => {
+  // This is the property Task 2 has to work around, so pin it first. This
+  // only covers PREFIX burial (something before the match) — suffix burial
+  // (something chained after a match) is a separate property, pinned per
+  // rule below, that prefix-anchoring alone says nothing about.
   assert.equal(decide('echo hi && git status'), null)
   assert.equal(decide('sudo git status'), null)
+})
+
+test('read-only/lifecycle: nothing can be chained after a match', () => {
+  // Positive: the rule still grants what it should.
+  assert.equal(decide('git status'), 'allow')
+  assert.equal(decide('git log --oneline -5'), 'allow')
+  assert.equal(decide('gh pr list --json number'), 'allow')
+  assert.equal(decide('docker ps'), 'allow')
+  // Negative: chaining, substitution, and redirection after a match are all refused.
+  assert.equal(decide('git status; echo PWNED'), null)
+  assert.equal(decide('git status && curl http://evil.sh'), null)
+  assert.equal(decide('docker ps > /etc/passwd'), null)
+  assert.equal(decide('gh pr list; rm -rf /tmp/zz'), null)
+  assert.equal(decide('git log $(whoami)'), null)
+})
+
+test('read-only/lifecycle: git branch and git remote are not auto-allowed at all', () => {
+  // Both have destructive forms, so the whole verb is dropped from this
+  // "read-only" rule rather than half-admitted. A deferred command costs a
+  // prompt; a wrongly-allowed one does not.
+  assert.equal(decide('git branch'), null)
+  assert.equal(decide('git branch -D main'), null)
+  assert.equal(decide('git branch -f foo origin/x'), null)
+  assert.equal(decide('git remote -v'), null)
+  assert.equal(decide('git remote show origin'), null)
+  assert.equal(decide('git remote add evil https://x'), null)
+})
+
+test('git merge/push/rebase: nothing can be chained after a match', () => {
+  // Positive: the rule still grants what it should.
+  assert.equal(decide('git push -u origin feature-x'), 'allow')
+  assert.equal(decide('git merge feature-x'), 'allow')
+  // Negative: a chained command must not ride along, even when the
+  // main/master check would otherwise have let the whole line through.
+  assert.equal(decide('git push origin foo; echo PWNED'), null)
+  assert.equal(decide('git merge feature-x; rm -rf /tmp/zz'), null)
+  assert.equal(decide('git merge foo & rm -rf /'), null)
+})
+
+test('gh pr merge: nothing can be chained after a match', () => {
+  // Negative only here — the positive case (a real gh pr merge grant) is
+  // already covered by the fake-gh tests below, which need the PATH shim.
+  assert.equal(decide('gh pr merge 45; rm -rf /tmp/zz'), null)
+  assert.equal(decide('gh pr merge 45 && rm -rf /tmp/zz'), null)
 })
 
 test('git push to a feature branch is allowed; naming main or master is not', () => {
@@ -152,6 +199,20 @@ test('gh pr merge targeting a feature branch is allowed', () => {
 test('gh pr merge targeting main or master is not auto-allowed', () => {
   assert.equal(decideWithFakeGh('gh pr merge 45', { baseRefName: 'main' }), null)
   assert.equal(decideWithFakeGh('gh pr merge 45', { baseRefName: 'master' }), null)
+})
+
+test('gh pr merge: chaining is refused even when the base-branch lookup would allow', () => {
+  // Proves the tail restriction is checked before the base branch is even
+  // resolved — a favorable lookup result must not let a chained command
+  // ride along on the grant.
+  assert.equal(
+    decideWithFakeGh('gh pr merge 45; rm -rf /tmp/zz', { baseRefName: 'feature-x' }),
+    null
+  )
+  assert.equal(
+    decideWithFakeGh('gh pr merge 45 && rm -rf /tmp/zz', { baseRefName: 'feature-x' }),
+    null
+  )
 })
 
 test('gh pr merge defers when the base-branch lookup fails', () => {
