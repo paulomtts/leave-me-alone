@@ -49,9 +49,22 @@ if grep -qE '^(git (status|log|diff|show|rev-parse|fetch|stash list|blame|descri
 fi
 
 # --- brd: the local board -------------------------------------------------
-# Every subcommand reads or writes a local SQLite database: no network, nothing
-# outside the project's own board, so the whole CLI is allowed rather than a
-# read/write split.
+# These subcommands read or write a local SQLite database: no network, nothing
+# outside the project's own board, so they are allowed rather than split by
+# read/write.
+#
+# `brd delete` is deliberately NOT in the list. It satisfies that same "local
+# board only" test, and it is still different in kind: it is IRREVERSIBLE, and
+# `--cascade` takes a milestone's whole subtree with it. Nothing writes a board
+# snapshot automatically (see setup-report), so there is no file to restore
+# from afterwards. The asymmetry that decides every other rule in this file
+# decides this one too, just in the other direction — a prompt costs one
+# keystroke, a wrongly-allowed cascade costs the board.
+#
+# The list is an explicit enumeration rather than `brd <anything>` for the same
+# reason: a subcommand brd gains later lands DEFERRED by default, so the tool
+# growing a destructive verb cannot silently widen a permission already
+# granted. The cost is editing this line when brd gains a benign subcommand.
 #
 # The `cd <dir> && ` prefix is matched explicitly because task.js's trigger
 # steps pin brd's working directory that way (brd resolves its project by
@@ -66,7 +79,7 @@ fi
 # with a literal `>` in it); that's the correct trade-off — a deferred command
 # costs the user a prompt, an over-matched one grants a permission they never
 # approved.
-if grep -qE '^(cd [^&|;$`()<>]+ && )?brd (init|projects|add|show|list|update|block|unblock|tree|next|import)( |$)[^&|;$`()<>]*$' <<<"$cmd"; then
+if grep -qE '^(cd [^&|;$`()<>]+ && )?brd (init|prompt|projects|add|show|list|update|block|unblock|tree|next|import)( |$)[^&|;$`()<>]*$' <<<"$cmd"; then
   allow "leave-me-alone: brd (local board, no network)"
 fi
 

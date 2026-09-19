@@ -20,7 +20,10 @@ actually invoked the skill, which stops the run when it did not.
 
 **Node is not needed to run a milestone**, only to run this repo's own test suite — and it must be
 `node --test`, not `bun test`: the tests are written against `node:test`, which bun's runner cannot
-execute.
+execute. Run it as **`npm test`**; `package.json` exists only to carry that command (the repo has no
+npm dependencies and is not published). Keep it there rather than only in this prose: a run's Detect
+step reads the manifest to learn how to verify a subtask, and a suite it cannot find is a suite
+subtasks refuse to run without.
 
 Softer couplings, which degrade rather than stop: the `code-worker` agent is told to reach for
 `superpowers:test-driven-development` and `superpowers:systematic-debugging`, and `setup-milestone`
