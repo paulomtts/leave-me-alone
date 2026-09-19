@@ -37,9 +37,15 @@ const FIRST_DISPATCH = Symbol('first-dispatch')
 // config: the point is only to get past the argument checks and into the
 // initialization that follows.
 export const SMOKE_ARGS = {
+  // `milestone` here is a brd card id/title substring, not a positive integer — the shape both
+  // SKILL.md files document and the one a fixture must exercise, since it's the case with no
+  // default branchPrefix (resolveBranchPrefix throws without one). A leftover numeric fixture here
+  // is exactly how "orchestrator needs args.branchPrefix" against the documented invocation went
+  // uncaught: this check passed while the real, documented call failed.
   'orchestrator.js': {
-    repo: 'o/n', repoDir: '/tmp/x', milestone: 1, baseBranch: 'main', nonce: 'n',
+    repo: 'o/n', repoDir: '/tmp/x', milestone: 'fixture milestone', baseBranch: 'main', nonce: 'n',
     taskScript: '/tmp/x/workflows/task.js', detectScript: '/tmp/x/scripts/detect.mjs',
+    branchPrefix: 'm1',
   },
   'task.js': {
     repo: 'o/n', repoDir: '/tmp/x', card: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',

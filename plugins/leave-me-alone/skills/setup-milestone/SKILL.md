@@ -161,8 +161,20 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
    Check: the milestone shows every story and subtask you meant to create, each story's subtasks are chained in the right order, and each story's `blocked_by` matches the DAG you wrote down in step 5. **If more than one story has no blockers, stop and say so** — a real milestone has one or two genuine roots, so a flat list of unblocked stories usually means an edge was never written, not that the work is parallel. **If any story shows two or more blockers, fix it now** — the orchestrator will refuse it.
 7. **Dry run** — the real pre-flight, writes nothing:
    ```
-   Workflow({ name: "orchestrator" }, args: { repo, repoDir, milestone: "<brd card id or title>", baseBranch, nonce: "<now>", dryRun: true })
+   Workflow({ name: "orchestrator" }, args: {
+     repo, repoDir, milestone: "<brd card id or title substring>", baseBranch, nonce: "<now>", dryRun: true,
+     taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
+     detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
+     branchPrefix: "m12"
+   })
    ```
+   `taskScript` and `detectScript` are always required — absolute paths, no default, since this repo
+   can be checked out anywhere. `branchPrefix` is required here too because `milestone` is a card
+   id/title substring rather than a positive integer, so there is no safe default to derive one
+   from (a title could produce an invalid git ref). Addressing the milestone by a plain positive
+   integer instead (`milestone: 12`) is the one case where `branchPrefix` can be omitted — it then
+   defaults to `m12`.
+
    No `project` argument — `brd` resolves everything by walking the repo directory, per `setup-project`. Check the `prTargets` column: each subtask should target the previous subtask's branch, and each story's first subtask should target its blocker's tip (or the base, if unblocked). If that column is wrong, the breakdown is wrong — fix the board, not the workflow.
 
 ## Gotchas

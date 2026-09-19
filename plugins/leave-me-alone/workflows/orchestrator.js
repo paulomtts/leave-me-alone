@@ -119,14 +119,19 @@ function remainingSubtasks(story) {
 // milestone's, would keep whatever status they had, permanently.
 //
 // The fix is not a second status-writing path: it is triggering the one that
-// already exists. This picks WHICH subtask anchors that trigger — one whose
-// own status already reflects doneness, so re-asserting it is a genuine
-// no-op and only the walk up to its ancestors does real work. Returns null
-// when the story has nothing safe to anchor on (no subtasks, or none
-// individually marked done) — there is then nothing to reassert.
+// already exists. This picks WHICH subtask anchors that trigger — one
+// isSubtaskDone() already considers done (an open PR regardless of the
+// card's own status, or a card explicitly marked done with no PR), so
+// rollup.mjs re-asserting THAT subtask's own field is at worst a no-op and
+// only the walk up to its ancestors does real work. It is not a guarantee
+// the anchor's status field itself reads "done" — an open-PR subtask can
+// still show `todo` there; rollup.mjs recomputes every ancestor from the
+// story's REAL children regardless, so the ancestor writes stay correct
+// either way. Returns null when the story has nothing safe to anchor on (no
+// subtasks, or none individually done) — there is then nothing to reassert.
 // A story marked done itself (isStoryClosed) but whose subtasks are not
-// individually marked done still returns null here rather than anchoring on
-// an arbitrary one: reasserting a subtask's status the card does not actually
+// individually done still returns null here rather than anchoring on an
+// arbitrary one: reasserting a subtask's status the card does not actually
 // have would be a wrong write, not a safe no-op — skipping it is deliberate,
 // not an oversight.
 function storyRollupAnchor(story) {
@@ -563,7 +568,6 @@ if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
     'orchestrator: args.autoMerge / args.maxResolveAttempts are no longer supported — this workflow opens '
     + 'stacked PRs and never merges, so there is nothing to auto-merge and no conflicts to resolve mid-run.')
 }
-const labels = { story: 'story', subtask: 'subtask', ...(opts.labels || {}) }
 // Branch names carry their milestone: a subtask card of milestone 12 lives on
 // `m12/task-<slug>-<shortid>` (taskBranch()), worktree
 // `.claude/worktrees/m12/task-<slug>-<shortid>`.

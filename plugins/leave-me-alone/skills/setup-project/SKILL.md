@@ -95,8 +95,12 @@ Without a chain, independent siblings keep creation order, which detaching and r
 can change. That silently re-shapes the stack between runs, and PRs opened against the old shape then
 read as `wrong-base`. It works, but only for a milestone nobody ever touches.
 
-**`branchPrefix` is part of the milestone's identity.** It defaults to `m<milestone>`, so a subtask
-card builds on `m12/task-<slug>-<shortid>` in worktree `.claude/worktrees/m12/task-<slug>-<shortid>`.
+**`branchPrefix` is part of the milestone's identity.** It defaults to `m<milestone>` only when
+`milestone` is a positive integer (e.g. `milestone: 12` → `m12/task-<slug>-<shortid>`, worktree
+`.claude/worktrees/m12/task-<slug>-<shortid>`). Address the milestone by `brd` card id or title
+substring instead — the addressing this migration introduces — and there is no safe default to
+derive: the orchestrator throws `orchestrator needs args.branchPrefix` unless you pass it
+explicitly (e.g. `branchPrefix: "m12"`).
 That grouping is for legibility and cleanup — `git branch --list "m12/*"`, `rm -rf
 .claude/worktrees/m12` — not for avoiding collisions, since each card's short id is already unique
 per board. Branch names are derived from the prefix, so changing it mid-milestone points the run at
@@ -133,9 +137,15 @@ Workflow({ name: "orchestrator" }, args: {
   repo: "OWNER/REPO", repoDir: "/abs/path", milestone: "<brd card id or title substring>",
   baseBranch: "main", nonce: "<current timestamp>", dryRun: true,
   taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
-  detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs"
+  detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
+  branchPrefix: "m12"
 })
 ```
+
+`branchPrefix` is required here because `milestone` is a card id/title substring, not a positive
+integer — there is no safe default to derive one from either of those (see "Ordering and branch
+identity" above). Addressing the milestone by a plain positive integer instead (`milestone: 12`) is
+the one case where `branchPrefix` can be omitted — it then defaults to `m12`.
 
 No `project` argument — there is nothing left to resolve or pass.
 
@@ -184,7 +194,7 @@ is a hard error rather than a silent fallback to the default subagent.
 
 | type | tools | used by |
 |---|---|---|
-| `leave-me-alone:command-runner` | Bash | the trigger steps: detect, worktree, plan-check, ship, rollup |
+| `leave-me-alone:command-runner` | Bash | the trigger steps: detect, worktree, plan-check, card-title, ship, rollup |
 | `leave-me-alone:repo-reader` | Bash, Read, Grep, Glob | Explore — never writes |
 | `leave-me-alone:spec-author` | Read, Write, Grep, Glob | Spec — no shell |
 | `leave-me-alone:plan-author` | Read, Write, Edit, Grep, Glob, Skill | Plan — invokes `superpowers:writing-plans` |
@@ -239,11 +249,11 @@ bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone "<card 
 
 | Trap | Reality |
 |---|---|
-| Expecting flat branch names | The default prefix is `m<milestone>`, so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme — it is used verbatim. |
+| Expecting flat branch names | Only defaults for a numeric `milestone` (`m<milestone>`), so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme, or when `milestone` is a card id/title substring — it is used verbatim either way, and is required (not just overridable) for a non-numeric milestone. |
 | Adopting the milestone prefix on a milestone that already has merged PRs | Those PRs sit at the old addresses. The run finds them as near misses and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
 | Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A merged PR under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
 | Running a `brd`/workflow command from a worktree and expecting an isolated board | It isn't isolated — the `.brd` marker is untracked, so the walk-up finds the main checkout's marker and every worktree shares that one board. This is intentional (see `brd init` above), not a bug. |
-| Cloning this repo to a new machine and expecting the board to be there | It isn't — the board never left the machine it was created on. Run `brd init` in the new clone, and `brd import` a snapshot if you need the old cards. |
+| Cloning this repo to a new machine and expecting the board to be there | It isn't — the board never left the machine it was created on. Run `brd init` in the new clone, and `brd import` a snapshot if you need the old cards — but that snapshot has to already exist: `brd tree <milestone> > snapshot.json` run **on the old machine before migrating**, or a `docs/board/<milestone>.json` a `setup-report` run (or that same manual command) produced earlier. Nothing writes a snapshot on its own after an orchestrator run — there is no automatic writer. |
 | A story with two `blocked_by` edges | The orchestrator can only root a stack on one parent. It stops the run rather than guessing which blocker to build from — chain them instead. |
 | Expecting a card per PR | One PR per **subtask**. |
 | Expecting `done` to mean merged | It doesn't. The run never merges, so a subtask's card reaching `done` reflects only that Ship opened its PR — that's the furthest state a run that never merges can honestly report. Its parent story's own status update is best-effort in the same way. |

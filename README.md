@@ -8,7 +8,7 @@ Personal Claude Code plugin marketplace.
 |---|---|---|
 | **bun** | every helper script runs under it — the workflows literally invoke `bun <script>.mjs` | the run stops at its first trigger step |
 | **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
-| **gh**, authenticated | PRs | resolution fails at launch |
+| **gh**, authenticated | opening/checking/merging PRs | fails at the first PR step, not at launch — there is no board-id resolution step anymore |
 | **git** | worktrees, branches, stacked bases | — |
 | **brd**, initialized (`brd init`) | the local kanban board: stories, subtasks, `blockedBy` | fails at Detect |
 
@@ -67,9 +67,12 @@ edit required.
 `hooks/auto-allow.sh` runs on every `Bash` call and auto-allows, without prompting
 or invoking the classifier:
 
-- **Read-only / lifecycle**: `git status|log|diff|show|branch|rev-parse|remote|fetch|stash list|blame|describe`,
+- **Read-only / lifecycle**: `git status|log|diff|show|rev-parse|fetch|stash list|blame|describe`,
   `gh auth status|refresh`, `gh issue/pr list|view`, `gh pr checks`, `gh project list|view|item-list`,
   `gh label list`, `gh repo view`, `docker compose build|up|down|ps|logs`, `docker ps`, `ss -ltn`, `lsof -iTCP`.
+  `git branch` and `git remote` are deliberately excluded — both have destructive forms
+  (`git branch -D main`, `git remote add`) and this rule grants no argument checking beyond
+  "nothing can be chained after the matched verb", so there's no safe way to half-admit them.
 - **`brd`**: the whole CLI (`init`, `add`, `show`, `list`, `update`, `block`, `unblock`, `tree`, `next`,
   `import`, …), including a `cd <dir> &&` prefix — it only ever touches the local board, so there's no
   read/write split to make.
@@ -77,6 +80,10 @@ or invoking the classifier:
   For `git merge|push|rebase` this is a text check on the command; for `gh pr merge` (which often doesn't
   name the branch at all) the hook calls `gh pr view --json baseRefName` to resolve the PR's actual base
   before deciding.
+
+Every rule above also refuses anything chained, substituted, or redirected after the matched verb
+(`;`, `&`, `|`, `` $ ``, `` ` ``, `(`, `)`, `<`, `>`) — a rule grants exactly the bare command it names,
+never a second command riding along on it.
 
 Anything not matched falls through untouched — normal permission/classifier behavior applies. Everything
 targeting `main`/`master` always falls through too, on purpose.
