@@ -30,21 +30,69 @@ copy() {
   fi
 }
 
+workflow_names=()
 for f in "${src}"/workflows/*.js; do
   [ -e "$f" ] || continue
   copy "$f" "${dest}/$(basename "$f")"
+  workflow_names+=("$(basename "$f")")
 done
 
 # Runtime helpers only. Tests and the dev-time checker stay in the plugin: they
 # are not needed to RUN a milestone, and copying them would put a second,
 # silently diverging copy of the test suite on every machine.
+script_names=()
 for f in "${src}"/scripts/*.mjs; do
   [ -e "$f" ] || continue
   case "$(basename "$f")" in
     *.test.mjs|check-workflows.mjs) continue ;;
   esac
   copy "$f" "${dest}/scripts/$(basename "$f")"
+  script_names+=("$(basename "$f")")
 done
+
+# Remove files this plugin no longer ships.
+#
+# Copying alone made the destination a UNION of every version ever installed,
+# not a copy of the current one: `resolve.mjs` was deleted from the plugin and
+# still sat in ~/.claude/workflows/scripts/ afterwards, orphaned but present.
+# The plugin is the declared source of truth (see the header) — that has to
+# mean absent as well as different.
+#
+# Only `*.js` at the root and `*.mjs` under scripts/ are considered, so the
+# README, the plans/ directory and the version stamp are left alone: this hook
+# never put them there and must not take them away.
+removed=0
+prune() {
+  # $1 = directory, $2 = glob, rest = basenames that SHOULD be present.
+  local dir="$1" pattern="$2"
+  shift 2
+  # Nothing to compare against means the source list came back empty — see the
+  # guard at the call site. Refuse rather than treat "shipped nothing" as
+  # "delete everything".
+  [ "$#" -gt 0 ] || return 0
+  local keep=" $* " existing base
+  for existing in "${dir}"/${pattern}; do
+    [ -e "$existing" ] || continue
+    base="$(basename "$existing")"
+    case "${keep}" in
+      *" ${base} "*) continue ;;
+    esac
+    rm -f "$existing"
+    removed=$((removed + 1))
+  done
+}
+
+# Guarded on a NON-EMPTY source list in both cases. A misconfigured
+# CLAUDE_PLUGIN_ROOT, or a plugin layout that moved, yields no source files —
+# and pruning against an empty list would wipe a working installation on the
+# strength of a bad path. Syncing nothing is recoverable; deleting everything
+# during session start is not.
+if [ "${#workflow_names[@]}" -gt 0 ]; then
+  prune "${dest}" '*.js' "${workflow_names[@]}"
+fi
+if [ "${#script_names[@]}" -gt 0 ]; then
+  prune "${dest}/scripts" '*.mjs' "${script_names[@]}"
+fi
 
 # Warn if the hard dependencies are missing.
 #
@@ -89,6 +137,10 @@ previous="$(cat "${stamp}" 2>/dev/null || true)"
 
 if [ -n "${version}" ]; then
   printf '%s\n' "${version}" > "${stamp}"
+fi
+
+if [ "${removed}" -gt 0 ]; then
+  echo "leave-me-alone: removed ${removed} file(s) from ${dest} that v${version:-unknown} no longer ships"
 fi
 
 if [ "${changed}" -gt 0 ]; then
