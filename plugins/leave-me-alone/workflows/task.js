@@ -499,7 +499,7 @@ phase('Spec')
 // prompt, where it was a prose decision tree, into scripts/worktree.mjs.
 phase('Implement')
 const wtOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/worktree.mjs --repo ${repo} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} --repo-dir ${repoDir} --compact
+   bun ${scriptsDir}/worktree.mjs --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} --repo-dir ${repoDir} --compact
 
 It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means a live PR already owns this branch. Report it and stop.`,
   { label: `worktree:${id}`, phase: 'Implement', model: 'haiku', ...triggerAgent, schema: {

@@ -13,20 +13,19 @@
 // It creates and reports. It never resets, never deletes, and never commits:
 // deciding RESUME vs RESET needs the plan hash, which does not exist yet.
 
-import { ghRunner, gitRunner, ghError, jsonFrom, readFlags, withRetries } from './gh.mjs'
+import { gitRunner, readFlags } from './gh.mjs'
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
-    '--repo': 'value', '--branch': 'value', '--base': 'value',
+    '--branch': 'value', '--base': 'value',
     '--worktree': 'value', '--repo-dir': 'value', '--compact': 'boolean',
   })
   const out = {
-    repo: flags['--repo'], branch: flags['--branch'], base: flags['--base'],
+    branch: flags['--branch'], base: flags['--base'],
     worktree: flags['--worktree'], repoDir: flags['--repo-dir'],
     compact: flags['--compact'] === true,
   }
   for (const [key, ok, msg] of [
-    ['repo', v => typeof v === 'string' && /^[^/\s]+\/[^/\s]+$/.test(v), '--repo owner/name'],
     ['branch', v => typeof v === 'string' && v.length > 0, '--branch <name>'],
     ['base', v => typeof v === 'string' && v.length > 0, '--base <name>'],
     ['worktree', v => typeof v === 'string' && v.startsWith('/'), '--worktree <absolute path>'],
@@ -46,42 +45,36 @@ export function branchExists(refList, branch) {
   return String(refList ?? '').split('\n').map(l => l.trim()).filter(Boolean).includes(branch)
 }
 
-export async function prepare(options, git = gitRunner, gh = ghRunner, wait) {
-  const { repo, branch, base, worktree, repoDir } = options
-  const result = { branch, worktree, branchExisted: false, worktreeExisted: false, created: false, openPr: null, commitCount: 0 }
-
-  // A live PR on this branch means something else is driving it. Report and
-  // change NOTHING — this is the only place that check happens, and the caller
-  // stops on it rather than resetting someone's work.
-  try {
-    const open = jsonFrom(await withRetries('worktree: open-PR check',
-      () => gh(['api', `repos/${repo}/pulls?state=open&per_page=100`,
-        '--jq', `[.[] | select(.head.ref=="${branch}") | .number]`]), { wait }))
-    if (Array.isArray(open) && open.length > 0) {
-      result.openPr = open[0]
-      return result
-    }
-  } catch (err) {
-    // Not fatal on its own: the caller decides. Say so rather than pretending
-    // the branch is clear.
-    result.prLookupError = ghError(err)
-  }
+export async function prepare(options, git = gitRunner, wait) {
+  const { branch, base, worktree, repoDir } = options
+  const result = { branch, worktree, branchExisted: false, worktreeExisted: false, created: false, commitCount: 0 }
 
   result.branchExisted = branchExists(
     await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']), branch)
   result.worktreeExisted = worktreePaths(
     await git(['-C', repoDir, 'worktree', 'list', '--porcelain'])).includes(worktree)
 
+  // `base` names a real remote branch only when it IS the milestone's own
+  // baseBranch — every other base is another subtask's or story's own local
+  // branch, which this run created and never pushes. Prefer origin/<base>
+  // when it resolves; fall back to the bare local ref otherwise, rather than
+  // requiring the caller to say which kind of base it passed.
+  let resolvedBase = base
+  try {
+    await git(['-C', repoDir, 'rev-parse', '--verify', '--quiet', `origin/${base}`])
+    resolvedBase = `origin/${base}`
+  } catch { /* no such remote ref — use the local branch directly */ }
+
   if (!result.worktreeExisted) {
     const args = result.branchExisted
       ? ['-C', repoDir, 'worktree', 'add', worktree, branch]
-      : ['-C', repoDir, 'worktree', 'add', worktree, '-b', branch, `origin/${base}`]
+      : ['-C', repoDir, 'worktree', 'add', worktree, '-b', branch, resolvedBase]
     await git(args)
     result.created = true
   }
 
   result.commitCount = Number(String(
-    await git(['-C', worktree, 'rev-list', '--count', `origin/${base}..HEAD`])).trim()) || 0
+    await git(['-C', worktree, 'rev-list', '--count', `${resolvedBase}..HEAD`])).trim()) || 0
   return result
 }
 
@@ -89,5 +82,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const options = parseArgs(process.argv.slice(2))
   const result = await prepare(options)
   process.stdout.write(`${options.compact ? JSON.stringify(result) : JSON.stringify(result, null, 2)}\n`)
-  if (result.openPr) process.exitCode = 1
 }
