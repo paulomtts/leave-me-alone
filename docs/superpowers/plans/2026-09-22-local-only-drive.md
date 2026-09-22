@@ -1346,7 +1346,12 @@ negative/positive pair for a prior wording change; copy that shape, do not
 invent a new one):
 
 ```javascript
-assert.doesNotMatch(source, /done means (the|that) (a |)PR is open/i, `${name} still promises PR-based done`)
+// The real retired phrase (verified against setup-milestone/SKILL.md as it
+// stood before this task) was "reaches `done` when Ship opens its PR" — not
+// "done means the PR is open", which never appeared in the actual file. A
+// regex checked only against an invented illustrative phrase, never against
+// the real old text, passes trivially on both old and new content.
+assert.doesNotMatch(source, /reaches `?done`? when Ship opens its PR/i, `${name} still promises PR-based done`)
 assert.match(source, /verified and committed|local branch/i, `${name} does not describe local-only completion`)
 ```
 
