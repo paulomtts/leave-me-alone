@@ -51,7 +51,17 @@ export async function attempt(options, git = gitRunner) {
   const result = { created: false, conflict: false, files: [], merged: null, detail: '' }
 
   if (!worktreeExists) {
-    await git(['-C', repoDir, 'worktree', 'add', worktree, '-b', integrationBranch, `origin/${baseBranch}`])
+    // Check if the integration branch already exists locally
+    const branches = String(await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/'])).split('\n').map(l => l.trim()).filter(Boolean)
+    const branchAlreadyExists = branches.includes(integrationBranch)
+
+    if (branchAlreadyExists) {
+      // Branch exists but worktree was removed; reuse the existing branch
+      await git(['-C', repoDir, 'worktree', 'add', worktree, integrationBranch])
+    } else {
+      // Fresh branch creation off origin/<base-branch>
+      await git(['-C', repoDir, 'worktree', 'add', worktree, '-b', integrationBranch, `origin/${baseBranch}`])
+    }
     result.created = true
   }
 
@@ -62,16 +72,26 @@ export async function attempt(options, git = gitRunner) {
     throw new Error(
       `integrate: a merge is already in progress in ${worktree} — resolve or handle it before calling integrate.mjs again`)
   } catch (err) {
-    if (!(err && err.code === 128)) throw err   // 128 == "no MERGE_HEAD", the expected case
+    // With --quiet, git rev-parse exits with code 1 (not 128) when the ref does not exist
+    if (!(err && err.code === 1)) throw err   // 1 == "no MERGE_HEAD", the expected case with --quiet
   }
 
   try {
     await git(['-C', worktree, 'merge', '--no-ff', mergeTip])
     result.merged = mergeTip
   } catch (err) {
-    result.conflict = true
+    // Check if this is a real content conflict by looking for unmerged files
     const unmerged = await git(['-C', worktree, 'diff', '--name-only', '--diff-filter=U'])
-    result.files = String(unmerged ?? '').split('\n').map(l => l.trim()).filter(Boolean)
+    const unmergedFiles = String(unmerged ?? '').split('\n').map(l => l.trim()).filter(Boolean)
+
+    if (unmergedFiles.length === 0) {
+      // Not a real conflict (bad ref, I/O error, etc.) — rethrow the original error
+      throw err
+    }
+
+    // Real content conflict: leave merge in progress for resolution agent
+    result.conflict = true
+    result.files = unmergedFiles
     result.detail = String((err && err.message) || err).split('\n')[0]
   }
   return result
