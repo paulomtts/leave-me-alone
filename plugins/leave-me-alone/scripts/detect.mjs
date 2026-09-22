@@ -18,12 +18,10 @@
 // genuinely model-shaped task in the stage. Configure it once via
 // `args.verification` instead, or let the agent fall back to discovering it.
 
-import { ghRunner, gitRunner, jsonFrom, lastLine, parseNdjson, withRetries, readFlags } from './gh.mjs'
+import { gitRunner, readFlags, withRetries } from './gh.mjs'
 import { brd, brdRunner } from './brd.mjs'
 import { findMilestone, flattenMilestone } from './census.mjs'
 import { shortId } from './naming.mjs'
-
-export { jsonFrom, lastLine, parseNdjson } from './gh.mjs'
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
@@ -76,54 +74,20 @@ export async function prepareCheckout(repoDir, git = gitRunner, wait) {
   return true
 }
 
-// Deliberately LOOSE — anything whose branch name contains any subtask's short
-// id. The orchestrator matches exactly and separately looks for near misses, so
-// over-reporting here is free and under-reporting is not.
-//
-// Takes already-resolved SHORT ids, not card ids: the caller resolves those
-// with shortId() before the PR-listing try/catch, so a malformed card id
-// aborts the run instead of being caught there and reported as prLookupFailed.
-export function filterPullRequests(pulls, subtaskShortIds) {
-  const ids = [...new Set(subtaskShortIds ?? [])]
-  return (pulls ?? []).filter(pull => {
-    const ref = String((pull && pull.ref) ?? '')
-    return ids.some(id => ref.includes(id))
-  })
-}
-
-export async function detect({ repo, milestone, repoDir, run = ghRunner, runBrd = brdRunner, git = gitRunner, wait }) {
+export async function detect({ repo, milestone, repoDir, runBrd = brdRunner, git = gitRunner, wait }) {
   const prepared = await prepareCheckout(repoDir, git, wait)
 
-  // One local call replaces a milestone lookup, a story list, and two API calls
-  // per story. NOT wrapped in withRetries: brd is local, so a failure is real.
+  // One local call replaces a milestone lookup, a story list, and what used
+  // to be two API calls per story. NOT wrapped in withRetries: brd is local,
+  // so a failure is real.
   const roots = await brd(['tree'], { cwd: repoDir, run: runBrd })
   const { milestoneTitle, stories } = flattenMilestone(findMilestone(roots, milestone))
 
-  // Resolved BEFORE the try: shortId throws on a malformed card id, and that is a
-  // data-integrity bug, not a network condition. Inside the try it would be caught
-  // and reported as prLookupFailed — the same "a failed read looks like no data"
-  // collapse this module exists to avoid.
-  const subtaskShortIds = stories.flatMap(story => story.subtasks.map(sub => shortId(sub.id)))
+  // Validate all card IDs are well-formed before returning. A malformed card id
+  // is a data-integrity bug, not a network condition.
+  stories.flatMap(story => story.subtasks.map(sub => shortId(sub.id)))
 
-  // REST, not `gh pr list`: the latter goes through GraphQL, which returned
-  // empty results for genuinely-merged PRs during the 2026-08-17 incident.
-  let pullRequests = []
-  let prLookupFailed = false
-  try {
-    const raw = await withRetries('detect: pull request listing', () => run([
-      'api', `repos/${repo}/pulls?state=all&per_page=100`, '--paginate',
-      '--jq', '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}',
-    ]), { wait })
-    const all = parseNdjson(raw)
-    pullRequests = filterPullRequests(all, subtaskShortIds)
-  } catch (err) {
-    // NOT an empty list. "The API did not answer" and "there are no PRs" must
-    // stay distinguishable, or merged work gets re-implemented.
-    prLookupFailed = true
-    process.stderr.write(`${err.message}\n`)
-  }
-
-  return { milestoneTitle, stories, pullRequests, prLookupFailed, prepared }
+  return { milestoneTitle, stories, prepared }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

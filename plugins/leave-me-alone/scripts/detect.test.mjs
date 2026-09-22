@@ -3,25 +3,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, parseNdjson, filterPullRequests, jsonFrom, lastLine, detect } from './detect.mjs'
+import { parseArgs, detect } from './detect.mjs'
+import { parseNdjson, jsonFrom, lastLine } from './gh.mjs'
 import { shortId } from './naming.mjs'
-
-// A fake `gh`: matches on a distinctive fragment of the argv it is given.
-const fakeGh = (routes, log = []) => {
-  const run = async (args) => {
-    log.push(args)
-    const joined = args.join(' ')
-    for (const [needle, reply] of routes) {
-      if (joined.includes(needle)) {
-        if (reply instanceof Error) throw reply
-        return typeof reply === 'string' ? reply : JSON.stringify(reply)
-      }
-    }
-    throw new Error(`unrouted gh call: ${joined}`)
-  }
-  run.log = log
-  return run
-}
 
 const MILESTONE_ID = 'aaaaaaaa-0000-4000-8000-000000000000'
 const STORY_ID = 'bbbbbbbb-0000-4000-8000-000000000000'
@@ -44,12 +28,6 @@ const TREE = {
 }
 
 const fakeBrd = () => async () => JSON.stringify(TREE)
-
-const BASE_PR_ROUTES = [
-  ['pulls?state=all', '{"number":7,"url":"u7","state":"open","merged_at":null,"ref":"m12/task-write-rows-cccccccc","base":"main"}\n'],
-]
-
-const opts = (run) => ({ repo: 'you/thing', milestone: 'Sprint one', run, runBrd: fakeBrd() })
 
 // ── parseArgs ────────────────────────────────────────────────────────────────
 
@@ -83,58 +61,24 @@ test('one object per line, blank lines ignored', () => {
   assert.deepEqual(parseNdjson(null), [])
 })
 
-// ── filterPullRequests ───────────────────────────────────────────────────────
-// Takes already-resolved SHORT ids, not card ids — the caller (detect()) is
-// the one that resolves card ids via shortId(), and does so BEFORE the
-// PR-listing try/catch so a malformed id aborts the run instead of being
-// caught there. See the "malformed card id" test in the detect suite below.
-
-test('filterPullRequests matches a subtask by its short id', () => {
-  const pulls = [{ ref: 'm12/task-write-rows-cccccccc' }, { ref: 'm12/task-other-dddddddd' }]
-  assert.deepEqual(filterPullRequests(pulls, [shortId(SUB_ID)]).map(p => p.ref), ['m12/task-write-rows-cccccccc'])
-})
-
-test('the filter never decides — exactness is the orchestrator\'s job', () => {
-  // A branch that merely contains the short id as a substring is kept even if
-  // it belongs to a different, longer id sharing the same prefix. Dropping it
-  // here would hide it from the near-miss check that catches a prefix change.
-  const longer = shortId('cccccccc-1111-4000-8000-000000000000')
-  assert.equal(filterPullRequests([{ ref: 'task-ccccccccdead' }], [longer]).length, 1)
-})
-
-test('no subtasks means no pull requests', () => {
-  assert.deepEqual(filterPullRequests([{ ref: `task-${shortId(SUB_ID)}` }], []), [])
-  assert.deepEqual(filterPullRequests(null, [shortId(SUB_ID)]), [])
-})
-
 // ── detect ───────────────────────────────────────────────────────────────────
 
-test('detect builds its census from brd and its PR list from gh', async () => {
-  const ghCalls = []
-  const gh = async (args) => {
-    ghCalls.push(args.join(' '))
-    return '{"number":7,"url":"u7","state":"open","merged_at":null,"ref":"m12/task-write-rows-cccccccc","base":"main"}\n'
-  }
-  const result = await detect({
-    repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
-    run: gh, runBrd: fakeBrd(), git: async () => '',
-  })
-
-  assert.equal(result.milestoneTitle, 'Sprint one')
-  assert.deepEqual(result.stories.map(s => s.id), [STORY_ID])
-  assert.deepEqual(result.stories[0].subtasks.map(s => s.id), [SUB_ID])
-  // The ONLY gh calls left in the census path are about pull requests.
-  assert.ok(ghCalls.every(call => call.includes('pulls')), `unexpected gh calls: ${ghCalls.join(' | ')}`)
+test('detect returns no pull-request fields at all — the census is brd alone', async () => {
+  const runBrd = async () => JSON.stringify({ ok: true, data: [
+    { id: 'a1b2c3d4-0000-0000-0000-000000000000', title: 'M', parent_id: null, status: 'todo', blocked_by: [], children: [] },
+  ] })
+  const result = await detect({ repo: 'o/n', milestone: 'M', repoDir: null, runBrd })
+  assert.equal('pullRequests' in result, false)
+  assert.equal('prLookupFailed' in result, false)
 })
 
 test('brd is invoked exactly once — brd calls are never retried', async () => {
-  // Stated global invariant: unlike the gh PR listing (which IS retried, see
-  // below), a brd failure is real and local, so calling it more than once
-  // would silently paper over that.
+  // Stated global invariant: a brd failure is real and local, so calling it more
+  // than once would silently paper over that.
   let calls = 0
   const runBrd = async () => { calls += 1; return JSON.stringify(TREE) }
   await detect({ repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
-    run: fakeGh(BASE_PR_ROUTES), runBrd, git: async () => '' })
+    runBrd, git: async () => '' })
   assert.equal(calls, 1)
 })
 
@@ -142,46 +86,17 @@ test('a brd failure stops the run instead of yielding an empty milestone', async
   const failing = async () => '{"ok": false, "error": {"type": "ProjectNotFoundError", "message": "no .brd marker found above /abs/repo"}}'
   await assert.rejects(
     detect({ repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
-      run: async () => '', runBrd: failing, git: async () => '' }),
+      runBrd: failing, git: async () => '' }),
     /ProjectNotFoundError/)
 })
 
-test('a malformed card id aborts the run rather than reading as a PR-lookup failure', async () => {
+test('a malformed card id aborts the run', async () => {
   const brokenTree = JSON.parse(JSON.stringify(TREE))
   brokenTree.data[0].children[0].children[0].id = 'not-a-uuid'
   await assert.rejects(
     detect({ repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
-      run: async () => '', runBrd: async () => JSON.stringify(brokenTree), git: async () => '' }),
+      runBrd: async () => JSON.stringify(brokenTree), git: async () => '' }),
     /not a card id/)
-})
-
-test('a failed PR listing sets prLookupFailed, NOT an empty list', async () => {
-  const broken = BASE_PR_ROUTES.map(([n, r]) => n === 'pulls?state=all' ? [n, new Error('no server available')] : [n, r])
-  const got = await detect({ ...opts(fakeGh(broken)), wait: () => Promise.resolve() })
-  assert.equal(got.prLookupFailed, true)
-  assert.deepEqual(got.pullRequests, [])
-  // The stories still came back — a PR outage does not erase the census.
-  assert.equal(got.stories.length, 1)
-})
-
-test('the PR listing is retried, with a pause between attempts', async () => {
-  // No pause is barely a retry: a 5xx, a rate-limit window and an HTTP2 fault
-  // all outlast three back-to-back attempts.
-  const log = []
-  const waits = []
-  const broken = BASE_PR_ROUTES.map(([n, r]) => n === 'pulls?state=all' ? [n, new Error('502')] : [n, r])
-  await detect({ ...opts(fakeGh(broken, log)), wait: ms => { waits.push(ms); return Promise.resolve() } })
-  assert.equal(log.filter(args => args.join(' ').includes('pulls?state=all')).length, 4)
-  assert.deepEqual(waits, [500, 1000, 2000])   // doubling, and none after the last try
-})
-
-test('it uses the REST pulls endpoint, never `gh pr list`', async () => {
-  // gh pr list goes through GraphQL, which reported merged PRs as absent
-  // during the 2026-08-17 incident. REST kept answering.
-  const log = []
-  await detect(opts(fakeGh(BASE_PR_ROUTES, log)))
-  assert.equal(log.some(args => args[0] === 'pr' && args[1] === 'list'), false)
-  assert.equal(log.some(args => args.join(' ').includes('pulls?state=all')), true)
 })
 
 // ── tool-manager banners in stdout ───────────────────────────────────────────
@@ -212,14 +127,6 @@ test('NDJSON skips banner lines instead of throwing on them', () => {
   assert.deepEqual(parseNdjson(`${BANNER}{"a":1}\n{"a":2}\n`), [{ a: 1 }, { a: 2 }])
 })
 
-test('a full census survives a banner on the PR listing', async () => {
-  const noisy = BASE_PR_ROUTES.map(([needle, reply]) => [needle, BANNER + reply])
-  const got = await detect(opts(fakeGh(noisy)))
-  assert.equal(got.milestoneTitle, 'Sprint one')
-  assert.equal(got.stories[0].subtasks.length, 1)
-  assert.equal(got.pullRequests[0].ref, 'm12/task-write-rows-cccccccc')
-})
-
 // ── prepareCheckout ──────────────────────────────────────────────────────────
 
 test('the shared checkout is refreshed ONCE, here, not inside every subtask', async () => {
@@ -228,8 +135,9 @@ test('the shared checkout is refreshed ONCE, here, not inside every subtask', as
   // flight against one .git, one lane can prune another lane's worktree in the
   // window between `worktree add` registering it and the directory appearing.
   const log = []
-  const got = await detect({ ...opts(fakeGh(BASE_PR_ROUTES)), repoDir: '/abs/repo',
-    git: async (args) => { log.push(args.join(' ')); return '' } })
+  const got = await detect({
+    repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
+    runBrd: fakeBrd(), git: async (args) => { log.push(args.join(' ')); return '' } })
   assert.equal(got.prepared, true)
   assert.deepEqual(log, ['-C /abs/repo fetch origin', '-C /abs/repo worktree prune'])
 })
@@ -238,7 +146,6 @@ test('the fetch happens BEFORE the census, not after', async () => {
   const order = []
   await detect({
     repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
-    run: async (args) => { order.push('gh'); return fakeGh(BASE_PR_ROUTES)(args) },
     runBrd: async () => { order.push('brd'); return JSON.stringify(TREE) },
     git: async () => { order.push('git'); return '' },
   })
@@ -248,7 +155,9 @@ test('the fetch happens BEFORE the census, not after', async () => {
 test('without --repo-dir nothing touches the checkout', async () => {
   // Standalone use: inspecting a board should never mutate a working copy.
   const log = []
-  const got = await detect({ ...opts(fakeGh(BASE_PR_ROUTES)), git: async (a) => { log.push(a); return '' } })
+  const got = await detect({
+    repo: 'you/thing', milestone: 'Sprint one',
+    runBrd: fakeBrd(), git: async (a) => { log.push(a); return '' } })
   assert.equal(got.prepared, false)
   assert.deepEqual(log, [])
 })
@@ -261,21 +170,24 @@ test('--repo-dir must be absolute', () => {
 
 test('a flaky fetch is retried — it is the first network call of the run', async () => {
   // An HTTP2 framing error here killed a milestone at Detect, before any
-  // subtask was dispatched, while the same class of failure on the PR listing
-  // was already absorbed three attempts deep.
+  // subtask was dispatched.
   let attempts = 0
   const git = async (args) => {
     if (args.includes('fetch')) { attempts += 1; if (attempts < 3) throw new Error('HTTP2 framing layer') }
     return ''
   }
-  const got = await detect({ ...opts(fakeGh(BASE_PR_ROUTES)), repoDir: '/abs/repo', git, wait: () => Promise.resolve() })
+  const got = await detect({
+    repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
+    runBrd: fakeBrd(), git, wait: () => Promise.resolve() })
   assert.equal(got.prepared, true)
   assert.equal(attempts, 3)
 })
 
 test('a fetch that never recovers still fails the run', async () => {
   const git = async (args) => { if (args.includes('fetch')) throw new Error('no network'); return '' }
-  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_PR_ROUTES)), repoDir: '/abs/repo', git, wait: () => Promise.resolve() }), /no network/)
+  await assert.rejects(() => detect({
+    repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
+    runBrd: fakeBrd(), git, wait: () => Promise.resolve() }), /no network/)
 })
 
 test('worktree prune is NOT retried — a failure there is the checkout, not the network', async () => {
@@ -284,6 +196,8 @@ test('worktree prune is NOT retried — a failure there is the checkout, not the
     if (args.includes('prune')) { pruneAttempts += 1; throw new Error('locked') }
     return ''
   }
-  await assert.rejects(() => detect({ ...opts(fakeGh(BASE_PR_ROUTES)), repoDir: '/abs/repo', git, wait: () => Promise.resolve() }), /locked/)
+  await assert.rejects(() => detect({
+    repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
+    runBrd: fakeBrd(), git, wait: () => Promise.resolve() }), /locked/)
   assert.equal(pruneAttempts, 1)
 })
