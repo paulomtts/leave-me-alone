@@ -1,7 +1,7 @@
 export const meta = {
   name: 'orchestrator',
   description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
-  whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the prTargets column.',
+  whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the base column.',
   phases: [
     { title: 'Configure', detail: 'nothing to resolve; there is no board. Detect is already dispatched by this point', model: 'haiku' },
     { title: 'Detect', detail: 'stories and blockedBy edges from brd, existing per-subtask PRs and their bases', model: 'haiku' },
@@ -676,17 +676,19 @@ if (DRY) {
           subtasks: remainingSubtasks(story).map(subtask => ({
             id: subtask.id, title: subtask.title, status: subtask.status,
             branch: subtaskBranch(subtask, branchPrefix),
-            // The whole point of a dry run in stacked mode: check this column.
-            prTargets: bases.get(subtask.id) || baseBranch,
-            prExisting: subtask.pr || null,
+            // The whole point of a dry run: check this column — the local
+            // branch this subtask stacks on (another subtask's branch, a
+            // story's root, or the milestone base).
+            base: bases.get(subtask.id) || baseBranch,
           })),
         }
       }),
     })),
     alreadyDone: census.stories.filter(story => remainingSubtasks(story).length === 0).map(story => story.id),
-    note: 'dryRun: nothing was dispatched, no GitHub write happened. One worktree/branch/PR per SUBTASK, '
-      + 'dispatched sequentially within each story. Each PR targets its stack parent (prTargets), NOT the milestone base — '
-      + 'verify that column before a real run. Nothing is ever merged.',
+    note: 'dryRun: nothing was dispatched, nothing was pushed. One worktree/branch per SUBTASK, '
+      + 'dispatched sequentially within each story. Each subtask stacks on its parent (the `base` column), NOT the milestone base directly — '
+      + 'verify that column before a real run. A clean milestone\'s stories are merged into one local branch by the Integrate phase; '
+      + 'nothing ever touches main/master automatically.',
   }
 }
 
@@ -893,13 +895,82 @@ const unwrittenSubtasks = results.flatMap(level => (level.stories ?? []))
 // the failure came from.
 const totalStatusWriteFailures = unwrittenSubtasks.length + staleRollupErrors.length
 
+// ── Integrate — merge every story's tip into one local branch ───────────────
+// Reached only when `halted` was never set (the check above already returned
+// otherwise) — i.e. every level finished dispatch without an escalation.
+// That structural placement, not a separate condition, is the eligibility
+// gate: see the brief's note on why this is not unit-tested in isolation.
+phase('Integrate')
+const integrationBranch = `${branchPrefix}-integrate`
+const integrationWorktree = `${repoDir}/.claude/worktrees/${integrationBranch}`
+
+// Every story's tip, in dependency-level order — including a chained story
+// whose tip already contains its blocker's commits via git ancestry. A merge
+// of an already-merged-in ancestor is a safe no-op ("Already up to date."),
+// so nothing here needs to distinguish "independent" from "chained": the
+// uniform walk is simpler and no less correct.
+let integrateConflict = null
+for (const level of levels) {
+  if (integrateConflict) break
+  for (const story of level) {
+    const tip = storyTip(story, storiesById, branchPrefix, baseBranch)
+    const integrateOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/integrate.mjs --repo-dir ${repoDir} --worktree ${integrationWorktree} --integration-branch ${integrationBranch} --base-branch ${baseBranch} --merge-tip ${tip} --compact
+
+It prints one line of JSON that this pipeline parses itself — do not reformat, summarize, or truncate it.`,
+      { label: `integrate:${story.id}`, phase: 'Integrate', model: 'haiku', ...triggerAgent, schema: {
+        type: 'object', required: ['stdout'],
+        properties: { stdout: { type: 'string' }, error: { type: 'string' } },
+      } })
+    if (!integrateOut) throw new Error('integrate agent died')
+    let integrated
+    try {
+      integrated = JSON.parse(printableOnly(String(integrateOut.stdout ?? '')))
+    } catch (err) {
+      throw new Error(`integrate.mjs returned output that is not JSON (${err.message})`)
+    }
+    if (integrated.conflict) { integrateConflict = { story, tip, ...integrated }; break }
+  }
+}
+
+// On a conflict, dispatch a resolution agent that works directly in the
+// in-progress merge, then re-verify with a SEPARATE dispatch — the resolver
+// does not grade its own work, same discipline as Validate/Review being split
+// from Implement.
+if (integrateConflict) {
+  const resolveOut = await callAgent(`A merge conflict is in progress at ${integrationWorktree}, merging ${integrateConflict.tip} — conflicting files: ${integrateConflict.files.join(', ')}.
+
+Read the conflicting files (with their conflict markers) AND read both sides' real diffs — \`git -C ${integrationWorktree} diff HEAD...${integrateConflict.tip}\` and the equivalent against whatever is already merged into the integration branch — rather than resolving from the markers alone. Resolve every conflict so the result is correct for BOTH stories' intent, not just one that happens to win visually. Stage every resolved file with \`git -C ${integrationWorktree} add <file>\` and finish with \`git -C ${integrationWorktree} commit --no-edit\`. Do not run any other git command.`,
+    { label: `integrate-resolve:${integrateConflict.story.id}`, phase: 'Integrate', model: 'opus', ...triggerAgent, schema: {
+      type: 'object', required: ['resolved', 'summary'],
+      properties: { resolved: { type: 'boolean' }, summary: { type: 'string' } },
+    } })
+
+  const verifyOut = resolveOut && resolveOut.resolved
+    ? await callAgent(`Verify the merge resolution at ${integrationWorktree} — a DIFFERENT concern from whether it resolved: run this repo's full verification suite there and report pass/fail. Do not fix anything; report only.
+${verification.fullSuite.map(cmd => `   ${cmd}`).join('\n')}`,
+        { label: `integrate-verify:${integrateConflict.story.id}`, phase: 'Integrate', model: 'sonnet', ...triggerAgent, schema: {
+          type: 'object', required: ['passed', 'detail'],
+          properties: { passed: { type: 'boolean' }, detail: { type: 'string' } },
+        } })
+    : null
+
+  if (!verifyOut || !verifyOut.passed) {
+    return { repo, milestone, baseBranch, mode: 'stacked', escalated: true, phase: 'Integrate',
+      trigger: 'conflict', completed: results,
+      message: `orchestrator STOPPED at Integrate: a merge conflict between story #${integrateConflict.story.id}'s tip and the integration branch could not be resolved (${!resolveOut || !resolveOut.resolved ? 'resolution failed' : 'resolution did not verify'}). `
+        + `Every original story branch is untouched. The attempted resolution, if any, is on ${integrationBranch} at ${integrationWorktree} for a human to inspect or finish.`,
+      integrateConflict: { story: integrateConflict.story.id, tip: integrateConflict.tip, files: integrateConflict.files } }
+  }
+}
+
 return { repo, milestone, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
+  integrated: { branch: integrationBranch, worktree: integrationWorktree },
   ...(totalStatusWriteFailures > 0 ? { statusWriteFailures: totalStatusWriteFailures } : {}),
-  note: 'Every completed subtask/story is a LOCAL branch only — nothing was pushed. '
-    + 'Run this milestone\'s orchestrator again (or a follow-up Integrate step, see Task 7) '
-    + 'to merge everything into one branch; a human merges that into main/master by hand.'
+  note: `Milestone integrated onto local branch "${integrationBranch}" — nothing was pushed and main/master was not touched. `
+    + `A human merges it: git merge ${integrationBranch}.`
     + (unwrittenSubtasks.length > 0
-        ? ` WARNING: ${unwrittenSubtasks.length} subtask(s) completed but the card status write failed — the board did not update for them; see each subtask's statusWriteError.`
+        ? ` WARNING: ${unwrittenSubtasks.length} subtask(s) shipped but the card status write failed — the board did not update for them; see each subtask's statusWriteError.`
         : '')
     + (staleRollupErrors.length > 0
         ? ` WARNING: ${staleRollupErrors.length} already-complete stor${staleRollupErrors.length === 1 ? 'y' : 'ies'} could not be rolled up — see the log for the rollup error(s).`

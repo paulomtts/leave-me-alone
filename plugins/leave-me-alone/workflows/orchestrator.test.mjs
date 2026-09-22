@@ -377,7 +377,7 @@ test('the final run-summary note describes local branches, not GitHub PRs', () =
     'the note still describes retired GitHub issues and an "In review" column that no longer exists')
   assert.doesNotMatch(source, /the PR is open, not that it is merged/,
     'the note still promises a PR, which this mode never opens')
-  assert.match(source, /LOCAL branch only — nothing was pushed/)
+  assert.match(source, /nothing was pushed and main\/master was not touched/)
 })
 
 // ── resolveMilestone / resolveBranchPrefix ───────────────────────────────────
