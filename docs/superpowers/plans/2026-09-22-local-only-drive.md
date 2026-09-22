@@ -898,7 +898,7 @@ test('a fresh integration branch is created off origin/<base-branch>', async () 
   const git = async args => {
     calls.push(args)
     if (args[0] === 'worktree' && args[1] === 'list') return ''
-    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 128; throw e }
+    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 1; throw e }
     return ''
   }
   await attempt({ repoDir: '/r', worktree: '/w', integrationBranch: 'm12-integrate', baseBranch: 'master', mergeTip: 'm12/story-a-tip' }, git)
@@ -911,7 +911,7 @@ test('an existing integration branch is reused, not recreated', async () => {
   const git = async args => {
     calls.push(args)
     if (args[0] === 'worktree' && args[1] === 'list') return 'worktree /w\n'
-    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 128; throw e }
+    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 1; throw e }
     return ''
   }
   await attempt({ repoDir: '/r', worktree: '/w', integrationBranch: 'm12-integrate', baseBranch: 'master', mergeTip: 'm12/story-b-tip' }, git)
@@ -921,7 +921,7 @@ test('an existing integration branch is reused, not recreated', async () => {
 test('a clean merge reports conflict: false and what was merged', async () => {
   const git = async args => {
     if (args[0] === 'worktree' && args[1] === 'list') return 'worktree /w\n'
-    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 128; throw e }
+    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 1; throw e }
     if (args[2] === 'merge') return 'Merge made by the ort strategy.'
     return ''
   }
@@ -931,9 +931,11 @@ test('a clean merge reports conflict: false and what was merged', async () => {
 })
 
 test('a conflicting merge reports the file list and leaves the merge in progress', async () => {
+  const calls = []
   const git = async args => {
+    calls.push(args)
     if (args[0] === 'worktree' && args[1] === 'list') return 'worktree /w\n'
-    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 128; throw e }
+    if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 1; throw e }
     if (args[2] === 'merge') { const e = new Error('CONFLICT (content): Merge conflict in a.js'); e.code = 1; throw e }
     if (args[2] === 'diff' && args.includes('--diff-filter=U')) return 'a.js\n'
     return ''
@@ -941,7 +943,7 @@ test('a conflicting merge reports the file list and leaves the merge in progress
   const result = await attempt({ repoDir: '/r', worktree: '/w', integrationBranch: 'm12-integrate', baseBranch: 'master', mergeTip: 'm12/story-b-tip' }, git)
   assert.equal(result.conflict, true)
   assert.deepEqual(result.files, ['a.js'])
-  // must NOT have run `merge --abort`
+  assert.equal(calls.some(c => c.includes('--abort')), false, 'a conflict must never be aborted — it is left for a resolution agent')
 })
 
 test('calling attempt while a previous conflict is unresolved fails loudly', async () => {
@@ -1017,7 +1019,17 @@ export async function attempt(options, git = gitRunner) {
   const result = { created: false, conflict: false, files: [], merged: null, detail: '' }
 
   if (!worktreeExists) {
-    await git(['-C', repoDir, 'worktree', 'add', worktree, '-b', integrationBranch, `origin/${baseBranch}`])
+    // A stale integrationBranch can outlive its worktree (e.g. the worktree
+    // directory was removed by hand between runs) — `-b` on an
+    // already-existing branch name fails, the same case worktree.mjs's own
+    // prepare() already guards against. Mirror it rather than assume `-b`
+    // always applies.
+    const branchAlreadyExists = branchExists(
+      await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']), integrationBranch)
+    const args = branchAlreadyExists
+      ? ['-C', repoDir, 'worktree', 'add', worktree, integrationBranch]
+      : ['-C', repoDir, 'worktree', 'add', worktree, '-b', integrationBranch, `origin/${baseBranch}`]
+    await git(args)
     result.created = true
   }
 
@@ -1028,16 +1040,26 @@ export async function attempt(options, git = gitRunner) {
     throw new Error(
       `integrate: a merge is already in progress in ${worktree} — resolve or handle it before calling integrate.mjs again`)
   } catch (err) {
-    if (!(err && err.code === 128)) throw err   // 128 == "no MERGE_HEAD", the expected case
+    // Verified against real git: `rev-parse --verify --quiet <ref>` exits 1 when
+    // absent (128 is only the exit code WITHOUT --quiet) — code 1 is "no
+    // MERGE_HEAD", the expected case on every normal call.
+    if (!(err && err.code === 1)) throw err
   }
 
   try {
     await git(['-C', worktree, 'merge', '--no-ff', mergeTip])
     result.merged = mergeTip
   } catch (err) {
-    result.conflict = true
+    // `git merge` failing is not automatically a content conflict — a bad
+    // ref or any other git error exits non-zero too. Only report
+    // conflict: true when there are genuinely unmerged files behind it;
+    // anything else is a real failure, not something a resolution agent
+    // could act on, so it surfaces as a thrown error instead.
     const unmerged = await git(['-C', worktree, 'diff', '--name-only', '--diff-filter=U'])
-    result.files = String(unmerged ?? '').split('\n').map(l => l.trim()).filter(Boolean)
+    const files = String(unmerged ?? '').split('\n').map(l => l.trim()).filter(Boolean)
+    if (files.length === 0) throw err
+    result.conflict = true
+    result.files = files
     result.detail = String((err && err.message) || err).split('\n')[0]
   }
   return result
