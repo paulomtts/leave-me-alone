@@ -30,7 +30,6 @@ const gitFake = (routes, log = []) => async (args) => {
   for (const [needle, reply] of routes) if (joined.includes(needle)) return reply
   return ''
 }
-const ghNone = async () => '[]'
 const opts = () => parseArgs(ARGS)
 
 test('a brand new subtask gets a branch cut from the base', async () => {

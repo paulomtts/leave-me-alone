@@ -501,7 +501,7 @@ phase('Implement')
 const wtOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
    bun ${scriptsDir}/worktree.mjs --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} --repo-dir ${repoDir} --compact
 
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means a live PR already owns this branch. Report it and stop.`,
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
   { label: `worktree:${id}`, phase: 'Implement', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {
@@ -519,17 +519,6 @@ try {
     detail: `worktree.mjs returned output that is not JSON (${err.message}). Nothing was created. First 200 characters: ${String(wtOut.stdout ?? '').slice(0, 200)}` }
 }
 
-// An OPEN PR means something else is driving this branch. The caller
-// established there was none when it queued this subtask; one appearing since
-// is a human's call, not this run's.
-if (worktreeState.openPr) {
-  return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
-    existingPr: worktreeState.openPr,
-    detail: `an open PR (#${worktreeState.openPr}) already exists on ${BRANCH} — nothing was created, reset or committed.` }
-}
-if (worktreeState.prLookupError) {
-  log(`worktree: could not confirm there is no open PR on ${BRANCH} (${worktreeState.prLookupError}) — proceeding, but Implement will not reset a branch it cannot vouch for`)
-}
 log(`worktree ${worktreeState.created ? 'created' : 'reused'} at ${WORKTREE} (branch ${worktreeState.branchExisted ? 'existed' : 'new'}, ${worktreeState.commitCount} commit(s) on top of ${baseBranch})`)
 
 const planCheck = await (async () => {
