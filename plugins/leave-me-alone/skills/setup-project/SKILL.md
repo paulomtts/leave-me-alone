@@ -83,15 +83,15 @@ Two consequences worth knowing before they surprise you:
 
 **Ordering — chain every subtask with `brd block <this-subtask-id> --by <previous-subtask-id>`.**
 Order decides the stack geometry: branch names are derived (`<branchPrefix>/task-<slug>-<shortid>`,
-matched by short id alone) and each subtask's PR targets the previous subtask's branch, so the order
-*is* the set of PR targets. That order comes from the `blocked_by` edges between sibling cards, not
+matched by short id alone) and each subtask's branch builds on the previous subtask's branch, so the order
+*is* the set of branch bases. That order comes from the `blocked_by` edges between sibling cards, not
 from the title — chain a story's subtasks (subtask 2 blocked-by subtask 1, subtask 3 blocked-by
 subtask 2, …) so the board states the order rather than encoding it in text. Ordinal-looking title
 prefixes (`11.1 `, `1.2 `) are optional decoration now — nothing parses them.
 
 Without a chain, independent siblings keep creation order, which detaching and re-attaching a child
-can change. That silently re-shapes the stack between runs, and PRs opened against the old shape then
-read as `wrong-base`. It works, but only for a milestone nobody ever touches.
+can change. That silently re-shapes the stack between runs, and branches created against the old shape then
+sit on the wrong parent. It works, but only for a milestone nobody ever touches.
 
 **`branchPrefix` is part of the milestone's identity.** It defaults to `m<milestone>` only when
 `milestone` is a positive integer (e.g. `milestone: 12` → `m12/task-<slug>-<shortid>`, worktree
@@ -248,10 +248,10 @@ bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone "<card 
 | Trap | Reality |
 |---|---|
 | Expecting flat branch names | Only defaults for a numeric `milestone` (`m<milestone>`), so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme, or when `milestone` is a card id/title substring — it is used verbatim either way, and is required (not just overridable) for a non-numeric milestone. |
-| Adopting the milestone prefix on a milestone that already has merged PRs | Those PRs sit at the old addresses. The run finds them as near misses and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
-| Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A merged PR under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
+| Adopting the milestone prefix on a milestone that already has branches | Those branches sit at the old addresses. The run finds them and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
+| Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A branch found under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
 | Running a `brd`/workflow command from a worktree and expecting an isolated board | It isn't isolated — the `.brd` marker is untracked, so the walk-up finds the main checkout's marker and every worktree shares that one board. This is intentional (see `brd init` above), not a bug. |
 | Cloning this repo to a new machine and expecting the board to be there | It isn't — the board never left the machine it was created on. Run `brd init` in the new clone, and `brd import` a snapshot if you need the old cards — but that snapshot has to already exist: `brd tree <milestone> > snapshot.json` run **on the old machine before migrating**, or a `docs/board/<milestone>.json` a `setup-report` run (or that same manual command) produced earlier. Nothing writes a snapshot on its own after an orchestrator run — there is no automatic writer. |
 | A story with two `blocked_by` edges | The orchestrator can only root a stack on one parent. It stops the run rather than guessing which blocker to build from — chain them instead. |
-| Expecting a card per PR | One PR per **subtask**. |
-| Expecting `done` to mean merged | It doesn't. The run never merges, so a subtask's card reaching `done` reflects only that Ship opened its PR — that's the furthest state a run that never merges can honestly report. Its parent story's own status update is best-effort in the same way. |
+| Expecting a card per PR | One branch per **subtask** — DRIVE no longer opens PRs. A human merges the Integrate branch afterward. |
+| Expecting `done` to mean merged | It doesn't. The run never pushes anything. A subtask's card reaches `done` when Ship verifies and commits it to its local branch — that's the furthest state a run that never pushes can honestly report. The orchestrator's Integrate phase merges everything for the human. |

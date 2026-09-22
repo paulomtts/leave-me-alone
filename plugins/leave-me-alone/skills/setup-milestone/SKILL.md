@@ -43,7 +43,7 @@ Each subtask becomes one worktree, one branch, and one Review pass that must gat
 **A subtask is right-sized when:**
 - its deliverable fits in one sentence with no "and"
 - it touches few files, in one layer
-- **the full suite is green with it alone.** This is the hard rule: every subtask's PR is verified on its own, so "half a feature that breaks tests until the next card lands" cannot exist. If a split leaves the tree red, do not split there — either move the boundary, or make the two halves one subtask.
+- **the full suite is green with it alone.** This is the hard rule: every subtask is verified on its own, so "half a feature that breaks tests until the next card lands" cannot exist. If a split leaves the tree red, do not split there — either move the boundary, or make the two halves one subtask.
 
 For a **behavior-changing** subtask, add: you can list its tests *before* any code exists. If you cannot, it is too big or too vague.
 
@@ -63,7 +63,7 @@ The common failure is a docs card written from the spec instead of the code, des
 
 ### Order is stack order, and it must be reproducible
 
-Every branch name and every PR target is **derived**, not discovered:
+Every branch name and every base is **derived**, not discovered:
 
 ```
 milestone 12, card "Add retry" (a1b2c3d4…)  ->  branch m12/task-add-retry-a1b2c3d4
@@ -73,9 +73,9 @@ milestone 12, card "Add retry" (a1b2c3d4…)  ->  branch m12/task-add-retry-a1b2
 The `m12/` prefix keeps one milestone's branches and worktrees together, so several can be in flight
 in one checkout without becoming an unreadable pile. It is not what makes them unique — the short id
 (the first 8 hex characters of the card's UUID) already does that, and matching keys on that short id
-alone, so editing a card's title after its PR is open never orphans the PR.
+alone, so editing a card's title after its branch is created never orphans the branch.
 
-So the ordering you give subtasks *is* the stack geometry. The workflow re-derives it from scratch on every run and looks for each PR at exactly that address — nothing is remembered between runs.
+So the ordering you give subtasks *is* the stack geometry. The workflow re-derives it from scratch on every run and looks for each branch at exactly that address — nothing is remembered between runs.
 
 Two consequences, both load-bearing:
 
@@ -87,7 +87,7 @@ detaching and re-attaching a card moves it. A milestone ordered only by creation
 re-shape its own stack between runs. Ordinal-looking title prefixes (`11.1 `, `L2.3.1 `, `1.2 `) are
 optional decoration now — nothing parses them.
 
-**Do not reorder subtasks once their PRs exist.** Reordering re-points the bases, so PRs opened against the old geometry no longer sit on their stack parent. The run does not guess: it reports them as `wrong-base` and treats that work as not done. If you must reorder, expect to re-target the open PRs by hand.
+**Do not reorder subtasks once their branches exist.** Reordering re-points the bases, so branches created against the old geometry no longer sit on their stack parent — they build from the wrong parent. The run does not guess: it stops and halts the work as not done. If you must reorder, expect to re-stack the branches by hand.
 
 Put the thing others rest on first.
 
@@ -187,11 +187,11 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
 | Assuming `--parent` implies execution order | It doesn't. Parenting is milestone→story→subtask containment; the orchestrator orders *stories*, and a story's *subtasks*, by `blocked_by` only. A tree can render perfectly while every `blocked_by` list is empty. |
 | Treating empty `blockedBy` as harmless | The orchestrator cannot tell "no deps recorded" from "genuinely independent" — both are `[]`. It places every story at level 0 and dispatches them all at once, against a base none of them has built on. |
 | Giving a story two blockers | Stops the run: a stack can only root on one parent branch. Chain them instead. |
-| A subtask that leaves the suite red until the next one lands | Every subtask's PR is verified alone. That split is invalid — move the boundary or merge the two halves. |
+| A subtask that leaves the suite red until the next one lands | Every subtask is verified alone. That split is invalid — move the boundary or merge the two halves. |
 | Folding in a docs/config/refactor card because "it has no tests" | That rule is for behavior-changing subtasks only. Judge these on their own terms — see "Subtasks that ship no behavior". |
 | A docs card written from the spec | It must read the actual implementation, which means it has to sit *after* that work in the stack. Name the files to read in its body. |
 | Expecting the run to merge anything | It does not. Each story becomes a stack of committed local branches. A subtask's card reaches `done` when it is verified and committed to its local branch — nothing is pushed. The orchestrator's Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves. |
 | Subtasks not chained with `--blocked-by` | Order falls back to creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always chain a story's subtasks. |
-| Reordering subtasks after their PRs are open | The bases are derived from order, so reordering re-points them and the existing PRs read as `wrong-base` — i.e. not done. Re-target by hand or don't reorder. |
-| Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for PRs at a new address. It detects a merged PR under the old name and HALTS rather than re-implementing it, but only a re-run with the original prefix actually fixes it. |
+| Reordering subtasks after their branches exist | The bases are derived from order, so reordering re-points them and the existing branches sit on the wrong parent. Fix by re-stacking by hand or don't reorder. |
+| Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for branches at a new address. It detects a merged branch under the old name and HALTS rather than re-implementing it, but only a re-run with the original prefix actually fixes it. |
 | Fixing the edges, then resuming the orchestrator run | Detect's result is cached on its prompt; a resume replays the stale empty snapshot. Relaunch as a NEW run with a fresh `nonce`. |

@@ -2,15 +2,16 @@
 
 Two Workflow scripts and the deterministic helpers they drive.
 
-- **orchestrator** — one brd milestone card, end to end, as a stack of pull requests. Computes the
+- **orchestrator** — one brd milestone card, end to end, as a stack of local branches. Computes the
   story dependency DAG, dispatches each level's stories in parallel, runs each story's subtasks
-  sequentially, and full-stops on the first escalation. **Never merges anything.**
+  sequentially, and full-stops on the first escalation. **Never pushes anything.** The Integrate phase
+  merges every story's tip into one local branch; a human then merges that into main/master themselves.
 - **task** — one subtask card, end to end, in its own worktree and branch: explore, spec, review the
-  spec, plan, review the plan, implement under strict TDD, review the diff, verify, open a PR.
-  **Stops at the PR.**
+  spec, plan, review the plan, implement under strict TDD, review the diff, verify and commit.
+  **Stops after verification** — nothing is pushed.
 
-The one idea underneath both: **agents decide as little as possible.** Ordering, branch names, PR
-targets, doneness and every gate live in plain JavaScript with tests. Agents exist because a Workflow
+The one idea underneath both: **agents decide as little as possible.** Ordering, branch names, branch
+bases, doneness and every gate live in plain JavaScript with tests. Agents exist because a Workflow
 script cannot execute a command — the ones that only need to run something use a `Bash`-only agent
 type and a one-line prompt.
 
@@ -29,8 +30,7 @@ the old scripts, and an old `orchestrator.js` has no idea it is old. The hook st
 `~/.claude/workflows/.synced-version` and says so when the version moves, but it cannot close the
 gap — a hook cannot run before the update it reacts to. **Update, restart, then run a milestone.**
 
-**Requires `bun`, `gh` (authenticated), `git`, `brd`, and the `superpowers`
-plugin.** The helper scripts are invoked as `bun <script>.mjs`, and `superpowers:writing-plans`
+**Requires `bun`, `git`, `brd`, and the `superpowers` plugin.** `gh` is only needed for `setup-report`'s CI check or a human's own later push/PR — DRIVE runs never call it. The helper scripts are invoked as `bun <script>.mjs`, and `superpowers:writing-plans`
 defines the plan format Implement and Review both assume — Plan reports whether it actually invoked
 that skill, and the run stops if it did not. `node` is needed only for this repo's test suite. Story
 and subtask state lives in `brd`, not a GitHub Projects v2 board — status moves go through
@@ -43,10 +43,10 @@ Each is also usable standalone for inspecting or debugging a run.
 
 | script | what it answers |
 |---|---|
-| `detect.mjs` | the whole milestone census from brd (one `brd tree`), plus the PR listing from gh. Also does the ONE git fetch + worktree prune for the run |
+| `detect.mjs` | the whole milestone census from brd (one `brd tree`). Also does the ONE git fetch + worktree prune for the run |
 | `worktree.mjs` | create a subtask's worktree idempotently; report what was already there. Never resets, deletes or commits |
 | `plan-check.mjs` | is there a saved, validated plan for this card? |
-| `ship.mjs` | verify → push → open the PR. Nothing is pushed after a red command |
+| `ship.mjs` | run every verification command, check they were green, then commit. No pushing or PR opening. |
 | `check-workflows.mjs` | do the workflow scripts still parse? |
 
 ## orchestrator
@@ -118,7 +118,7 @@ parent**, not the milestone base.
 | `repo`, `repoDir`, `card`, `branch`, `baseBranch` | yes | `card` is the brd card id (UUID); `branch` is computed once, by the orchestrator, and forwarded — `task` does not derive its own; `baseBranch` is this subtask's stack parent |
 | `scriptsDir` | yes | absolute path to `scripts/` |
 | `verification` | no | otherwise Explore discovers it |
-| `plansDir`, `specsDir` | no | default under the **worktree**, so the PR carries them |
+| `plansDir`, `specsDir` | no | default under the **worktree**, so the branch carries them |
 | `coauthor`, `triggerAgentType` | no | |
 | `allowNoVerification` | no | opt in to running with no test suite. Refused otherwise |
 
@@ -135,9 +135,9 @@ parent**, not the milestone base.
 | 7 | ValidatePlan | `leave-me-alone:plan-critic` | — | corrects the plan; adds `<!-- task-pipeline: validated -->` |
 | 8 | Implement | `leave-me-alone:code-worker` | TDD | commits spec+plan first, then strict TDD with `Plan-Hash` trailers |
 | 9 | Review | `leave-me-alone:code-worker` | TDD, debugging | reviews the diff, fixes, reports three raw numbers |
-| 10 | Ship | `leave-me-alone:command-runner` | — | `ship.mjs` → verify, push, PR |
+| 10 | Ship | `leave-me-alone:command-runner` | — | `ship.mjs` → verify and commit |
 
-Spec and plan are written **inside the worktree**, so each PR carries the spec and plan it was built
+Spec and plan are written **inside the worktree**, so each branch carries the spec and plan it was built
 from, and a worktree deleted between runs is recreated from the branch with the plan still on it.
 
 ### Gates
@@ -145,7 +145,7 @@ from, and a worktree deleted between runs is recreated from the branch with the 
 Decisions live in the script, off values the agents merely report:
 
 - **no full-suite command** → refuses to start; every later check would be vacuous
-- **dirty worktree after Review** → stops; the PR would not contain the work
+- **dirty worktree after Review** → stops; the branch would not contain the work
 - **zero commits** → stops
 - **untagged commits** (`Plan-Hash` missing) → stops, and says *do not re-run* — a later run would
   read the branch as stale and hard-reset it
@@ -157,9 +157,9 @@ Decisions live in the script, off values the agents merely report:
 
 ### Returns
 
-`{ card, pr, branch, worktree, plan, tests }` on success, or
+`{ card, branch, worktree, plan, tests }` on success, or
 `{ card, refused|blocked, reason|detail, … }` when a gate stopped it. `blocked` is one of
-`verification`, `validation`, `implement`, `review`, `tests`, `pr`.
+`verification`, `validation`, `implement`, `review`, `tests`.
 
 ## Why per-subtask, not per-story
 
@@ -172,10 +172,10 @@ Nothing is pushed during a run. "Done" means "verified and committed to its loca
 
 - **Branch names are derived, never discovered:** `<branchPrefix>/task-<slug>-<shortid>`, where
   `shortid` is the first 8 hex characters of the card's UUID and `slug` is a readable form of its
-  title. Matching keys on the short id alone, so an edited card title never orphans its PR. A merged
-  PR found under a different name halts the run rather than being re-implemented.
-- **Subtask order is the PR targets.** Reordering after PRs exist re-points the bases and those PRs
-  read as wrong-base. Order comes from the `blocked_by` edges between sibling cards — chain a story's
+  title. Matching keys on the short id alone, so an edited card title never orphans its branch. A branch
+  found under a different name halts the run rather than being re-implemented.
+- **Subtask order determines the branch bases.** Reordering after branches exist re-points the bases and those branches
+  must be re-stacked to the new parent. Order comes from the `blocked_by` edges between sibling cards — chain a story's
   subtasks with `--blocked-by <previous subtask id>`. Ordinal title prefixes are optional decoration;
   nothing parses them.
 - **Only one blocker per story.** A stack roots on one parent; two stops the run.
