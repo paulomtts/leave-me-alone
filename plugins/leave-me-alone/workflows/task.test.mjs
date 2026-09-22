@@ -221,10 +221,10 @@ test('drift is not claimed when either hash is unusable', () => {
 
 // ── statusWriteOutcome ───────────────────────────────────────────────────────
 // A brd status write is best-effort (missing PATH entry, a denied permission
-// prompt, …) so it must never sink a subtask whose PR is already open and
-// green — but that failure must not vanish into a run that reads as fully
-// clean either. This is the fold that turns collected rollup errors into what
-// the caller reports.
+// prompt, …) so it must never sink a subtask whose work already shipped
+// successfully — but that failure must not vanish into a run that reads as
+// fully clean either. This is the fold that turns collected rollup errors
+// into what the caller reports.
 
 test('no status-write errors means the write is reported clean', () => {
   assert.deepEqual(statusWriteOutcome([]), { statusWritten: true })

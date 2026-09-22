@@ -71,3 +71,70 @@ test('two independent branches with a real file conflict: detected correctly, or
 
   rmSync(repo, { recursive: true, force: true })
 })
+
+// This exercises the fix for the "resolved conflict abandons every later
+// story" bug: orchestrator.js's Integrate walk used to `break` on a conflict
+// and never resume, even after a successful resolution. Proving that at the
+// orchestrator level would mean driving the full Workflow dispatch, which
+// this file's own established pattern (see the header comment) deliberately
+// does not do — so this proves the same thing one layer down, directly
+// against integrate.mjs: after a conflict between story-a and story-b is
+// resolved (a commit made the same way the resolution agent would make it —
+// staging the conflicting file and committing with --no-edit), a THIRD
+// story's attempt() against the now-resolved integration branch still
+// succeeds. If the walk could not meaningfully continue past a resolved
+// conflict, this merge would be attempted against a branch stuck mid-merge.
+test('a resolved conflict lets integration continue: a third branch merges cleanly afterward', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'lma-integrate-resume-'))
+  git('-C', repo, 'init', '-q')
+  git('-C', repo, 'config', 'user.email', 'test@test')
+  git('-C', repo, 'config', 'user.name', 'test')
+  writeFileSync(join(repo, 'shared.txt'), 'base\n')
+  writeFileSync(join(repo, 'other.txt'), 'base\n')
+  git('-C', repo, 'add', '.'); git('-C', repo, 'commit', '-q', '-m', 'base')
+  git('-C', repo, 'checkout', '-q', '-b', 'origin-stand-in')
+
+  git('-C', repo, 'checkout', '-q', '-b', 'story-a')
+  writeFileSync(join(repo, 'shared.txt'), 'story A\n')
+  git('-C', repo, 'add', '.'); git('-C', repo, 'commit', '-q', '-m', 'story A change')
+
+  git('-C', repo, 'checkout', '-q', 'origin-stand-in')
+  git('-C', repo, 'checkout', '-q', '-b', 'story-b')
+  writeFileSync(join(repo, 'shared.txt'), 'story B\n')
+  git('-C', repo, 'add', '.'); git('-C', repo, 'commit', '-q', '-m', 'story B change')
+
+  git('-C', repo, 'checkout', '-q', 'origin-stand-in')
+  git('-C', repo, 'checkout', '-q', '-b', 'story-c')
+  writeFileSync(join(repo, 'other.txt'), 'story C\n')
+  git('-C', repo, 'add', '.'); git('-C', repo, 'commit', '-q', '-m', 'story C change')
+
+  git('-C', repo, 'remote', 'add', 'origin', repo)
+  git('-C', repo, 'fetch', '-q', 'origin')
+
+  const wtDir = join(repo, '.claude', 'worktrees', 'm1-integrate')
+
+  const first = await attempt({ repoDir: repo, worktree: wtDir, integrationBranch: 'm1-integrate', baseBranch: 'origin-stand-in', mergeTip: 'story-a' }, realGit)
+  assert.equal(first.conflict, false)
+
+  const second = await attempt({ repoDir: repo, worktree: wtDir, integrationBranch: 'm1-integrate', baseBranch: 'origin-stand-in', mergeTip: 'story-b' }, realGit)
+  assert.equal(second.conflict, true)
+  assert.deepEqual(second.files, ['shared.txt'])
+
+  // Mimic what the resolution agent does: edit the conflicting file to a
+  // resolved state, stage it, and commit with --no-edit (finishing the merge
+  // already in progress).
+  writeFileSync(join(wtDir, 'shared.txt'), 'story A and story B, resolved\n')
+  git('-C', wtDir, 'add', 'shared.txt')
+  git('-C', wtDir, 'commit', '-q', '--no-edit')
+
+  // No merge should be in progress any more.
+  assert.throws(() => git('-C', wtDir, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD'))
+
+  // The walk continues to the NEXT story — its attempt() must succeed against
+  // the now-resolved integration branch, not against a branch still mid-merge.
+  const third = await attempt({ repoDir: repo, worktree: wtDir, integrationBranch: 'm1-integrate', baseBranch: 'origin-stand-in', mergeTip: 'story-c' }, realGit)
+  assert.equal(third.conflict, false)
+  assert.equal(third.merged, 'story-c')
+
+  rmSync(repo, { recursive: true, force: true })
+})

@@ -1,11 +1,12 @@
 export const meta = {
   name: 'orchestrator',
-  description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
+  description: 'Drive a whole brd milestone on any repo as LOCAL BRANCHES ONLY (nothing is pushed): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch per subtask, stacked on its parent — and full-stop on escalation. On a fully clean milestone, a terminal Integrate phase merges every story into one local branch; a human merges that into main/master themselves. Never touches main/master itself.',
   whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the base column.',
   phases: [
     { title: 'Configure', detail: 'nothing to resolve; there is no board. Detect is already dispatched by this point', model: 'haiku' },
-    { title: 'Detect', detail: 'stories and blockedBy edges from brd, existing per-subtask PRs and their bases', model: 'haiku' },
+    { title: 'Detect', detail: 'stories and blockedBy edges from brd', model: 'haiku' },
     { title: 'Dispatch', detail: 'per-level pipeline over stories; each story\'s subtasks sequential, task.js once per subtask, stacked', model: 'sonnet' },
+    { title: 'Integrate', detail: 'only on a fully clean milestone: merge every story\'s tip into one local branch via integrate.mjs, resolving real conflicts with a dispatched agent; never touches main/master', model: 'sonnet' },
   ],
 }
 
@@ -100,23 +101,20 @@ function remainingSubtasks(story) {
   return (story.subtasks ?? []).filter(subtask => !isSubtaskDone(subtask))
 }
 
-// A story with zero remaining subtasks (every subtask already has an open PR
-// from a prior run, or the story itself is closed) never enters a dispatch
+// A story with zero remaining subtasks (every subtask already marked `done`
+// by a prior run, or the story itself is closed) never enters a dispatch
 // level — computeLevels drops it — so task.js never runs for it this run, and
 // nothing ever triggers rollup.mjs on its behalf. Its card, and the
 // milestone's, would keep whatever status they had, permanently.
 //
 // The fix is not a second status-writing path: it is triggering the one that
 // already exists. This picks WHICH subtask anchors that trigger — one
-// isSubtaskDone() already considers done (an open PR regardless of the
-// card's own status, or a card explicitly marked done with no PR), so
-// rollup.mjs re-asserting THAT subtask's own field is at worst a no-op and
-// only the walk up to its ancestors does real work. It is not a guarantee
-// the anchor's status field itself reads "done" — an open-PR subtask can
-// still show `todo` there; rollup.mjs recomputes every ancestor from the
-// story's REAL children regardless, so the ancestor writes stay correct
-// either way. Returns null when the story has nothing safe to anchor on (no
-// subtasks, or none individually done) — there is then nothing to reassert.
+// isSubtaskDone() already considers done, so rollup.mjs re-asserting THAT
+// subtask's own field is at worst a no-op and only the walk up to its
+// ancestors does real work. rollup.mjs recomputes every ancestor from the
+// story's REAL children regardless, so the ancestor writes stay correct.
+// Returns null when the story has nothing safe to anchor on (no subtasks, or
+// none individually done) — there is then nothing to reassert.
 // A story marked done itself (isStoryClosed) but whose subtasks are not
 // individually done still returns null here rather than anchoring on an
 // arbitrary one: reasserting a subtask's status the card does not actually
@@ -124,6 +122,28 @@ function remainingSubtasks(story) {
 // not an oversight.
 function storyRollupAnchor(story) {
   return (story.subtasks ?? []).find(isSubtaskDone) || null
+}
+
+// Shared topological engine: groups `stories` into dependency levels via
+// their blockedBy edges. Used both for DISPATCH (over pending stories only
+// — computeLevels) and INTEGRATE (over every story in the milestone —
+// computeIntegrateLevels), since only the INPUT set differs.
+function topologicalLevels(stories) {
+  const ids = new Set(stories.map(story => story.id))
+  const levels = []
+  const placed = new Set()
+  let rest = stories
+  while (rest.length > 0) {
+    const ready = rest.filter(story => (story.blockedBy ?? [])
+      .every(dep => !ids.has(dep) || placed.has(dep)))
+    if (ready.length === 0) {
+      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.id}`).join(', ')}`)
+    }
+    levels.push(ready)
+    for (const story of ready) placed.add(story.id)
+    rest = rest.filter(story => !placed.has(story.id))
+  }
+  return levels
 }
 
 function computeLevels(stories) {
@@ -135,24 +155,14 @@ function computeLevels(stories) {
   // the census's own array order is the only stable order available, so
   // pending stories keep it rather than being re-sorted.
   const pending = stories.filter(story => !doneIds.has(story.id))
-  const pendingIds = new Set(pending.map(story => story.id))
+  return topologicalLevels(pending)
+}
 
-  const levels = []
-  const placed = new Set()
-  let rest = pending
-  while (rest.length > 0) {
-    // A dep is satisfied when the upstream story is fully done (not pending)
-    // or placed in an earlier level.
-    const ready = rest.filter(story => (story.blockedBy ?? [])
-      .every(dep => !pendingIds.has(dep) || placed.has(dep)))
-    if (ready.length === 0) {
-      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.id}`).join(', ')}`)
-    }
-    levels.push(ready)
-    for (const story of ready) placed.add(story.id)
-    rest = rest.filter(story => !placed.has(story.id))
-  }
-  return levels
+// Every story in the milestone, done or not — a story finished in an
+// earlier run still needs its tip folded in, or a resumed milestone's
+// Integrate reports only its own slice as "the whole milestone".
+function computeIntegrateLevels(stories) {
+  return topologicalLevels(stories)
 }
 
 // ── stack geometry ──────────────────────────────────────────────────────────
@@ -172,11 +182,9 @@ function computeLevels(stories) {
 
 // Cycle detection over blockedBy, standing on its own.
 //
-// computeLevels also refuses to run on a cycle, but it cannot run first: its
-// doneness check reads each subtask's PR, and those are only trustworthy AFTER
-// Detect's normalization has rejected wrong-base ones — and that normalization
-// needs the stack geometry, which is what a cycle breaks. So the check lives
-// here, ahead of both.
+// computeLevels also refuses to run on a cycle, but it cannot run first: it
+// still needs the stack geometry to be sound, and a cycle is exactly what
+// breaks that geometry. So the check lives here, ahead of it.
 //
 // storyRoot's own `seen` guard is NOT sufficient: storyTip returns a branch
 // immediately when a story has subtasks, so a cycle between two populated
@@ -247,7 +255,7 @@ function storyRoot(story, storiesById, branchPrefix, baseBranch, seen = new Set(
   return storyTip(storiesById.get(blockers[0]), storiesById, branchPrefix, baseBranch, seen)
 }
 
-// The base each remaining subtask's PR targets: the previous subtask in the
+// The branch each remaining subtask stacks on: the previous subtask in the
 // story's FULL order, or the story's root for the first one.
 function stackBases(story, storiesById, branchPrefix, baseBranch) {
   const ordered = story.subtasks ?? []
@@ -391,11 +399,12 @@ if (typeof nonce !== 'string' || nonce.length === 0) {
 }
 
 const DRY = opts.dryRun === true
-// This run NEVER merges. Each subtask gets a PR targeting the previous
-// subtask's branch, so a story lands as a reviewable stack that a human (or a
-// merge queue) merges bottom-up afterwards. `autoMerge` is gone: there is no
-// merge to opt out of, and accepting it silently would let an old invocation
-// believe merging still happens.
+// This run never touches main/master. Each subtask lands as its own local
+// branch, stacked on the previous subtask's branch; a fully clean milestone's
+// Integrate phase folds every story's tip into one local integration branch,
+// which a human merges into main/master themselves afterwards. `autoMerge` is
+// gone: there is no merge-to-main to opt out of, and accepting it silently
+// would let an old invocation believe that still happens.
 if (opts.state !== undefined) {
   throw new Error(
     'orchestrator: args.state is no longer supported. It let a caller hand over a census taken '
@@ -406,8 +415,9 @@ if (opts.state !== undefined) {
 
 if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
   throw new Error(
-    'orchestrator: args.autoMerge / args.maxResolveAttempts are no longer supported — this workflow opens '
-    + 'stacked PRs and never merges, so there is nothing to auto-merge and no conflicts to resolve mid-run.')
+    'orchestrator: args.autoMerge / args.maxResolveAttempts are no longer supported — this workflow only ever '
+    + 'stacks local branches during Dispatch and never merges into main/master, so there is nothing for these '
+    + 'to configure. Integrate\'s own conflict handling is not tunable via these flags.')
 }
 // Branch names carry their milestone: a subtask card of milestone 12 lives on
 // `m12/task-<slug>-<shortid>` (taskBranch()), worktree
@@ -738,17 +748,18 @@ It prints one line of JSON that the pipeline parses itself, so reformatting, pre
   }
 }
 
-if (levels.length === 0) {
-  return { repo, milestone, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks',
-    ...(staleRollupErrors.length > 0 ? { statusWriteFailures: staleRollupErrors.length } : {}) }
-}
+// levels.length === 0 (every story already has zero remaining subtasks) is
+// NOT a special case here any more — the level loop below simply does
+// nothing, and execution falls through to Integrate, which still needs to
+// run: a milestone finished entirely in earlier runs still needs every
+// story's tip folded into the integration branch by THIS run.
 
 // ── halt flag ────────────────────────────────────────────────────────────────
-// The merge lock that used to live here is gone with merging itself. It existed
-// to serialize `gh pr merge` across concurrently-running stories; stacked PRs
-// touch nothing shared, so there is nothing left to serialize. Sequencing WITHIN
-// a story still matters — subtask N+1 branches off N — and that is the plain
-// `for` loop in the level stage, not a lock.
+// The merge lock that used to live here is gone with merging-into-main itself.
+// It existed to serialize merges across concurrently-running stories; local
+// stacked branches touch nothing shared, so there is nothing left to
+// serialize. Sequencing WITHIN a story still matters — subtask N+1 branches
+// off N — and that is the plain `for` loop in the level stage, not a lock.
 let halted = null   // escalation payload; stops all NEW dispatch
 
 // Stories run concurrently, so two can escalate in the same tick — the FIRST
@@ -758,8 +769,8 @@ function halt(payload) {
 }
 
 // ── per-subtask stage ────────────────────────────────────────────────────────
-// One dispatch, one PR, no merge. `stackBase` is this subtask's parent branch —
-// the previous subtask's, or the story's root for the first one.
+// One dispatch, one local branch, no merge. `stackBase` is this subtask's
+// parent branch — the previous subtask's, or the story's root for the first one.
 async function runSubtask(levelIndex, story, subtask, stackBase) {
   if (halted) return { subtask: subtask.id, skipped: 'halted' }
 
@@ -776,8 +787,8 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     //
     // baseBranch here is the STACK PARENT, not the milestone base. task.js uses
     // it for all three of: the worktree cut point, Review's diff base, and the
-    // PR target — which is exactly what stacking needs, and why task.js required
-    // no change for this mode.
+    // branch this subtask stacks on — which is exactly what stacking needs, and
+    // why task.js required no change for this mode.
     //
     // task.js now takes a brd card id (`card`) and the branch this run already
     // derived (`branch`), rather than a GitHub issue number and its own
@@ -857,7 +868,7 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
       const stackBase = bases.get(subtask.id) || baseBranch
       const subtaskResult = await runSubtask(levelIndex, story, subtask, stackBase)
       out.push(subtaskResult)
-      // Subtask N+1 branches off N's PUSHED branch, so N must have produced one.
+      // Subtask N+1 branches off N's local branch, so N must have produced one.
       // Nothing is merged — `stacked` is the success signal now, not `merged`.
       if (!subtaskResult || subtaskResult.stacked !== true) break
     }
@@ -882,9 +893,10 @@ if (halted) return { repo, milestone, baseBranch, mode: 'stacked', ...halted, co
   ...(staleRollupErrors.length > 0 ? { statusWriteFailures: staleRollupErrors.length } : {}) }
 
 // A status write is best-effort per subtask (see runSubtask) so it never sinks
-// an open, green PR — but `done: true` must not read as "the board updated"
-// when it didn't. Count what silently failed and say so, rather than letting
-// a clean-looking run hide a board still at `todo`.
+// a subtask whose work already shipped successfully — but `done: true` must
+// not read as "the board updated" when it didn't. Count what silently failed
+// and say so, rather than letting a clean-looking run hide a board still at
+// `todo`.
 const unwrittenSubtasks = results.flatMap(level => (level.stories ?? []))
   .flatMap(story => (story && story.subtasks) || [])
   .filter(subtask => subtask && subtask.statusWritten === false)
@@ -904,44 +916,44 @@ phase('Integrate')
 const integrationBranch = `${branchPrefix}-integrate`
 const integrationWorktree = `${repoDir}/.claude/worktrees/${integrationBranch}`
 
-// Every story's tip, in dependency-level order — including a chained story
-// whose tip already contains its blocker's commits via git ancestry. A merge
-// of an already-merged-in ancestor is a safe no-op ("Already up to date."),
-// so nothing here needs to distinguish "independent" from "chained": the
-// uniform walk is simpler and no less correct.
-let integrateConflict = null
-for (const level of levels) {
-  if (integrateConflict) break
-  for (const story of level) {
-    const tip = storyTip(story, storiesById, branchPrefix, baseBranch)
-    const integrateOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+// Every story in the milestone, in dependency order — including one already
+// done before this run started. A chained story's tip already contains its
+// blocker's commits via git ancestry, so merging an already-merged-in tip is
+// a safe no-op; nothing here needs to distinguish "already done" from "just
+// finished this run".
+const integrateOrder = computeIntegrateLevels(census.stories).flat()
+
+async function attemptIntegrate(story) {
+  const tip = storyTip(story, storiesById, branchPrefix, baseBranch)
+  const integrateOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
    bun ${scriptsDir}/integrate.mjs --repo-dir ${repoDir} --worktree ${integrationWorktree} --integration-branch ${integrationBranch} --base-branch ${baseBranch} --merge-tip ${tip} --compact
 
-It prints one line of JSON that this pipeline parses itself — do not reformat, summarize, or truncate it.`,
-      { label: `integrate:${story.id}`, phase: 'Integrate', model: 'haiku', ...triggerAgent, schema: {
-        type: 'object', required: ['stdout'],
-        properties: { stdout: { type: 'string' }, error: { type: 'string' } },
-      } })
-    if (!integrateOut) throw new Error('integrate agent died')
-    let integrated
-    try {
-      integrated = JSON.parse(printableOnly(String(integrateOut.stdout ?? '')))
-    } catch (err) {
-      throw new Error(`integrate.mjs returned output that is not JSON (${err.message})`)
-    }
-    if (integrated.conflict) { integrateConflict = { story, tip, ...integrated }; break }
+It prints one line of JSON that this pipeline parses itself — do not reformat, summarize, or truncate it. A non-zero exit is a normal answer — it means a merge conflict. Report it and stop.`,
+    { label: `integrate:${story.id}`, phase: 'Integrate', model: 'haiku', ...triggerAgent, schema: {
+      type: 'object', required: ['stdout'],
+      properties: { stdout: { type: 'string' }, error: { type: 'string' } },
+    } })
+  if (!integrateOut) throw new Error('integrate agent died')
+  try {
+    return { story, tip, ...JSON.parse(printableOnly(String(integrateOut.stdout ?? ''))) }
+  } catch (err) {
+    throw new Error(`integrate.mjs returned output that is not JSON (${err.message})`)
   }
 }
 
-// On a conflict, dispatch a resolution agent that works directly in the
-// in-progress merge, then re-verify with a SEPARATE dispatch — the resolver
-// does not grade its own work, same discipline as Validate/Review being split
-// from Implement.
-if (integrateConflict) {
-  const resolveOut = await callAgent(`A merge conflict is in progress at ${integrationWorktree}, merging ${integrateConflict.tip} — conflicting files: ${integrateConflict.files.join(', ')}.
+// Resolve, then re-verify with a SEPARATE dispatch — the resolver does not
+// grade its own work, same discipline as Validate/Review being split from
+// Implement. A resolved-and-verified conflict advances to the NEXT story;
+// only a failed resolution or failed re-verification stops the walk.
+let integrateEscalation = null
+for (let i = 0; i < integrateOrder.length && !integrateEscalation; i++) {
+  const integrated = await attemptIntegrate(integrateOrder[i])
+  if (!integrated.conflict) continue
 
-Read the conflicting files (with their conflict markers) AND read both sides' real diffs — \`git -C ${integrationWorktree} diff HEAD...${integrateConflict.tip}\` and the equivalent against whatever is already merged into the integration branch — rather than resolving from the markers alone. Resolve every conflict so the result is correct for BOTH stories' intent, not just one that happens to win visually. Stage every resolved file with \`git -C ${integrationWorktree} add <file>\` and finish with \`git -C ${integrationWorktree} commit --no-edit\`. Do not run any other git command.`,
-    { label: `integrate-resolve:${integrateConflict.story.id}`, phase: 'Integrate', model: 'opus', ...triggerAgent, schema: {
+  const resolveOut = await callAgent(`A merge conflict is in progress at ${integrationWorktree}, merging ${integrated.tip} — conflicting files: ${integrated.files.join(', ')}.
+
+Read the conflicting files (with their conflict markers) AND read both sides' real diffs — \`git -C ${integrationWorktree} diff HEAD...${integrated.tip}\` and the equivalent against whatever is already merged into the integration branch — rather than resolving from the markers alone. Resolve every conflict so the result is correct for BOTH stories' intent, not just one that happens to win visually. Stage every resolved file with \`git -C ${integrationWorktree} add <file>\` and finish with \`git -C ${integrationWorktree} commit --no-edit\`. Do not run any other git command.`,
+    { label: `integrate-resolve:${integrated.story.id}`, phase: 'Integrate', model: 'opus', ...triggerAgent, schema: {
       type: 'object', required: ['resolved', 'summary'],
       properties: { resolved: { type: 'boolean' }, summary: { type: 'string' } },
     } })
@@ -949,19 +961,25 @@ Read the conflicting files (with their conflict markers) AND read both sides' re
   const verifyOut = resolveOut && resolveOut.resolved
     ? await callAgent(`Verify the merge resolution at ${integrationWorktree} — a DIFFERENT concern from whether it resolved: run this repo's full verification suite there and report pass/fail. Do not fix anything; report only.
 ${verification.fullSuite.map(cmd => `   ${cmd}`).join('\n')}`,
-        { label: `integrate-verify:${integrateConflict.story.id}`, phase: 'Integrate', model: 'sonnet', ...triggerAgent, schema: {
+        { label: `integrate-verify:${integrated.story.id}`, phase: 'Integrate', model: 'sonnet', ...triggerAgent, schema: {
           type: 'object', required: ['passed', 'detail'],
           properties: { passed: { type: 'boolean' }, detail: { type: 'string' } },
         } })
     : null
 
   if (!verifyOut || !verifyOut.passed) {
-    return { repo, milestone, baseBranch, mode: 'stacked', escalated: true, phase: 'Integrate',
-      trigger: 'conflict', completed: results,
-      message: `orchestrator STOPPED at Integrate: a merge conflict between story #${integrateConflict.story.id}'s tip and the integration branch could not be resolved (${!resolveOut || !resolveOut.resolved ? 'resolution failed' : 'resolution did not verify'}). `
-        + `Every original story branch is untouched. The attempted resolution, if any, is on ${integrationBranch} at ${integrationWorktree} for a human to inspect or finish.`,
-      integrateConflict: { story: integrateConflict.story.id, tip: integrateConflict.tip, files: integrateConflict.files } }
+    integrateEscalation = { story: integrated.story, tip: integrated.tip, files: integrated.files,
+      detail: !resolveOut || !resolveOut.resolved ? 'resolution failed' : 'resolution did not verify' }
   }
+  // else: resolved and verified — the outer for-loop advances to i+1.
+}
+
+if (integrateEscalation) {
+  return { repo, milestone, baseBranch, mode: 'stacked', escalated: true, phase: 'Integrate',
+    trigger: 'conflict', completed: results,
+    message: `orchestrator STOPPED at Integrate: a merge conflict between story #${integrateEscalation.story.id}'s tip and the integration branch could not be resolved (${integrateEscalation.detail}). `
+      + `Every original story branch is untouched. The attempted resolution, if any, is on ${integrationBranch} at ${integrationWorktree} for a human to inspect or finish.`,
+    integrateConflict: { story: integrateEscalation.story.id, tip: integrateEscalation.tip, files: integrateEscalation.files } }
 }
 
 return { repo, milestone, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,

@@ -87,7 +87,7 @@ detaching and re-attaching a card moves it. A milestone ordered only by creation
 re-shape its own stack between runs. Ordinal-looking title prefixes (`11.1 `, `L2.3.1 `, `1.2 `) are
 optional decoration now — nothing parses them.
 
-**Do not reorder subtasks once their branches exist.** Reordering re-points the bases, so branches created against the old geometry no longer sit on their stack parent — they build from the wrong parent. The run does not guess: it stops and halts the work as not done. If you must reorder, expect to re-stack the branches by hand.
+**Do not reorder subtasks once their branches exist.** Reordering re-points the bases, so branches created against the old geometry no longer sit on their stack parent — they build from the wrong parent. Nothing detects this and halts on your behalf; a reordered run will keep going, stacked on the wrong branch, unless you catch it yourself. If you must reorder, expect to re-stack the branches by hand.
 
 Put the thing others rest on first.
 
@@ -193,5 +193,5 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
 | Expecting the run to merge anything | It does not. Each story becomes a stack of committed local branches. A subtask's card reaches `done` when it is verified and committed to its local branch — nothing is pushed. The orchestrator's Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves. |
 | Subtasks not chained with `--blocked-by` | Order falls back to creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always chain a story's subtasks. |
 | Reordering subtasks after their branches exist | The bases are derived from order, so reordering re-points them and the existing branches sit on the wrong parent. Fix by re-stacking by hand or don't reorder. |
-| Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for branches at a new address. It detects a merged branch under the old name and HALTS rather than re-implementing it, but only a re-run with the original prefix actually fixes it. |
+| Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for branches at a new address. Nothing detects work done under the old prefix — it reads as unstarted and gets re-dispatched onto a fresh branch. Only a re-run with the original prefix avoids this; `branchPrefix` must stay constant for a milestone's whole lifetime. |
 | Fixing the edges, then resuming the orchestrator run | Detect's result is cached on its prompt; a resume replays the stale empty snapshot. Relaunch as a NEW run with a fresh `nonce`. |

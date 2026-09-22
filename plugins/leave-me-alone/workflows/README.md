@@ -7,7 +7,7 @@ Two Workflow scripts and the deterministic helpers they drive.
   sequentially, and full-stops on the first escalation. **Never pushes anything.** The Integrate phase
   merges every story's tip into one local branch; a human then merges that into main/master themselves.
 - **task** — one subtask card, end to end, in its own worktree and branch: explore, spec, review the
-  spec, plan, review the plan, implement under strict TDD, review the diff, verify and commit.
+  spec, plan, review the plan, implement under strict TDD, review the diff, verify.
   **Stops after verification** — nothing is pushed.
 
 The one idea underneath both: **agents decide as little as possible.** Ordering, branch names, branch
@@ -46,7 +46,7 @@ Each is also usable standalone for inspecting or debugging a run.
 | `detect.mjs` | the whole milestone census from brd (one `brd tree`). Also does the ONE git fetch + worktree prune for the run |
 | `worktree.mjs` | create a subtask's worktree idempotently; report what was already there. Never resets, deletes or commits |
 | `plan-check.mjs` | is there a saved, validated plan for this card? |
-| `ship.mjs` | run every verification command, check they were green, then commit. No pushing or PR opening. |
+| `ship.mjs` | run every verification command, check they were green, then report pass/fail. No pushing or PR opening, and no committing — Implement/Review already committed the work. |
 | `check-workflows.mjs` | do the workflow scripts still parse? |
 
 ## orchestrator
@@ -135,7 +135,7 @@ parent**, not the milestone base.
 | 7 | ValidatePlan | `leave-me-alone:plan-critic` | — | corrects the plan; adds `<!-- task-pipeline: validated -->` |
 | 8 | Implement | `leave-me-alone:code-worker` | TDD | commits spec+plan first, then strict TDD with `Plan-Hash` trailers |
 | 9 | Review | `leave-me-alone:code-worker` | TDD, debugging | reviews the diff, fixes, reports three raw numbers |
-| 10 | Ship | `leave-me-alone:command-runner` | — | `ship.mjs` → verify and commit |
+| 10 | Ship | `leave-me-alone:command-runner` | — | `ship.mjs` → verify; card marked `done` once green |
 
 Spec and plan are written **inside the worktree**, so each branch carries the spec and plan it was built
 from, and a worktree deleted between runs is recreated from the branch with the plan still on it.
@@ -166,7 +166,7 @@ Decisions live in the script, off values the agents merely report:
 One subtask = one branch = one worktree. A story is a grouping that supplies *ordering*: its
 subtasks run sequentially, each branch cut from the previous one's, producing a stack on local branches. Stories in the same dependency level run in parallel, in separate worktrees.
 
-Nothing is pushed during a run. "Done" means "verified and committed to its local branch" — nothing is pushed. The orchestrator's Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves, deliberately.
+Nothing is pushed during a run. "Done" means "verified and committed to its local branch" — nothing is pushed. The orchestrator's Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves.
 
 ## Notes
 

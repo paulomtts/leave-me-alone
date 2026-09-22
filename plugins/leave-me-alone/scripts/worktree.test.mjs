@@ -55,7 +55,7 @@ test('a base that only exists locally (a prior subtask/story branch, never pushe
   const git = async args => {
     calls.push(args)
     if (args.includes('rev-parse') && args.includes('origin/story-a-tip')) {
-      const err = new Error('fatal: bad revision'); err.code = 128; throw err
+      const err = new Error('fatal: bad revision'); err.code = 1; throw err
     }
     if (args.includes('for-each-ref')) return ''
     if (args.includes('worktree') && args.includes('list')) return ''

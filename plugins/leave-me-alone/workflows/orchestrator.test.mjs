@@ -22,13 +22,13 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ORCHESTRATOR_PATH = join(HERE, 'orchestrator.js')
 
 const {
-  isSubtaskDone, remainingSubtasks, computeLevels, storyRollupAnchor,
+  isSubtaskDone, remainingSubtasks, computeLevels, computeIntegrateLevels, storyRollupAnchor,
   assertNoBlockerCycles, subtaskBranch, storyRoot, stackBases, escalation,
   dropCommandsNamingMissingPaths,
   shortId, slugify, taskStem, taskBranch,
   resolveMilestone, resolveBranchPrefix,
 } = await loadPure(ORCHESTRATOR_PATH, [
-  'isSubtaskDone', 'remainingSubtasks', 'computeLevels', 'storyRollupAnchor',
+  'isSubtaskDone', 'remainingSubtasks', 'computeLevels', 'computeIntegrateLevels', 'storyRollupAnchor',
   'assertNoBlockerCycles', 'subtaskBranch', 'storyTip', 'storyRoot', 'stackBases', 'escalation',
   'dropCommandsNamingMissingPaths',
   'shortId', 'slugify', 'taskStem', 'taskBranch',
@@ -155,6 +155,25 @@ test('a story whose blocker has no remaining work is unblocked immediately', () 
   const A = { id: uid('20000004'), status: 'todo', blockedBy: [], subtasks: [{ id: uid('20000014'), title: 'a', status: 'done' }] }
   const B = { id: uid('20000005'), status: 'todo', blockedBy: [A.id], subtasks: [{ id: uid('20000015'), title: 'b', status: 'todo' }] }
   assert.deepEqual(computeLevels([A, B]).map(l => l.map(s => s.id)), [[B.id]])
+})
+
+// ── computeIntegrateLevels ───────────────────────────────────────────────────
+// Unlike computeLevels, this walks EVERY story — done or not — because a
+// story finished in an earlier run still needs its tip folded into the
+// integration branch by a LATER run's Integrate phase.
+
+test('computeIntegrateLevels includes an already-done story alongside a pending one, in dependency order', () => {
+  const A = { id: uid('60000001'), status: 'done', blockedBy: [], subtasks: [{ id: uid('60000011'), title: 'a', status: 'done' }] }
+  const B = { id: uid('60000002'), status: 'todo', blockedBy: [A.id], subtasks: [{ id: uid('60000012'), title: 'b', status: 'todo' }] }
+  const levels = computeIntegrateLevels([A, B])
+  assert.deepEqual(levels.map(l => l.map(s => s.id)), [[A.id], [B.id]])
+})
+
+test('computeIntegrateLevels over an all-done milestone still returns every story — not an empty walk', () => {
+  const A = { id: uid('60000003'), status: 'done', blockedBy: [], subtasks: [{ id: uid('60000013'), title: 'a', status: 'done' }] }
+  const B = { id: uid('60000004'), status: 'done', blockedBy: [A.id], subtasks: [{ id: uid('60000014'), title: 'b', status: 'done' }] }
+  const levels = computeIntegrateLevels([A, B])
+  assert.deepEqual(levels.map(l => l.map(s => s.id)), [[A.id], [B.id]])
 })
 
 // ── cycles ──────────────────────────────────────────────────────────────────

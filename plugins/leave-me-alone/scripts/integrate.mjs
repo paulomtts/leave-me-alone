@@ -52,8 +52,8 @@ export async function attempt(options, git = gitRunner) {
 
   if (!worktreeExists) {
     // Check if the integration branch already exists locally
-    const branches = String(await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/'])).split('\n').map(l => l.trim()).filter(Boolean)
-    const branchAlreadyExists = branches.includes(integrationBranch)
+    const branchAlreadyExists = branchExists(
+      await git(['-C', repoDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']), integrationBranch)
 
     if (branchAlreadyExists) {
       // Branch exists but worktree was removed; reuse the existing branch

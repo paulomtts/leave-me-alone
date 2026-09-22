@@ -51,13 +51,25 @@ test('the skills describe the status model that actually ships', () => {
 })
 
 test('the skills no longer promise PR-based done and describe local-only completion', () => {
-  for (const name of ['setup-project', 'setup-milestone']) {
+  // Task 8: moved DRIVE from PR-based completion to local-only ("verified and
+  // committed to the local branch — nothing is pushed"). The Integrate phase
+  // merges stories into one local branch; a human merges that into
+  // main/master themselves.
+  //
+  // Each file's REAL retired phrasing was different, so one shared regex
+  // checked against both files means at least one never actually got tested
+  // against its own old text — setup-milestone said "reaches `done` when Ship
+  // opens its PR"; setup-project said "reaching `done` reflects only that
+  // Ship opened its PR" (verified against the pre-migration text at
+  // `git show 7a77054:...SKILL.md`). A per-file table keeps each assertion
+  // honest about what that specific file used to say.
+  const oldPhrasings = [
+    { name: 'setup-milestone', oldPhraseRegex: /reaches `?done`? when Ship opens its PR/i },
+    { name: 'setup-project', oldPhraseRegex: /reaching `?done`? reflects only that Ship opened its PR/i },
+  ]
+  for (const { name, oldPhraseRegex } of oldPhrasings) {
     const source = read(name)
-    // Task 8: moved DRIVE from PR-based completion ("reaches `done` when Ship opens its PR")
-    // to local-only ("verified and committed to the local branch —
-    // nothing is pushed"). The Integrate phase merges stories into one local branch;
-    // a human merges that into main/master themselves.
-    assert.doesNotMatch(source, /reaches `?done`? when Ship opens its PR/i, `${name} still promises PR-based done`)
+    assert.doesNotMatch(source, oldPhraseRegex, `${name} still promises PR-based done`)
     assert.match(source, /verified and committed|local branch/i, `${name} does not describe local-only completion`)
   }
 })

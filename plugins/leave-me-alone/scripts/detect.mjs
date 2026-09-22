@@ -56,17 +56,17 @@ export function parseArgs(argv) {
 // worktree vanished mid-run".
 //
 // Hoisting the fetch is safe because a stack parent needs no fetch: ship.mjs
-// pushes with `git push -u origin <branch>`, which updates this checkout's own
-// refs/remotes/origin/<branch> as a side effect. Only the milestone base comes
-// from the network, and freezing it here is a feature — every story in the run
-// then builds on the same base rather than on whatever landed mid-run.
+// no longer pushes at all — every subtask's parent is another LOCAL branch in
+// this same checkout, already up to date the moment it was created. Only the
+// milestone base itself needs the network, and freezing it here with the one
+// fetch this function performs is a feature — every story in the run then
+// builds on the same base rather than on whatever landed mid-run.
 export async function prepareCheckout(repoDir, git = gitRunner, wait) {
   if (!repoDir) return false
-  // Retried like the PR listing is, and for the same reason: this is a network
-  // call, and it is the FIRST thing a run does. An HTTP2 framing flake here
-  // killed a whole milestone at Detect — before a single subtask was
-  // dispatched — while the identical class of failure on the PR listing was
-  // already being absorbed three attempts deep.
+  // Retried the same way a now-removed PR listing used to be, and for the
+  // same reason: this is a network call, and it is the FIRST thing a run
+  // does. An HTTP2 framing flake here killed a whole milestone at Detect —
+  // before a single subtask was dispatched.
   await withRetries('detect: git fetch', () => git(['-C', repoDir, 'fetch', 'origin']), { wait })
   // Local, so a single attempt is right: a failure here is a real problem with
   // the checkout, not the network, and retrying would just hide it.

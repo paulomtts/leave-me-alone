@@ -102,10 +102,9 @@ explicitly (e.g. `branchPrefix: "m12"`).
 That grouping is for legibility and cleanup — `git branch --list "m12/*"`, `rm -rf
 .claude/worktrees/m12` — not for avoiding collisions, since each card's short id is already unique
 per board. Branch names are derived from the prefix, so changing it mid-milestone points the run at
-addresses where nothing exists. It will not quietly re-implement
-finished work — a merged PR found under the old name halts the run and names the prefix as the
-cause — but the only real fix is re-running with the prefix the milestone was built under. Never
-randomise or timestamp it.
+addresses where nothing exists. Nothing detects the work sitting at the old prefix's addresses — it
+reads as unstarted and gets silently re-dispatched onto a fresh branch, not halted. The only real
+fix is re-running with the prefix the milestone was built under. Never randomise or timestamp it.
 
 **Dependencies between stories** work the same way, one level up: a story's `blocked_by` edges order
 the dispatch levels, and they decide what branch each story's stack **roots on** — a blocked story
@@ -248,10 +247,10 @@ bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone "<card 
 | Trap | Reality |
 |---|---|
 | Expecting flat branch names | Only defaults for a numeric `milestone` (`m<milestone>`), so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme, or when `milestone` is a card id/title substring — it is used verbatim either way, and is required (not just overridable) for a non-numeric milestone. |
-| Adopting the milestone prefix on a milestone that already has branches | Those branches sit at the old addresses. The run finds them and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
-| Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A branch found under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
+| Adopting the milestone prefix on a milestone that already has branches | Those branches sit at the old addresses. Nothing detects them or halts on your behalf — the run reads that work as unstarted and re-dispatches it onto a fresh branch; finish that milestone under its original prefix. |
+| Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered, and nothing reconciles a branch under a changed prefix against one under the old name. `branchPrefix` must stay constant for a milestone's whole lifetime; re-run with the original prefix. |
 | Running a `brd`/workflow command from a worktree and expecting an isolated board | It isn't isolated — the `.brd` marker is untracked, so the walk-up finds the main checkout's marker and every worktree shares that one board. This is intentional (see `brd init` above), not a bug. |
 | Cloning this repo to a new machine and expecting the board to be there | It isn't — the board never left the machine it was created on. Run `brd init` in the new clone, and `brd import` a snapshot if you need the old cards — but that snapshot has to already exist: `brd tree <milestone> > snapshot.json` run **on the old machine before migrating**, or a `docs/board/<milestone>.json` a `setup-report` run (or that same manual command) produced earlier. Nothing writes a snapshot on its own after an orchestrator run — there is no automatic writer. |
 | A story with two `blocked_by` edges | The orchestrator can only root a stack on one parent. It stops the run rather than guessing which blocker to build from — chain them instead. |
 | Expecting a card per PR | One branch per **subtask** — DRIVE no longer opens PRs. A human merges the Integrate branch afterward. |
-| Expecting `done` to mean merged | It doesn't. The run never pushes anything. A subtask's card reaches `done` when Ship verifies and commits it to its local branch — that's the furthest state a run that never pushes can honestly report. The orchestrator's Integrate phase merges everything for the human. |
+| Expecting `done` to mean merged | It doesn't. The run never pushes anything. A subtask's card reaches `done` once Ship verifies its already-committed work on the local branch — that's the furthest state a run that never pushes can honestly report. The orchestrator's Integrate phase merges everything for the human. |

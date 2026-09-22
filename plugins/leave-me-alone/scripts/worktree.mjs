@@ -2,12 +2,13 @@
 // Create a subtask's worktree, idempotently, and report what was already there.
 //
 // This used to be a decision tree inside Implement's prompt. It is pure
-// mechanism — does the branch exist, does the directory exist, is there a live
-// PR — and it has to happen EARLY now: the spec and the plan are written inside
-// the worktree so they travel with the subtask's own PR, which means the
-// worktree must exist before the first stage that writes.
+// mechanism — does the branch exist, does the directory exist, does a local
+// commit already sit on it — and it has to happen EARLY now: the spec and the
+// plan are written inside the worktree so they travel with the subtask's own
+// local branch, which means the worktree must exist before the first stage
+// that writes.
 //
-//   bun scripts/worktree.mjs --repo o/n --branch m1/task-9 --base main \
+//   bun scripts/worktree.mjs --branch m1/task-9 --base main \
 //     --worktree /abs/wt --repo-dir /abs/repo --compact
 //
 // It creates and reports. It never resets, never deletes, and never commits:

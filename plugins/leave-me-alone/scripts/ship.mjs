@@ -2,14 +2,15 @@
 // Deterministic replacement for task.js's Ship agent.
 //
 // Ship runs every verification command, checks they were green, then reports
-// pass/fail. No more pushing or opening PRs — those steps move to the
-// orchestrator later in the pipeline.
+// pass/fail. It never pushes and never opens a PR — this workflow never has,
+// since the migration off GitHub; the card reaches `done` on a local commit.
 //
 //   bun scripts/ship.mjs --card a32af745 --branch m12/task-write-rows-a32af745 \
 //     --base m12/task-write-columns-91a2 --worktree /abs/wt --verify "npm test" --compact
 //
-// The card is used only for logging/identification and is passed through in the
-// result. The title is no longer needed because we don't open PRs anymore.
+// The card is accepted only for the caller's own logging/bookkeeping; ship()
+// itself never reads or returns it. The title is no longer needed because we
+// don't open PRs anymore.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
