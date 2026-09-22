@@ -323,6 +323,6 @@ test('both rollup dispatch sites feed statusWriteErrors — a failure does not v
 
 test('ship.mjs is given the full card id, not the short id — a short id cannot be pasted into brd show', () => {
   const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
-  assert.match(source, /ship\.mjs --repo \$\{repo\} --card \$\{card\}/)
-  assert.doesNotMatch(source, /ship\.mjs --repo \$\{repo\} --card \$\{id\}/)
+  assert.match(source, /ship\.mjs --card \$\{card\}/)
+  assert.doesNotMatch(source, /ship\.mjs --card \$\{id\}/)
 })

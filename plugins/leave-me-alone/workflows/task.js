@@ -729,11 +729,10 @@ Plan-Hash: $PLAN_HASH
 
 Do NOT push, do NOT open a PR.
 
-Return a structured result. This stage has THREE stop conditions, all above: an OPEN PR on \`${BRANCH}\`; a \`sha256sum\` that failed or gave an empty PLAN_HASH; a baseline suite already red before you changed anything. Reporting one of those in prose while claiming success is the single worst outcome here — the pipeline would review, verify and open a PR on top of a stop you were told to make.
+Return a structured result. This stage has TWO stop conditions, both above: a \`sha256sum\` that failed or gave an empty PLAN_HASH; a baseline suite already red before you changed anything. Reporting one of those in prose while claiming success is the single worst outcome here — the pipeline would review and verify on top of a stop you were told to make.
 
 - blocked: true if ANY stop condition fired, or anything else made implementation impossible. false only if you completed the TDD work.
-- blockedReason: when blocked, ONE line naming which condition fired plus the concrete detail (the PR number, the command that failed, the tests already red). Empty when blocked=false.
-- existingPr: ONLY when an open PR on \`${BRANCH}\` is what stopped you — its number. Omit otherwise.
+- blockedReason: when blocked, ONE line naming which condition fired plus the concrete detail (the command that failed, the tests already red). Empty when blocked=false.
 - planHash: the exact 8-character lowercase-hex PLAN_HASH you computed above and used in every commit trailer.
 - resumed: true if you continued from existing Plan-Hash commits; false if you started fresh (path (a), or after a RESET).
 - report: the normal implementation report — commits made (oneline), test count added, deviations from the plan with reasons. The reviewer reads this next, so keep it factual and scoped to what you changed. Empty when blocked=true.
@@ -743,7 +742,7 @@ Do not set blocked=true for a difficulty you worked through and solved.`,
     type: 'object', required: ['blocked', 'report'],
     properties: {
       blocked: { type: 'boolean' }, blockedReason: { type: 'string' },
-      existingPr: { type: 'integer' }, resumed: { type: 'boolean' },
+      resumed: { type: 'boolean' },
       planHash: { type: 'string' },
       report: { type: 'string' },
     },
@@ -751,15 +750,10 @@ Do not set blocked=true for a difficulty you worked through and solved.`,
 if (!impl) throw new Error('implement agent died')
 
 // Implement's stop conditions used to be prose in a free-text return, so
-// nothing downstream could see them: the pipeline went on to review, verify and
-// open a PR on top of a stop it had been explicitly told about. `existingPr` is
-// deliberately NOT called `pr` — a blocking PR belongs to whatever else is
-// driving this branch, and putting it in the field the orchestrator reads as
-// "this subtask's PR" is exactly the kind of confusion that costs a milestone.
+// nothing downstream could see them: the pipeline went on to review and
+// verify on top of a stop it had been explicitly told about.
 if (impl.blocked) {
-  const stoppedOnPr = Number.isInteger(impl.existingPr) && impl.existingPr > 0
   return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
-    ...(stoppedOnPr ? { existingPr: impl.existingPr } : {}),
     detail: impl.blockedReason || 'implement stopped without naming a reason' }
 }
 
@@ -861,59 +855,17 @@ const verifyFlags = suiteCmds
   .map(command => `--verify ${JSON.stringify(command)}`)
   .join(' ')
 
-// ship.mjs now requires --title, and there is no module-scope place task.js
-// could have gotten it from — task.js's own identity is the card id, not its
-// title, and titles can change after Explore ran. Ship is a command-running
-// stage, so it reads the title fresh from brd rather than threading it
-// through every earlier stage's return value.
-const titleOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   cd ${repoDir} && brd show ${card}
-
-brd resolves its database by walking up from the CURRENT directory looking for a marker, so this must run from ${repoDir} — this workflow is repo-agnostic and the driving session may sit somewhere else entirely; without the \`cd\` this fails with ProjectNotFoundError.
-
-It prints one line of JSON (an envelope: {"ok":true,"data":{...}}) that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
-  { label: `card-title:${id}`, phase: 'Ship', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
-    type: 'object', required: ['stdout'],
-    properties: {
-      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
-      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
-    },
-  } })
-if (!titleOut) throw new Error('card-title agent died')
-
-let cardTitle
-try {
-  const envelope = JSON.parse(printableOnly(String(titleOut.stdout ?? '')))
-  const rawTitle = envelope && envelope.ok === true && envelope.data && typeof envelope.data.title === 'string'
-    ? envelope.data.title
-    : ''
-  // shellQuote is correct at the SHELL level, but the quoted result still
-  // lands inside a single prompt line the agent runs verbatim — a title
-  // containing a newline would split that line into a second, unintended
-  // command. Collapse all whitespace runs to one space rather than trusting
-  // a card's title to be single-line.
-  cardTitle = rawTitle.replace(/\s+/g, ' ').trim()
-  if (!cardTitle) throw new Error('brd show did not return a usable data.title')
-} catch (err) {
-  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `could not read this card's title from \`brd show ${card}\` (${err.message}) — ship.mjs requires --title and there is nowhere else to get it. First 200 characters: ${String(titleOut.stdout ?? '').slice(0, 200)}` }
-}
-
 // Ship used to be five-plus commands fenced in by prose: run every verification
 // command, judge whether they were green, push, open the PR with --head passed
 // explicitly, move the card. Only the last of those needed a model, and even
-// that only because a Workflow script cannot run `gh`.
-//
-// The PR title and body are DERIVED inside the script, never passed on the
-// command line except for --title itself, which is shell-quoted here — long
-// text an agent has to type is a quoting accident waiting to happen, and it
-// was the last place a model could alter what ships.
+// that only because a Workflow script cannot run `gh`. Nothing pushes or opens
+// a PR any more, so ship.mjs no longer takes a repo or a title.
 const shipOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/ship.mjs --repo ${repo} --card ${card} --title ${shellQuote(cardTitle)} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
+   bun ${scriptsDir}/ship.mjs --card ${card} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
 
 This command runs the FULL verification suite before it pushes anything, which can take several minutes on a large repo — the Bash tool's own default timeout (2 minutes) is too short for it. You MUST call the Bash tool for this command with an explicit timeout of 600000 (its 10-minute maximum). Do not omit that parameter and do not rely on the default.
 
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.`,
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.`,
   { label: `ship:${id}`, phase: 'Ship', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {
@@ -929,8 +881,8 @@ try {
 } catch (err) {
   // Parsed HERE so a mangled transcription fails at the boundary rather than
   // arriving as a plausible-looking success.
-  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `ship.mjs returned output that is not JSON (${err.message}). The branch may or may not have been pushed — check before re-running. First 200 characters: ${String(shipOut.stdout ?? '').slice(0, 200)}` }
+  return { card, blocked: 'ship', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `ship.mjs returned output that is not JSON (${err.message}). Check the worktree's git status before re-running. First 200 characters: ${String(shipOut.stdout ?? '').slice(0, 200)}` }
 }
 
 
@@ -942,19 +894,12 @@ if (!ship.passed) {
   return { card, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan, detail: ship.detail }
 }
 
-// ship.mjs already parsed the URL and refused to push after a red command, so
-// these read its fields rather than re-deriving anything.
-const prNumber = Number(ship.number)
-if (!Number.isInteger(prNumber) || prNumber <= 0) {
-  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: ship.detail || `verification passed but no usable PR number came back (url: ${String(ship.url ?? '').slice(0, 120)}). The branch ${ship.pushed ? 'WAS' : 'may not have been'} pushed — check before re-running.` }
-}
-
-// A PR is open — per the spec, that is what "done" means: a run never merges,
-// so it cannot observe anything later than "shipped", and "in_review" has no
-// occupant in this model. Deterministic, via rollup.mjs's own ancestry walk,
-// not a prompt asking a model to build GraphQL and reason out a parent rollup
-// itself. Best-effort: its failure must not change anything this stage returns.
+// Verification passed — per the spec, that is what "done" means: a run
+// never merges or pushes, so it cannot observe anything later than
+// "verified", and "in_review" has no occupant in this model. Deterministic,
+// via rollup.mjs's own ancestry walk, not a prompt asking a model to build
+// GraphQL and reason out a parent rollup itself. Best-effort: its failure
+// must not change anything this stage returns.
 const rollupOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
    bun ${scriptsDir}/rollup.mjs --card ${card} --status done --repo-dir ${repoDir} --compact
 
@@ -976,6 +921,6 @@ if (!rollupOut) {
   statusWriteErrors.push(msg)
 }
 
-return { card, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan,
+return { card, branch: BRANCH, worktree: WORKTREE, plan,
   tests: (ship.verified || []).map(v => `${v.ok ? 'PASS' : 'FAIL'} ${v.command}`).join('\n'),
   ...statusWriteOutcome(statusWriteErrors) }

@@ -815,9 +815,6 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
           : `task.js stopped at ${blocked}: ${dispatched.detail || dispatched.reason || 'no detail given'}`)
       : 'task.js returned nothing'
     const attempts = [{ attempt: 0, resolved: false, detail: why }]
-    if (dispatched && dispatched.existingPr) {
-      attempts.push({ attempt: 0, resolved: false, detail: `a PR (#${dispatched.existingPr}) already exists on branch ${branch} and is being driven by something other than this run` })
-    }
     halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, baseBranch: stackBase, trigger, attempts }))
     return { subtask: subtask.id, escalated: true }
   }
