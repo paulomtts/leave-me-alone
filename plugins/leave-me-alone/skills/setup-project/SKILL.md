@@ -46,15 +46,13 @@ brd init
 
 See "`brd init` — the precondition everything depends on" below before assuming this is a formality.
 
-**3. `gh` is authenticated, for pull requests only.**
+**3. `gh` is authenticated — needed only if a human plans to push this work and open a PR themselves afterward, or for `setup-report`'s CI check.**
 
 ```bash
 gh auth status
 ```
 
-The workflows still open PRs with `gh`, so it must be authenticated — but **no project-scoped grant
-is needed any more**. If an old setup left `gh` authenticated with extra scopes for board access,
-that's harmless but no longer required; a plain `gh auth login` covers everything the workflows use.
+**DRIVE runs never call `gh`**. Each subtask is verified and committed to its local branch — nothing is pushed during a run. The orchestrator's Integrate phase then merges all stories into one local branch; a human runs `git merge <that branch>` into `main`/`master` themselves. If you do not plan to push/open PRs yourself, `gh` does not need to be present or authenticated; if you do, a plain `gh auth login` covers everything you'll need.
 
 ## `brd init` — the precondition everything depends on
 
@@ -150,9 +148,9 @@ the one case where `branchPrefix` can be omitted — it then defaults to `m12`.
 No `project` argument — there is nothing left to resolve or pass.
 
 It returns the discovered test/lint commands, the dependency levels, and the ordered subtask list per
-story — each with a `prTargets` field naming the branch that subtask's PR will target. **Read that
-column.** Each subtask should target the previous one's branch, and each story's first subtask should
-target its blocker's tip (or `baseBranch` if it has none). A story rooted at `baseBranch` when it has
+story — each with a `base` field naming the branch that subtask builds on. **Read that
+column.** Each subtask should build on the previous one's branch, and each story's first subtask should
+build on its blocker's tip (or `baseBranch` if it has none). A story rooted at `baseBranch` when it has
 a blocker means the `blocked_by` edge is missing, and the story will be built against a base that has
 never seen the code it depends on.
 

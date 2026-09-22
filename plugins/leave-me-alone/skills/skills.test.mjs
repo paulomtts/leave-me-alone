@@ -50,6 +50,18 @@ test('the skills describe the status model that actually ships', () => {
   }
 })
 
+test('the skills no longer promise PR-based done and describe local-only completion', () => {
+  for (const name of ['setup-project', 'setup-milestone']) {
+    const source = read(name)
+    // Task 8: moved DRIVE from PR-based completion ("done means the PR is open")
+    // to local-only ("done means verified and committed to the local branch —
+    // nothing is pushed"). The Integrate phase merges stories into one local branch;
+    // a human merges that into main/master themselves.
+    assert.doesNotMatch(source, /done means (the|that) (a |)PR is open/i, `${name} still promises PR-based done`)
+    assert.match(source, /verified and committed|local branch/i, `${name} does not describe local-only completion`)
+  }
+})
+
 const root = readFileSync(fileURLToPath(new URL('../../../README.md', import.meta.url)), 'utf8')
 
 test('the root README tells an operator to run brd init', () => {
@@ -71,7 +83,7 @@ test('setup-milestone owns the two rules nothing in code enforces at creation', 
 test('setup-milestone keeps the judgment that is the actual product', () => {
   const source = read('setup-milestone')
   // Cheap canaries for the sections a mechanical rewrite would strip.
-  assert.match(source, /one subtask = one green PR/i)
+  assert.match(source, /one subtask = one green (?:PR|local branch)/i)
   assert.match(source, /file-disjoint/i)
   assert.match(source, /Subtasks that ship no behavior/i)
 })

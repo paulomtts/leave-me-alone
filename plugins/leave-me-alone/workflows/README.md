@@ -96,14 +96,15 @@ Workflow({ scriptPath: "<repo>/workflows/orchestrator.js" }, args: {
 |---|---|---|
 | Configure | 0 | nothing to resolve; there is no board. Detect (below) is already dispatched by this point |
 | Detect | 1 | `detect.mjs` → the census, plus the run's single fetch/prune, plus verification-command discovery |
-| — | 0 | cycles, levels, branch names, PR bases, PR matching, verification filtering |
+| — | 0 | cycles, levels, branch names, branch bases, branch matching, verification filtering |
 | Dispatch | 0 | `workflow(task.js)` per subtask — the agents are all inside `task.js` |
+| Integrate | 1 | merge every story's tip into one local branch (only when the milestone is clean). A human then runs `git merge <branch>` into `main`/`master` themselves. |
 
 ### dryRun
 
 Returns the discovered verification commands, the dependency levels, and per subtask its `branch` and
-**`prTargets`**. Read that column: each subtask should target the previous one's branch, and a
-story's first subtask should target its blocker's tip. A blocked story rooted at `baseBranch` means a
+**`base`**. Read that column: each subtask should build on the previous one's branch, and a
+story's first subtask should build on its blocker's tip. A blocked story rooted at `baseBranch` means a
 missing `blockedBy` edge.
 
 ## task
@@ -162,12 +163,10 @@ Decisions live in the script, off values the agents merely report:
 
 ## Why per-subtask, not per-story
 
-One subtask = one branch = one worktree = one PR. A story is a grouping that supplies *ordering*: its
-subtasks run sequentially, each branch cut from the previous one's, producing a stack a human merges
-bottom-up. Stories in the same dependency level run in parallel, in separate worktrees.
+One subtask = one branch = one worktree. A story is a grouping that supplies *ordering*: its
+subtasks run sequentially, each branch cut from the previous one's, producing a stack on local branches. Stories in the same dependency level run in parallel, in separate worktrees.
 
-Nothing is merged during a run. "Done" means "has a PR against the right base" — a PR against the
-wrong base counts as **not** done, deliberately.
+Nothing is pushed during a run. "Done" means "verified and committed to its local branch" — nothing is pushed. The orchestrator's Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves, deliberately.
 
 ## Notes
 

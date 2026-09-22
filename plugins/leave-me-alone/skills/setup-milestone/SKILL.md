@@ -7,7 +7,7 @@ description: Use when turning an agreed spec into a milestone with story cards a
 
 Milestone = a top-level `brd` card (no parent). Story = a card parented to the milestone
 (`--parent <milestone id>`). Subtask = a card parented to a story (`--parent <story id>`) — a real
-card the workflows can dispatch, verify, and open a PR for, never a body checklist. `brd`'s hierarchy
+card the workflows can dispatch, verify, and commit to its local branch, never a body checklist. `brd`'s hierarchy
 IS the board: there is no label or view to get wrong, but a card created with the wrong `--parent` is
 just as invisible to the story it should belong to.
 
@@ -36,9 +36,9 @@ brd list --status todo      # spot-check titles/descriptions of open work for th
 
 Also check project memory / repo docs for naming schemes. pyjinhx: titles `L<layer>.<story>.<n> <module>: <thing>`, story bodies = context + reading order (no checklists — `brd tree` already renders progress), subtask bodies = "Subtask of <parent id>." + one line.
 
-## Sizing: one subtask = one green PR
+## Sizing: one subtask = one green local branch
 
-Each subtask becomes one worktree, one branch, one PR, and one Review pass that must gate the whole diff. Size to that.
+Each subtask becomes one worktree, one branch, and one Review pass that must gate the whole diff. Size to that.
 
 **A subtask is right-sized when:**
 - its deliverable fits in one sentence with no "and"
@@ -113,7 +113,7 @@ story 3a4b5c6d  Document the checker's flags                        root: task-c
 Why it cuts this way:
 
 - **e5f6a7b8 before c9d0e1f2** — both touch the same argument parsing. Stacking means c9d0e1f2 builds on e5f6a7b8's parser instead of racing it. Two parallel stories here would conflict at merge time.
-- **e5f6a7b8 and c9d0e1f2 are separate**, not one "add both flags" card, because each is independently green and independently reviewable. The split costs one extra PR and buys two tight diffs.
+- **e5f6a7b8 and c9d0e1f2 are separate**, not one "add both flags" card, because each is independently green and independently reviewable. The split costs one extra branch and buys two tight diffs.
 - **7d8e9f0a is its own story, not a third subtask of a1b2c3d4**, because it is a different kind of work with a different footprint (`README`, not `scripts/`). As a story blocked by a1b2c3d4 it roots on `task-c9d0e1f2`, so its worktree contains both finished flags — it can document what was actually built.
 - **7d8e9f0a has no tests, and that is right.** Judged by the behavior-subtask rule it would look "too small" and get folded in; judged as docs, it is correctly sized.
 
@@ -175,7 +175,7 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
    integer instead (`milestone: 12`) is the one case where `branchPrefix` can be omitted — it then
    defaults to `m12`.
 
-   No `project` argument — `brd` resolves everything by walking the repo directory, per `setup-project`. Check the `prTargets` column: each subtask should target the previous subtask's branch, and each story's first subtask should target its blocker's tip (or the base, if unblocked). If that column is wrong, the breakdown is wrong — fix the board, not the workflow.
+   No `project` argument — `brd` resolves everything by walking the repo directory, per `setup-project`. Check the `base` column: each subtask should build on the previous subtask's branch, and each story's first subtask should build on its blocker's tip (or the base, if unblocked). If that column is wrong, the breakdown is wrong — fix the board, not the workflow.
 
 ## Gotchas
 
@@ -190,7 +190,7 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
 | A subtask that leaves the suite red until the next one lands | Every subtask's PR is verified alone. That split is invalid — move the boundary or merge the two halves. |
 | Folding in a docs/config/refactor card because "it has no tests" | That rule is for behavior-changing subtasks only. Judge these on their own terms — see "Subtasks that ship no behavior". |
 | A docs card written from the spec | It must read the actual implementation, which means it has to sit *after* that work in the stack. Name the files to read in its body. |
-| Expecting the run to merge anything | It does not. Each story becomes a stack of open PRs; a human merges bottom-up. A subtask's card reaches `done` when Ship opens its PR — that's the furthest state a run that never merges can honestly report, not proof anyone merged it. Its parent story's own status update is best-effort in the same way. |
+| Expecting the run to merge anything | It does not. Each story becomes a stack of committed local branches. A subtask's card reaches `done` when it is verified and committed to its local branch — nothing is pushed. The orchestrator's Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves. |
 | Subtasks not chained with `--blocked-by` | Order falls back to creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always chain a story's subtasks. |
 | Reordering subtasks after their PRs are open | The bases are derived from order, so reordering re-points them and the existing PRs read as `wrong-base` — i.e. not done. Re-target by hand or don't reorder. |
 | Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for PRs at a new address. It detects a merged PR under the old name and HALTS rather than re-implementing it, but only a re-run with the original prefix actually fixes it. |
