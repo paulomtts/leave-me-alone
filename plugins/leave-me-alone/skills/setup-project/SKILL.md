@@ -46,15 +46,13 @@ brd init
 
 See "`brd init` — the precondition everything depends on" below before assuming this is a formality.
 
-**3. `gh` is authenticated, for pull requests only.**
+**3. `gh` is authenticated — needed only if a human plans to push this work and open a PR themselves afterward, or for `setup-report`'s CI check.**
 
 ```bash
 gh auth status
 ```
 
-The workflows still open PRs with `gh`, so it must be authenticated — but **no project-scoped grant
-is needed any more**. If an old setup left `gh` authenticated with extra scopes for board access,
-that's harmless but no longer required; a plain `gh auth login` covers everything the workflows use.
+**DRIVE runs never call `gh`**. Each subtask is verified and committed to its local branch — nothing is pushed during a run. The orchestrator's Integrate phase then merges all stories into one local branch; a human runs `git merge <that branch>` into `main`/`master` themselves. If you do not plan to push/open PRs yourself, `gh` does not need to be present or authenticated; if you do, a plain `gh auth login` covers everything you'll need.
 
 ## `brd init` — the precondition everything depends on
 
@@ -85,15 +83,15 @@ Two consequences worth knowing before they surprise you:
 
 **Ordering — chain every subtask with `brd block <this-subtask-id> --by <previous-subtask-id>`.**
 Order decides the stack geometry: branch names are derived (`<branchPrefix>/task-<slug>-<shortid>`,
-matched by short id alone) and each subtask's PR targets the previous subtask's branch, so the order
-*is* the set of PR targets. That order comes from the `blocked_by` edges between sibling cards, not
+matched by short id alone) and each subtask's branch builds on the previous subtask's branch, so the order
+*is* the set of branch bases. That order comes from the `blocked_by` edges between sibling cards, not
 from the title — chain a story's subtasks (subtask 2 blocked-by subtask 1, subtask 3 blocked-by
 subtask 2, …) so the board states the order rather than encoding it in text. Ordinal-looking title
 prefixes (`11.1 `, `1.2 `) are optional decoration now — nothing parses them.
 
 Without a chain, independent siblings keep creation order, which detaching and re-attaching a child
-can change. That silently re-shapes the stack between runs, and PRs opened against the old shape then
-read as `wrong-base`. It works, but only for a milestone nobody ever touches.
+can change. That silently re-shapes the stack between runs, and branches created against the old shape then
+sit on the wrong parent. It works, but only for a milestone nobody ever touches.
 
 **`branchPrefix` is part of the milestone's identity.** It defaults to `m<milestone>` only when
 `milestone` is a positive integer (e.g. `milestone: 12` → `m12/task-<slug>-<shortid>`, worktree
@@ -104,10 +102,9 @@ explicitly (e.g. `branchPrefix: "m12"`).
 That grouping is for legibility and cleanup — `git branch --list "m12/*"`, `rm -rf
 .claude/worktrees/m12` — not for avoiding collisions, since each card's short id is already unique
 per board. Branch names are derived from the prefix, so changing it mid-milestone points the run at
-addresses where nothing exists. It will not quietly re-implement
-finished work — a merged PR found under the old name halts the run and names the prefix as the
-cause — but the only real fix is re-running with the prefix the milestone was built under. Never
-randomise or timestamp it.
+addresses where nothing exists. Nothing detects the work sitting at the old prefix's addresses — it
+reads as unstarted and gets silently re-dispatched onto a fresh branch, not halted. The only real
+fix is re-running with the prefix the milestone was built under. Never randomise or timestamp it.
 
 **Dependencies between stories** work the same way, one level up: a story's `blocked_by` edges order
 the dispatch levels, and they decide what branch each story's stack **roots on** — a blocked story
@@ -150,9 +147,9 @@ the one case where `branchPrefix` can be omitted — it then defaults to `m12`.
 No `project` argument — there is nothing left to resolve or pass.
 
 It returns the discovered test/lint commands, the dependency levels, and the ordered subtask list per
-story — each with a `prTargets` field naming the branch that subtask's PR will target. **Read that
-column.** Each subtask should target the previous one's branch, and each story's first subtask should
-target its blocker's tip (or `baseBranch` if it has none). A story rooted at `baseBranch` when it has
+story — each with a `base` field naming the branch that subtask builds on. **Read that
+column.** Each subtask should build on the previous one's branch, and each story's first subtask should
+build on its blocker's tip (or `baseBranch` if it has none). A story rooted at `baseBranch` when it has
 a blocker means the `blocked_by` edge is missing, and the story will be built against a base that has
 never seen the code it depends on.
 
@@ -250,10 +247,10 @@ bun ~/.claude/workflows/scripts/detect.mjs --repo OWNER/REPO --milestone "<card 
 | Trap | Reality |
 |---|---|
 | Expecting flat branch names | Only defaults for a numeric `milestone` (`m<milestone>`), so branches and worktrees nest per milestone. Pass `branchPrefix` explicitly for a flat scheme, or when `milestone` is a card id/title substring — it is used verbatim either way, and is required (not just overridable) for a non-numeric milestone. |
-| Adopting the milestone prefix on a milestone that already has merged PRs | Those PRs sit at the old addresses. The run finds them as near misses and HALTS rather than re-implementing them; finish that milestone under its original prefix. |
-| Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered. A merged PR under the old name halts the run with a message naming `branchPrefix`; re-run with the original prefix. |
+| Adopting the milestone prefix on a milestone that already has branches | Those branches sit at the old addresses. Nothing detects them or halts on your behalf — the run reads that work as unstarted and re-dispatches it onto a fresh branch; finish that milestone under its original prefix. |
+| Renaming a branch, or changing `branchPrefix`, mid-milestone | Branches are derived, never discovered, and nothing reconciles a branch under a changed prefix against one under the old name. `branchPrefix` must stay constant for a milestone's whole lifetime; re-run with the original prefix. |
 | Running a `brd`/workflow command from a worktree and expecting an isolated board | It isn't isolated — the `.brd` marker is untracked, so the walk-up finds the main checkout's marker and every worktree shares that one board. This is intentional (see `brd init` above), not a bug. |
 | Cloning this repo to a new machine and expecting the board to be there | It isn't — the board never left the machine it was created on. Run `brd init` in the new clone, and `brd import` a snapshot if you need the old cards — but that snapshot has to already exist: `brd tree <milestone> > snapshot.json` run **on the old machine before migrating**, or a `docs/board/<milestone>.json` a `setup-report` run (or that same manual command) produced earlier. Nothing writes a snapshot on its own after an orchestrator run — there is no automatic writer. |
 | A story with two `blocked_by` edges | The orchestrator can only root a stack on one parent. It stops the run rather than guessing which blocker to build from — chain them instead. |
-| Expecting a card per PR | One PR per **subtask**. |
-| Expecting `done` to mean merged | It doesn't. The run never merges, so a subtask's card reaching `done` reflects only that Ship opened its PR — that's the furthest state a run that never merges can honestly report. Its parent story's own status update is best-effort in the same way. |
+| Expecting a card per PR | One branch per **subtask** — DRIVE no longer opens PRs. A human merges the Integrate branch afterward. |
+| Expecting `done` to mean merged | It doesn't. The run never pushes anything. A subtask's card reaches `done` once Ship verifies its already-committed work on the local branch — that's the furthest state a run that never pushes can honestly report. The orchestrator's Integrate phase merges everything for the human. |

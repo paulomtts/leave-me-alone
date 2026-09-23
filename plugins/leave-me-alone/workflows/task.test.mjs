@@ -221,10 +221,10 @@ test('drift is not claimed when either hash is unusable', () => {
 
 // ── statusWriteOutcome ───────────────────────────────────────────────────────
 // A brd status write is best-effort (missing PATH entry, a denied permission
-// prompt, …) so it must never sink a subtask whose PR is already open and
-// green — but that failure must not vanish into a run that reads as fully
-// clean either. This is the fold that turns collected rollup errors into what
-// the caller reports.
+// prompt, …) so it must never sink a subtask whose work already shipped
+// successfully — but that failure must not vanish into a run that reads as
+// fully clean either. This is the fold that turns collected rollup errors
+// into what the caller reports.
 
 test('no status-write errors means the write is reported clean', () => {
   assert.deepEqual(statusWriteOutcome([]), { statusWritten: true })
@@ -323,6 +323,6 @@ test('both rollup dispatch sites feed statusWriteErrors — a failure does not v
 
 test('ship.mjs is given the full card id, not the short id — a short id cannot be pasted into brd show', () => {
   const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
-  assert.match(source, /ship\.mjs --repo \$\{repo\} --card \$\{card\}/)
-  assert.doesNotMatch(source, /ship\.mjs --repo \$\{repo\} --card \$\{id\}/)
+  assert.match(source, /ship\.mjs --card \$\{card\}/)
+  assert.doesNotMatch(source, /ship\.mjs --card \$\{id\}/)
 })

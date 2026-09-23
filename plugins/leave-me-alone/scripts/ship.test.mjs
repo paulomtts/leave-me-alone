@@ -1,23 +1,19 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, buildBody, verifyError, ship } from './ship.mjs'
+import { parseArgs, verifyError, ship } from './ship.mjs'
 
-const ARGS = ['--repo=o/n', '--card=a32af745', '--title=feat: write rows',
-              '--branch=m12/task-write-rows-a32af745', '--base=main', '--worktree=/wt', '--verify=npm test']
+const ARGS = ['--card=a32af745', '--branch=m12/task-write-rows-a32af745', '--base=main', '--worktree=/wt', '--verify=npm test']
 
 test('every required argument is checked at the door', () => {
   assert.equal(parseArgs(ARGS).card, 'a32af745')
-  for (const drop of ['--repo=o/n', '--card=a32af745', '--title=feat: write rows',
-    '--branch=m12/task-write-rows-a32af745', '--base=main', '--worktree=/wt']) {
+  for (const drop of ['--card=a32af745', '--branch=m12/task-write-rows-a32af745', '--base=main', '--worktree=/wt']) {
     assert.throws(() => parseArgs(ARGS.filter(a => a !== drop)), /ship needs/, `dropping ${drop}`)
   }
   assert.throws(() => parseArgs([...ARGS, '--wat']), /unknown argument/)
 })
 
-test('parseArgs takes a card short id and a required title', () => {
+test('parseArgs takes a card short id', () => {
   assert.equal(parseArgs(ARGS).card, 'a32af745')
-  assert.equal(parseArgs(ARGS).title, 'feat: write rows')
-  assert.throws(() => parseArgs(ARGS.filter(a => !a.startsWith('--title'))), /--title/)
   assert.throws(() => parseArgs(ARGS.filter(a => !a.startsWith('--card'))), /--card/)
 })
 
@@ -27,21 +23,7 @@ test('--verify repeats, and an empty suite is refused outright', () => {
   // The same stop task.js makes upstream, repeated because this script is also
   // usable standalone: zero commands would make every check below vacuous.
   assert.throws(() => parseArgs(ARGS.filter(a => a !== '--verify=npm test')),
-    /refusing to open a PR nothing verified/)
-})
-
-test('the body is built from the branch commits', () => {
-  const body = buildBody(['feat: a', '', 'test: b'], 'a32af745')
-  assert.match(body, /- feat: a/)
-  assert.match(body, /- test: b/)
-  assert.doesNotMatch(body, /- \n/)              // blank subjects dropped
-  assert.match(buildBody([], 'a32af745'), /no commit subjects found/)
-})
-
-test('the PR body references the card without implying a merge closes it', () => {
-  const body = buildBody(['feat: write rows'], 'a32af745')
-  assert.match(body, /brd card: a32af745/)
-  assert.doesNotMatch(body, /Closes #/)
+    /refusing to mark a card done nothing verified/)
 })
 
 // ── verifyError ──────────────────────────────────────────────────────────────
@@ -79,151 +61,43 @@ test('falls back to the bare error message when neither stream has content', () 
   assert.equal(verifyError(err), 'spawn ENOENT')
 })
 
-// A fake shell: matches on a fragment of the command, records order.
-const fake = (routes, log = []) => async (command, opts = {}) => {
-  const joined = Array.isArray(command) ? command.join(' ') : command
-  log.push(joined)
-  for (const [needle, reply] of routes) {
-    if (joined.includes(needle)) {
-      if (reply instanceof Error) throw reply
-      return { code: 0, stdout: reply, stderr: '' }
-    }
+test('the happy path verifies, then marks the card done — nothing is pushed', async () => {
+  const calls = []
+  const run = async (cmd) => {
+    calls.push(cmd)
+    if (Array.isArray(cmd) && cmd[0] === 'git' && cmd.includes('status')) return { stdout: '', stderr: '' }
+    return { stdout: 'ok', stderr: '' }
   }
-  return { code: 0, stdout: '', stderr: '' }
-}
-const OK = [
-  ['status --porcelain', ''],
-  ['npm test', 'ok\n'],
-  ['log origin/main..HEAD', 'feat: thing\ntest: thing\n'],
-  ['pr create', 'https://github.com/o/n/pull/77\n'],
-]
-
-test('the happy path verifies, pushes, then opens the PR — in that order', async () => {
-  const log = []
-  const got = await ship(parseArgs(ARGS), fake(OK, log))
-  assert.equal(got.passed, true)
-  assert.equal(got.pushed, true)
-  assert.equal(got.number, 77)
-  const order = log.map(c => c.includes('npm test') ? 'verify' : c.includes('push') ? 'push'
-    : c.includes('pr create') ? 'pr' : null).filter(Boolean)
-  assert.deepEqual(order, ['verify', 'push', 'pr'])
+  const result = await ship({ card: 'a1b2c3d4', branch: 'm1/task-x', base: 'master', worktree: '/wt', verify: ['npm test'] }, run)
+  assert.equal(result.passed, true)
+  assert.equal('pushed' in result, false)
+  assert.equal('url' in result, false)
+  assert.equal('number' in result, false)
+  assert.equal(calls.some(c => Array.isArray(c) && c.includes('push')), false, 'ship must never push')
+  assert.equal(calls.some(c => c === 'npm test' || (Array.isArray(c) && c.join(' ').includes('npm test'))), true)
 })
 
-test('a dirty worktree stops before anything runs', async () => {
-  const log = []
-  const got = await ship(parseArgs(ARGS), fake([['status --porcelain', ' M src/a.js'], ...OK], log))
-  assert.equal(got.passed, false)
-  assert.match(got.detail, /worktree is dirty/)
-  assert.equal(log.filter(c => c.includes('push')).length, 0)
-})
-
-test('a RED command means nothing is pushed', async () => {
-  // The guarantee the old prose version could only ask for.
-  const log = []
-  const routes = OK.map(([n, r]) => n === 'npm test' ? [n, new Error('1 failing')] : [n, r])
-  const got = await ship(parseArgs(ARGS), fake(routes, log))
-  assert.equal(got.passed, false)
-  assert.equal(got.pushed, false)
-  assert.equal(log.filter(c => c.includes('push') || c.includes('pr create')).length, 0)
-  assert.match(got.detail, /verification failed: npm test/)
-})
-
-test('a verify command that fails with diagnostics on stdout reports them, not just "Command failed"', async () => {
-  const err = new Error('Command failed: ./scripts/gate-frontend.sh')
-  err.stdout = 'Checking frontend assets...\nERROR: graph_canvas.js:241 unexpected token\n'
-  err.stderr = ''
-  const log = []
-  const routes = OK.map(([n, r]) => n === 'npm test' ? [n, err] : [n, r])
-  const got = await ship(parseArgs(ARGS), fake(routes, log))
-  assert.equal(got.passed, false)
-  assert.match(got.detail, /unexpected token/)
-})
-
-test('a later command failing still stops the push', async () => {
-  const args = parseArgs([...ARGS, '--verify=npm run lint'])
-  const routes = [...OK, ['npm run lint', new Error('lint error')]]
-  const log = []
-  const got = await ship(args, fake(routes.map(([n, r]) => n === 'npm run lint' ? [n, new Error('x')] : [n, r]), log))
-  assert.equal(got.passed, false)
-  assert.equal(log.filter(c => c.includes('push')).length, 0)
-})
-
-test('--head is always passed explicitly', async () => {
-  // Without it gh infers the head from the cwd; once opened a PR carrying five
-  // commits of unrelated work under this subtask's title.
-  const log = []
-  await ship(parseArgs(ARGS), fake(OK, log))
-  const create = log.find(c => c.includes('pr create'))
-  assert.match(create, /--head m12\/task-write-rows-a32af745/)
-  assert.match(create, /--base main/)
-})
-
-test('the title is used verbatim — ordinal prefixes are no longer a convention', async () => {
-  // Use this file's own existing fake-runner helper and its call-log
-  // convention, rather than introducing a second one. A title beginning with
-  // digits is the case the deleted titleFromIssue regex would have mangled.
-  const log = []
-  await ship({ ...parseArgs(ARGS), title: '1.2 feat: quoting' }, fake(OK, log))
-  const created = log.find(call => call.includes('pr create'))
-  assert.match(created, /1\.2 feat: quoting/)
-  assert.ok(!log.some(call => call.includes('issue view')), `looked the title up: ${log.join(' | ')}`)
-})
-
-test('a push that succeeds but yields no PR URL is reported, not silently passed', async () => {
-  const routes = OK.map(([n, r]) => n === 'pr create' ? [n, 'something went sideways'] : [n, r])
-  const got = await ship(parseArgs(ARGS), fake(routes))
-  assert.equal(got.passed, true)
-  assert.equal(got.pushed, true)
-  assert.equal(got.number, null)
-  assert.match(got.detail, /no usable PR URL/)
-})
-
-// ── retries: reads freely, writes carefully ──────────────────────────────────
-
-const NOWAIT = () => Promise.resolve()
-
-test('a flaky push is retried — pushing the same commits twice is a no-op', async () => {
-  let pushes = 0
-  const run = async (command, opts = {}) => {
-    const joined = Array.isArray(command) ? command.join(' ') : command
-    if (joined.includes('push')) { pushes += 1; if (pushes < 3) throw new Error('HTTP2 framing layer') }
-    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
-    return { code: 0, stdout: '', stderr: '' }
+test('a dirty worktree stops before verification runs', async () => {
+  const run = async (cmd) => {
+    if (Array.isArray(cmd) && cmd.includes('status')) return { stdout: ' M file.js\n', stderr: '' }
+    throw new Error('should not reach verification')
   }
-  const got = await ship(parseArgs(ARGS), run, NOWAIT)
-  assert.equal(got.number, 77)
-  assert.equal(pushes, 3)
+  const result = await ship({ card: 'a1b2c3d4', branch: 'm1/task-x', base: 'master', worktree: '/wt', verify: ['npm test'] }, run)
+  assert.equal(result.passed, false)
+  assert.match(result.detail, /dirty/)
 })
 
-test('a failed `pr create` does NOT retry — it asks what actually happened', async () => {
-  // A lost response after a successful create would make a blind retry open a
-  // SECOND PR for one branch, leaving the orchestrator two candidates.
-  let creates = 0
-  const run = async (command) => {
-    const joined = Array.isArray(command) ? command.join(' ') : command
-    if (joined.includes('pr create')) { creates += 1; throw new Error('timeout') }
-    if (joined.includes('pulls?state=open')) return { code: 0, stdout: '["https://github.com/o/n/pull/91"]', stderr: '' }
-    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
-    return { code: 0, stdout: '', stderr: '' }
+test('a RED verify command stops before a second one runs', async () => {
+  const seen = []
+  const run = async (cmd) => {
+    if (Array.isArray(cmd) && cmd.includes('status')) return { stdout: '', stderr: '' }
+    seen.push(cmd)
+    if (cmd === 'npm test') { const e = new Error('Command failed'); e.stdout = 'FAIL foo.test.js'; throw e }
+    return { stdout: 'ok', stderr: '' }
   }
-  const got = await ship(parseArgs(ARGS), run, NOWAIT)
-  assert.equal(creates, 1, 'must not retry the mutation')
-  assert.equal(got.number, 91, 'adopts the PR that already exists')
-  assert.match(got.detail, /using it rather than opening a second/)
-})
-
-test('a failed `pr create` with no PR afterwards is reported as a failure', async () => {
-  const run = async (command) => {
-    const joined = Array.isArray(command) ? command.join(' ') : command
-    if (joined.includes('pr create')) throw new Error('permission denied')
-    if (joined.includes('pulls?state=open')) return { code: 0, stdout: '[]', stderr: '' }
-    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
-    return { code: 0, stdout: '', stderr: '' }
-  }
-  const got = await ship(parseArgs(ARGS), run, NOWAIT)
-  assert.equal(got.number, null)
-  assert.equal(got.pushed, true)
-  assert.match(got.detail, /no PR exists/)
+  const result = await ship({ card: 'a1b2c3d4', branch: 'm1/task-x', base: 'master', worktree: '/wt', verify: ['npm test', 'npm run lint'] }, run)
+  assert.equal(result.passed, false)
+  assert.deepEqual(seen, ['npm test'], 'a red command must stop the suite, not run the rest')
 })
 
 test('verification commands are NEVER retried', async () => {
@@ -231,10 +105,11 @@ test('verification commands are NEVER retried', async () => {
   let runs = 0
   const run = async (command) => {
     const joined = Array.isArray(command) ? command.join(' ') : command
+    if (Array.isArray(command) && command.includes('status')) return { code: 0, stdout: '', stderr: '' }
     if (joined.includes('npm test')) { runs += 1; throw new Error('1 failing') }
     return { code: 0, stdout: '', stderr: '' }
   }
-  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  const got = await ship({ card: 'a1b2c3d4', branch: 'm1/task-x', base: 'master', worktree: '/wt', verify: ['npm test'] }, run)
   assert.equal(runs, 1)
   assert.equal(got.passed, false)
 })
@@ -245,15 +120,15 @@ test('captured output is flattened to printable text', async () => {
   // them back to raw control characters, and JSON.parse rejected the report --
   // after the PR had already been opened.
   const ESC = String.fromCharCode(27)
-  const coloured = `${ESC}[34m\u2139 duration_ms 302.9${ESC}[39m`
+  const coloured = `${ESC}[34mℹ duration_ms 302.9${ESC}[39m`
   const run = async (command) => {
     const joined = Array.isArray(command) ? command.join(' ') : command
+    if (Array.isArray(command) && command.includes('status')) return { code: 0, stdout: '', stderr: '' }
     if (joined.includes('npm test')) return { code: 0, stdout: coloured, stderr: '' }
-    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
     return { code: 0, stdout: '', stderr: '' }
   }
-  const got = await ship(parseArgs(ARGS), run, NOWAIT)
-  assert.equal(got.verified[0].tail, '\u2139 duration_ms 302.9')
+  const got = await ship({ card: 'a1b2c3d4', branch: 'm1/task-x', base: 'master', worktree: '/wt', verify: ['npm test'] }, run)
+  assert.equal(got.verified[0].tail, 'ℹ duration_ms 302.9')
   // The report must survive being serialized and decoded, which is what the
   // round trip through an agent actually does.
   const roundTripped = JSON.parse(JSON.stringify(got))
@@ -264,10 +139,10 @@ test('captured output is flattened to printable text', async () => {
 test('a long tail is capped — it is a hint, not a payload', async () => {
   const run = async (command) => {
     const joined = Array.isArray(command) ? command.join(' ') : command
+    if (Array.isArray(command) && command.includes('status')) return { code: 0, stdout: '', stderr: '' }
     if (joined.includes('npm test')) return { code: 0, stdout: 'x'.repeat(5000), stderr: '' }
-    for (const [needle, reply] of OK) if (joined.includes(needle)) return { code: 0, stdout: reply, stderr: '' }
     return { code: 0, stdout: '', stderr: '' }
   }
-  const got = await ship(parseArgs(ARGS), run, NOWAIT)
+  const got = await ship({ card: 'a1b2c3d4', branch: 'm1/task-x', base: 'master', worktree: '/wt', verify: ['npm test'] }, run)
   assert.ok(got.verified[0].tail.length <= 301, `tail was ${got.verified[0].tail.length}`)
 })

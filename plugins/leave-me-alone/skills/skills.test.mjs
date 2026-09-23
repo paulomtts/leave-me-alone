@@ -50,6 +50,30 @@ test('the skills describe the status model that actually ships', () => {
   }
 })
 
+test('the skills no longer promise PR-based done and describe local-only completion', () => {
+  // Task 8: moved DRIVE from PR-based completion to local-only ("verified and
+  // committed to the local branch — nothing is pushed"). The Integrate phase
+  // merges stories into one local branch; a human merges that into
+  // main/master themselves.
+  //
+  // Each file's REAL retired phrasing was different, so one shared regex
+  // checked against both files means at least one never actually got tested
+  // against its own old text — setup-milestone said "reaches `done` when Ship
+  // opens its PR"; setup-project said "reaching `done` reflects only that
+  // Ship opened its PR" (verified against the pre-migration text at
+  // `git show 7a77054:...SKILL.md`). A per-file table keeps each assertion
+  // honest about what that specific file used to say.
+  const oldPhrasings = [
+    { name: 'setup-milestone', oldPhraseRegex: /reaches `?done`? when Ship opens its PR/i },
+    { name: 'setup-project', oldPhraseRegex: /reaching `?done`? reflects only that Ship opened its PR/i },
+  ]
+  for (const { name, oldPhraseRegex } of oldPhrasings) {
+    const source = read(name)
+    assert.doesNotMatch(source, oldPhraseRegex, `${name} still promises PR-based done`)
+    assert.match(source, /verified and committed|local branch/i, `${name} does not describe local-only completion`)
+  }
+})
+
 const root = readFileSync(fileURLToPath(new URL('../../../README.md', import.meta.url)), 'utf8')
 
 test('the root README tells an operator to run brd init', () => {
@@ -71,7 +95,7 @@ test('setup-milestone owns the two rules nothing in code enforces at creation', 
 test('setup-milestone keeps the judgment that is the actual product', () => {
   const source = read('setup-milestone')
   // Cheap canaries for the sections a mechanical rewrite would strip.
-  assert.match(source, /one subtask = one green PR/i)
+  assert.match(source, /one subtask = one green (?:PR|local branch)/i)
   assert.match(source, /file-disjoint/i)
   assert.match(source, /Subtasks that ship no behavior/i)
 })

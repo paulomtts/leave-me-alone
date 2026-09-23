@@ -1,8 +1,8 @@
-// Shared plumbing for the deterministic `gh` scripts.
-//
-// These exist because a Workflow script cannot execute a command, so anything
-// that has to touch GitHub either runs out here or gets carried out by a model.
-// Out here is better: no latitude, no transcription, and testable.
+// Shared plumbing for this plugin's deterministic scripts — process
+// execution, JSON/text parsing, retries. Not gh-specific despite the
+// filename: gitRunner, jsonFrom, lastLine, readFlags etc. are used by scripts
+// that never touch GitHub. ghRunner/ghError/withRetries remain for whatever
+// still does (setup-report's CI check; a human's own later `gh pr merge`).
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'

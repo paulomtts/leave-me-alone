@@ -1,11 +1,12 @@
 export const meta = {
   name: 'orchestrator',
-  description: 'Drive a whole brd milestone on any repo as STACKED PULL REQUESTS (PRs stay on GitHub): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch/PR per subtask, each PR targeting the previous subtask\'s branch — and full-stop on escalation. NEVER merges anything: a story lands as a reviewable stack for a human to merge bottom-up.',
-  whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the prTargets column.',
+  description: 'Drive a whole brd milestone on any repo as LOCAL BRANCHES ONLY (nothing is pushed): compute the story dependency DAG from blockedBy, dispatch each level\'s stories in parallel — each story\'s subtasks run SEQUENTIALLY, one worktree/branch per subtask, stacked on its parent — and full-stop on escalation. On a fully clean milestone, a terminal Integrate phase merges every story into one local branch; a human merges that into main/master themselves. Never touches main/master itself.',
+  whenToUse: 'User asks to run a whole milestone end-to-end: "/orchestrator milestone 4", "run milestone 3 on refactor-nori". Preview first with dryRun and check the base column.',
   phases: [
     { title: 'Configure', detail: 'nothing to resolve; there is no board. Detect is already dispatched by this point', model: 'haiku' },
-    { title: 'Detect', detail: 'stories and blockedBy edges from brd, existing per-subtask PRs and their bases', model: 'haiku' },
+    { title: 'Detect', detail: 'stories and blockedBy edges from brd', model: 'haiku' },
     { title: 'Dispatch', detail: 'per-level pipeline over stories; each story\'s subtasks sequential, task.js once per subtask, stacked', model: 'sonnet' },
+    { title: 'Integrate', detail: 'only on a fully clean milestone: merge every story\'s tip into one local branch via integrate.mjs, resolving real conflicts with a dispatched agent; never touches main/master', model: 'sonnet' },
   ],
 }
 
@@ -73,27 +74,15 @@ function printableOnly(text) {
 
 // ── DAG / lock / escalation core ─────────────────────────────────────────────
 
-// STACKED MODE: nothing merges during a run, so "done" cannot mean "merged".
-// A subtask this run has finished has an OPEN PR against its own stack parent,
-// and its card is still open — the old rule (CLOSED issue AND merged PR) would
-// call every finished subtask unfinished and re-dispatch the whole stack.
-//
-// So: a subtask is done when a PR for it EXISTS against the correct base. The
-// base check is what makes this safe, and it happens in Detect (see the
-// 'wrong-base' sentinel) — a PR targeting the wrong branch is not evidence of
-// anything and must not read as done. That is the #1133 bug, and inverting this
-// rule without the base check would resurrect it immediately.
-//
-// A card marked `status: 'done'` with NO PR ever found still counts: that is
-// work closed as already-delivered or duplicate (#1145 on refactor-nori m21,
-// delivered incidentally by #1141), which must not be re-dispatched.
+// LOCAL-ONLY MODE: there is no external system (no PR, no GitHub) whose state
+// can diverge from brd's own. brd's `status` field is the single source of
+// truth for doneness — reads it directly, no reconciliation needed.
 //
 // Reads `status` — the field flattenMilestone() (census.mjs) actually emits.
 // There is no `state` anywhere in the census; a field nothing emits is worse
 // than no check at all.
 function isSubtaskDone(subtask) {
-  if (subtask.pr && typeof subtask.pr === 'object') return true
-  return subtask.pr === null && String(subtask.status ?? '').toLowerCase() === 'done'
+  return String(subtask.status ?? '').toLowerCase() === 'done'
 }
 
 // A story marked done is finished, full stop — never re-dispatch its subtasks.
@@ -112,23 +101,20 @@ function remainingSubtasks(story) {
   return (story.subtasks ?? []).filter(subtask => !isSubtaskDone(subtask))
 }
 
-// A story with zero remaining subtasks (every subtask already has an open PR
-// from a prior run, or the story itself is closed) never enters a dispatch
+// A story with zero remaining subtasks (every subtask already marked `done`
+// by a prior run, or the story itself is closed) never enters a dispatch
 // level — computeLevels drops it — so task.js never runs for it this run, and
 // nothing ever triggers rollup.mjs on its behalf. Its card, and the
 // milestone's, would keep whatever status they had, permanently.
 //
 // The fix is not a second status-writing path: it is triggering the one that
 // already exists. This picks WHICH subtask anchors that trigger — one
-// isSubtaskDone() already considers done (an open PR regardless of the
-// card's own status, or a card explicitly marked done with no PR), so
-// rollup.mjs re-asserting THAT subtask's own field is at worst a no-op and
-// only the walk up to its ancestors does real work. It is not a guarantee
-// the anchor's status field itself reads "done" — an open-PR subtask can
-// still show `todo` there; rollup.mjs recomputes every ancestor from the
-// story's REAL children regardless, so the ancestor writes stay correct
-// either way. Returns null when the story has nothing safe to anchor on (no
-// subtasks, or none individually done) — there is then nothing to reassert.
+// isSubtaskDone() already considers done, so rollup.mjs re-asserting THAT
+// subtask's own field is at worst a no-op and only the walk up to its
+// ancestors does real work. rollup.mjs recomputes every ancestor from the
+// story's REAL children regardless, so the ancestor writes stay correct.
+// Returns null when the story has nothing safe to anchor on (no subtasks, or
+// none individually done) — there is then nothing to reassert.
 // A story marked done itself (isStoryClosed) but whose subtasks are not
 // individually done still returns null here rather than anchoring on an
 // arbitrary one: reasserting a subtask's status the card does not actually
@@ -136,6 +122,28 @@ function remainingSubtasks(story) {
 // not an oversight.
 function storyRollupAnchor(story) {
   return (story.subtasks ?? []).find(isSubtaskDone) || null
+}
+
+// Shared topological engine: groups `stories` into dependency levels via
+// their blockedBy edges. Used both for DISPATCH (over pending stories only
+// — computeLevels) and INTEGRATE (over every story in the milestone —
+// computeIntegrateLevels), since only the INPUT set differs.
+function topologicalLevels(stories) {
+  const ids = new Set(stories.map(story => story.id))
+  const levels = []
+  const placed = new Set()
+  let rest = stories
+  while (rest.length > 0) {
+    const ready = rest.filter(story => (story.blockedBy ?? [])
+      .every(dep => !ids.has(dep) || placed.has(dep)))
+    if (ready.length === 0) {
+      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.id}`).join(', ')}`)
+    }
+    levels.push(ready)
+    for (const story of ready) placed.add(story.id)
+    rest = rest.filter(story => !placed.has(story.id))
+  }
+  return levels
 }
 
 function computeLevels(stories) {
@@ -147,24 +155,14 @@ function computeLevels(stories) {
   // the census's own array order is the only stable order available, so
   // pending stories keep it rather than being re-sorted.
   const pending = stories.filter(story => !doneIds.has(story.id))
-  const pendingIds = new Set(pending.map(story => story.id))
+  return topologicalLevels(pending)
+}
 
-  const levels = []
-  const placed = new Set()
-  let rest = pending
-  while (rest.length > 0) {
-    // A dep is satisfied when the upstream story is fully done (not pending)
-    // or placed in an earlier level.
-    const ready = rest.filter(story => (story.blockedBy ?? [])
-      .every(dep => !pendingIds.has(dep) || placed.has(dep)))
-    if (ready.length === 0) {
-      throw new Error(`orchestrator: dependency cycle among stories ${rest.map(story => `#${story.id}`).join(', ')}`)
-    }
-    levels.push(ready)
-    for (const story of ready) placed.add(story.id)
-    rest = rest.filter(story => !placed.has(story.id))
-  }
-  return levels
+// Every story in the milestone, done or not — a story finished in an
+// earlier run still needs its tip folded in, or a resumed milestone's
+// Integrate reports only its own slice as "the whole milestone".
+function computeIntegrateLevels(stories) {
+  return topologicalLevels(stories)
 }
 
 // ── stack geometry ──────────────────────────────────────────────────────────
@@ -184,11 +182,9 @@ function computeLevels(stories) {
 
 // Cycle detection over blockedBy, standing on its own.
 //
-// computeLevels also refuses to run on a cycle, but it cannot run first: its
-// doneness check reads each subtask's PR, and those are only trustworthy AFTER
-// Detect's normalization has rejected wrong-base ones — and that normalization
-// needs the stack geometry, which is what a cycle breaks. So the check lives
-// here, ahead of both.
+// computeLevels also refuses to run on a cycle, but it cannot run first: it
+// still needs the stack geometry to be sound, and a cycle is exactly what
+// breaks that geometry. So the check lives here, ahead of it.
 //
 // storyRoot's own `seen` guard is NOT sufficient: storyTip returns a branch
 // immediately when a story has subtasks, so a cycle between two populated
@@ -221,8 +217,8 @@ function assertNoBlockerCycles(stories) {
 // branchPrefix had changed. That made the geometry depend on the PRs and the
 // PR matching depend on the geometry — a circularity that produced two separate
 // bugs in one afternoon. Determinism is worth more than that resilience, so the
-// prefix is now treated as part of the milestone's identity: matchPr() reports
-// a merged PR under some OTHER name rather than silently ignoring it.
+// prefix is treated as part of the milestone's identity, full stop — no
+// reconciliation against an external system, because there is no longer one.
 function subtaskBranch(subtask, branchPrefix) {
   return taskBranch(branchPrefix, subtask)
 }
@@ -259,7 +255,7 @@ function storyRoot(story, storiesById, branchPrefix, baseBranch, seen = new Set(
   return storyTip(storiesById.get(blockers[0]), storiesById, branchPrefix, baseBranch, seen)
 }
 
-// The base each remaining subtask's PR targets: the previous subtask in the
+// The branch each remaining subtask stacks on: the previous subtask in the
 // story's FULL order, or the story's root for the first one.
 function stackBases(story, storiesById, branchPrefix, baseBranch) {
   const ordered = story.subtasks ?? []
@@ -297,159 +293,12 @@ async function mapWithConcurrency(items, limit, fn) {
   return results
 }
 
-function escalation({ level, story, subtask, pr, trigger, baseBranch, attempts }) {
+function escalation({ level, story, subtask, trigger, baseBranch, attempts }) {
   if (trigger !== 'tests' && trigger !== 'blocked') {
     throw new Error(`orchestrator: unknown escalation trigger "${trigger}" (expected "tests" or "blocked")`)
   }
-  const message = `orchestrator STOPPED: story #${story} subtask #${subtask} (level ${level}) could not be dispatched/verified against ${baseBranch} — trigger: ${trigger}. Nothing was merged; this run opens stacked PRs only. ${(attempts ?? []).length} note(s) recorded.`
-  return { escalated: true, level, story, subtask, pr, trigger, baseBranch, attempts: attempts ?? [], message }
-}
-
-// ── which PR belongs to a subtask ───────────────────────────────────────────
-// This was ~700 characters of prose in Detect's prompt, executed per subtask by
-// a haiku agent. It is pure string and number logic, and it is the exact rule
-// that produced the #1050 bug (prefix-exact matching orphaned every PR merged
-// under an earlier branch prefix, so finished work was re-dispatched and died
-// on an empty diff). A rule with that history belongs where it can be pinned
-// down by tests.
-//
-// Detect now fetches the PR list ONCE for the whole milestone and returns it
-// raw; the matching happens here, per subtask.
-
-// Not the matcher any more — the DIAGNOSTIC. Branches are derived, so this
-// checks whether some OTHER branch — outside the milestone's own prefix — ends
-// with this subtask's short id, which is what a changed branchPrefix looks
-// like: `aq-a1b2c3d4`, `wip/a1b2c3d4` and a bare `a1b2c3d4` are all near
-// misses for card a1b2c3d4…, while a DIFFERENT card's short id that merely
-// ends the same is not. matchPr() halts on a MERGED near miss rather than
-// re-implementing finished work (#1050); randomising or timestamping
-// branchPrefix would make every run one big near miss.
-//
-// Consistent with filterPullRequests() in detect.mjs (Task 6): both key on the
-// card's short id, never on the slug — a card's title can be edited after its
-// PR is open, and slug-based matching would orphan that PR. This is also why
-// matchPr()'s PRIMARY match below is id-scoped, not a literal string == against
-// the derived branch: the slug half of that derived name is mutable board
-// data, and an exact-string match would silently re-classify a live PR as
-// unstarted the moment someone edits a card's title mid-milestone.
-function prMatchesSubtask(ref, subtaskShortId) {
-  const text = String(ref ?? '')
-  const suffix = String(subtaskShortId)
-  if (suffix.length === 0 || !text.endsWith(suffix)) return false
-  const before = text[text.length - suffix.length - 1]
-  // Short ids are hex, so 'a'-'f' are legitimate id characters, not boundary
-  // punctuation. Checking only /[0-9]/ let …deadbeefa1b2c3d4 false-match short
-  // id a1b2c3d4 — 'f' isn't a digit, so the old check called it a boundary.
-  // Must stay /[0-9a-f]/i: widening further (letting 'g'-'z' or punctuation
-  // through) would start rejecting real boundaries like a leading '/' or '-'.
-  return before === undefined || !/[0-9a-f]/i.test(before)
-}
-
-// REST reports state lowercase and merged-ness as a merged_at timestamp;
-// GraphQL and `gh --json` report state uppercase and merged as a boolean.
-// Normalize once so nothing downstream depends on which path Detect took.
-function normalizePr(raw) {
-  const source = raw && typeof raw === 'object' ? raw : {}
-  return {
-    number: Number(source.number),
-    url: String(source.url ?? ''),
-    state: String(source.state ?? '').toUpperCase(),
-    merged: source.merged === true
-      || (typeof source.merged_at === 'string' && source.merged_at.length > 0),
-    ref: String(source.ref ?? ''),
-    base: String(source.base ?? ''),
-  }
-}
-
-// With the branch derived from the graph, matching is an EXACT lookup: the head
-// ref this run would create, on the base the graph says it targets. No suffix
-// preference, no ranking across bases, no pass ordering to get wrong.
-//
-// Returns { pr, note }. `pr` uses the sentinels the rest of this file
-// understands: an object (a real PR), null (no PR — unstarted work), the string
-// 'unknown' (doneness is unverifiable, which halts the run), or 'wrong-base' (a
-// PR exists on this branch but not on its stack parent, so it is not evidence
-// of doneness — #1133).
-function matchPr(subtaskShortId, expectedBranch, expectedBase, pulls, branchPrefix) {
-  const all = (pulls ?? []).map(normalizePr)
-  // Merged work first, then the most recent. Only ever applied WITHIN a group
-  // that already agrees on branch and base, so it can never override either.
-  const rank = (a, b) => (a.merged !== b.merged ? (a.merged ? -1 : 1) : b.number - a.number)
-
-  // The PRIMARY match: id-scoped, not a literal string ==. `expectedBranch`
-  // carries the card's slug, and a slug is mutable board data — a title edit
-  // must not orphan an open PR. Still scoped to THIS milestone's prefix, so a
-  // ref outside it (a changed branchPrefix) still falls through to the
-  // near-miss path below rather than being treated as a match. The anchor is
-  // `${branchPrefix}/`, not a bare startsWith(branchPrefix): "m1" is a STRING
-  // prefix of "m12/…", so an unanchored check let a PR under milestone m12
-  // answer for a run under m1 — taken as primary, failed the base check, and
-  // returned 'wrong-base', which bypasses the merged-near-miss halt below
-  // (the one guard that stops a run from re-implementing merged work).
-  const onBranch = all.filter(candidate =>
-    candidate.ref === expectedBranch
-    || (candidate.ref.startsWith(`${branchPrefix}/`) && candidate.ref.endsWith(`-${subtaskShortId}`)))
-  if (onBranch.length > 0) {
-    const onBase = onBranch.filter(candidate => candidate.base === expectedBase).sort(rank)
-    if (onBase.length > 0) return { pr: onBase[0], note: null }
-
-    const unreported = onBranch.find(candidate => !candidate.base)
-    if (unreported) {
-      return { pr: 'unknown',
-        note: `detect: PR #${unreported.number} for subtask ${subtaskShortId} reported no base branch — doneness is unverifiable` }
-    }
-    const best = [...onBranch].sort(rank)[0]
-    return { pr: 'wrong-base',
-      note: `detect: ignoring PR #${best.number} for subtask ${subtaskShortId} — base "${best.base}" is not its stack parent "${expectedBase}"` }
-  }
-
-  // Nothing on the derived branch. Before calling this unstarted, look for a PR
-  // sitting on some OTHER branch that ends with this subtask's short id — the
-  // signature of a changed branchPrefix (#1050). Ignoring those silently is what
-  // re-dispatched finished work onto an empty diff.
-  const nearMiss = all.filter(candidate => prMatchesSubtask(candidate.ref, subtaskShortId)).sort(rank)
-  const mergedElsewhere = nearMiss.find(candidate => candidate.merged)
-  if (mergedElsewhere) {
-    // Halting costs one re-run with the right prefix. Guessing costs the work.
-    return { pr: 'unknown',
-      note: `detect: subtask ${subtaskShortId} has a MERGED PR #${mergedElsewhere.number} on branch "${mergedElsewhere.ref}", `
-        + `but this run derives its branch as "${expectedBranch}". That is what a changed branchPrefix looks like `
-        + '(the default is now "m<milestone>"; a milestone built under a bare "task-" predates it). '
-        + 'Re-run with the branchPrefix this milestone was built under, or the finished work will be re-implemented.' }
-  }
-  if (nearMiss.length > 0) {
-    // Unmerged and under another name: a human's branch, or an abandoned
-    // attempt. Worth saying out loud, not worth halting the milestone.
-    return { pr: null,
-      note: `detect: subtask ${subtaskShortId} — ignoring unmerged PR #${nearMiss[0].number} on "${nearMiss[0].ref}"; `
-        + `this run works "${expectedBranch}"` }
-  }
-  return { pr: null, note: null }
-}
-
-// One pass, because the geometry no longer depends on the PRs. Mutates each
-// subtask's `pr` in place and RETURNS the notes to log, so this stays free of
-// harness globals.
-function attachPullRequests(stories, pulls, prLookupFailed, branchPrefix, baseBranch) {
-  const storiesById = new Map(stories.map(story => [story.id, story]))
-  const notes = []
-  for (const story of stories) {
-    // Computed even when the lookup failed: a multi-blocker shape is a human
-    // decision and must surface either way.
-    const expectedBases = stackBases(story, storiesById, branchPrefix, baseBranch)
-    for (const subtask of story.subtasks ?? []) {
-      if (prLookupFailed) { subtask.pr = 'unknown'; continue }
-      const { pr, note } = matchPr(
-        shortId(subtask.id),
-        subtaskBranch(subtask, branchPrefix),
-        expectedBases.get(subtask.id) || baseBranch,
-        pulls,
-        branchPrefix)
-      if (note) notes.push(note)
-      subtask.pr = pr
-    }
-  }
-  return notes
+  const message = `orchestrator STOPPED: story #${story} subtask #${subtask} (level ${level}) could not be dispatched/verified against ${baseBranch} — trigger: ${trigger}. Nothing was merged; work stays on local branches. ${(attempts ?? []).length} note(s) recorded.`
+  return { escalated: true, level, story, subtask, trigger, baseBranch, attempts: attempts ?? [], message }
 }
 
 // ── dropping verification commands that cannot run at the base ref ──────────
@@ -550,11 +399,12 @@ if (typeof nonce !== 'string' || nonce.length === 0) {
 }
 
 const DRY = opts.dryRun === true
-// This run NEVER merges. Each subtask gets a PR targeting the previous
-// subtask's branch, so a story lands as a reviewable stack that a human (or a
-// merge queue) merges bottom-up afterwards. `autoMerge` is gone: there is no
-// merge to opt out of, and accepting it silently would let an old invocation
-// believe merging still happens.
+// This run never touches main/master. Each subtask lands as its own local
+// branch, stacked on the previous subtask's branch; a fully clean milestone's
+// Integrate phase folds every story's tip into one local integration branch,
+// which a human merges into main/master themselves afterwards. `autoMerge` is
+// gone: there is no merge-to-main to opt out of, and accepting it silently
+// would let an old invocation believe that still happens.
 if (opts.state !== undefined) {
   throw new Error(
     'orchestrator: args.state is no longer supported. It let a caller hand over a census taken '
@@ -565,8 +415,9 @@ if (opts.state !== undefined) {
 
 if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
   throw new Error(
-    'orchestrator: args.autoMerge / args.maxResolveAttempts are no longer supported — this workflow opens '
-    + 'stacked PRs and never merges, so there is nothing to auto-merge and no conflicts to resolve mid-run.')
+    'orchestrator: args.autoMerge / args.maxResolveAttempts are no longer supported — this workflow only ever '
+    + 'stacks local branches during Dispatch and never merges into main/master, so there is nothing for these '
+    + 'to configure. Integrate\'s own conflict handling is not tunable via these flags.')
 }
 // Branch names carry their milestone: a subtask card of milestone 12 lives on
 // `m12/task-<slug>-<shortid>` (taskBranch()), worktree
@@ -581,7 +432,8 @@ if (opts.autoMerge !== undefined || opts.maxResolveAttempts !== undefined) {
 // An explicit branchPrefix is used verbatim, milestone and all — explicit means
 // explicit. Whatever it is, it must stay CONSTANT for the life of a milestone:
 // names are derived from it, so changing it points the run at addresses where
-// nothing exists (matchPr halts on a merged PR found under the old name).
+// nothing exists — a subtask done under the old prefix would read as unstarted
+// and get re-dispatched onto a fresh branch.
 const branchPrefix = resolveBranchPrefix(opts.branchPrefix, milestone, milestoneIsNumeric)
 const coauthor = typeof opts.coauthor === 'string' ? opts.coauthor : 'Claude <noreply@anthropic.com>'
 // Caps how many stories within one DAG level are in flight at once — separate
@@ -784,42 +636,8 @@ if (!Array.isArray(census.stories)) {
 }
 
 
-// Suffix matching is base-blind: a PR opened by mistake against another branch
-// still matches by head ref, and treating it as this subtask's own work is the
-// #1133 bug (PR #1150, head task-1133, base main, rediscovered as done across
-// many runs on paulomtts/refactor-nori). The base check is what makes doneness
-// trustworthy — and in stacked mode it carries even more weight, because
-// isSubtaskDone now accepts an OPEN PR as done.
-//
-// The expected base is per-subtask, not the milestone base: subtask N stacks on
-// N-1, and only a story's FIRST subtask targets the story root. Computed from
-// the full ordered list, so an already-done predecessor still supplies the base.
-// matchPullRequest() needs it, which is why matching happens inside this loop
-// rather than up front.
-const pullRequests = Array.isArray(census.pullRequests) ? census.pullRequests : []
-const prLookupFailed = census.prLookupFailed === true
-if (prLookupFailed) {
-  log('detect: the PR lookup failed after retries — every subtask is treated as unverifiable rather than unstarted')
-}
 const storiesById = new Map(census.stories.map(story => [story.id, story]))
 assertNoBlockerCycles(census.stories)
-for (const note of attachPullRequests(
-  census.stories, pullRequests, prLookupFailed, branchPrefix, baseBranch)) {
-  log(note)
-}
-
-// An "unknown" pr means the API did not answer, so doneness is genuinely
-// unknown — guessing either way is wrong (guess "pending" re-implemented
-// merged work twice on 2026-08-17). Stopping costs one re-run.
-const unknownPrs = census.stories.flatMap(story =>
-  (story.subtasks ?? []).filter(subtask => subtask.pr === 'unknown')
-    .map(subtask => `#${subtask.id} (story #${story.id})`))
-if (unknownPrs.length > 0) {
-  throw new Error(
-    `orchestrator: PR lookup failed for ${unknownPrs.length} subtask(s) — ${unknownPrs.join(', ')}. `
-    + 'Detect could not determine whether these are merged, so no dispatch is safe. '
-    + 'Re-run once the GitHub API is answering reliably.')
-}
 
 // Detect reports which paths are absent at origin/<base>; the dropping happens
 // here, out loud. Silence is what made the empty-suite bug survive a whole run.
@@ -868,17 +686,19 @@ if (DRY) {
           subtasks: remainingSubtasks(story).map(subtask => ({
             id: subtask.id, title: subtask.title, status: subtask.status,
             branch: subtaskBranch(subtask, branchPrefix),
-            // The whole point of a dry run in stacked mode: check this column.
-            prTargets: bases.get(subtask.id) || baseBranch,
-            prExisting: subtask.pr || null,
+            // The whole point of a dry run: check this column — the local
+            // branch this subtask stacks on (another subtask's branch, a
+            // story's root, or the milestone base).
+            base: bases.get(subtask.id) || baseBranch,
           })),
         }
       }),
     })),
     alreadyDone: census.stories.filter(story => remainingSubtasks(story).length === 0).map(story => story.id),
-    note: 'dryRun: nothing was dispatched, no GitHub write happened. One worktree/branch/PR per SUBTASK, '
-      + 'dispatched sequentially within each story. Each PR targets its stack parent (prTargets), NOT the milestone base — '
-      + 'verify that column before a real run. Nothing is ever merged.',
+    note: 'dryRun: nothing was dispatched, nothing was pushed. One worktree/branch per SUBTASK, '
+      + 'dispatched sequentially within each story. Each subtask stacks on its parent (the `base` column), NOT the milestone base directly — '
+      + 'verify that column before a real run. A clean milestone\'s stories are merged into one local branch by the Integrate phase; '
+      + 'nothing ever touches main/master automatically.',
   }
 }
 
@@ -928,17 +748,18 @@ It prints one line of JSON that the pipeline parses itself, so reformatting, pre
   }
 }
 
-if (levels.length === 0) {
-  return { repo, milestone, baseBranch, done: true, reason: 'every story on this milestone has zero remaining subtasks',
-    ...(staleRollupErrors.length > 0 ? { statusWriteFailures: staleRollupErrors.length } : {}) }
-}
+// levels.length === 0 (every story already has zero remaining subtasks) is
+// NOT a special case here any more — the level loop below simply does
+// nothing, and execution falls through to Integrate, which still needs to
+// run: a milestone finished entirely in earlier runs still needs every
+// story's tip folded into the integration branch by THIS run.
 
 // ── halt flag ────────────────────────────────────────────────────────────────
-// The merge lock that used to live here is gone with merging itself. It existed
-// to serialize `gh pr merge` across concurrently-running stories; stacked PRs
-// touch nothing shared, so there is nothing left to serialize. Sequencing WITHIN
-// a story still matters — subtask N+1 branches off N — and that is the plain
-// `for` loop in the level stage, not a lock.
+// The merge lock that used to live here is gone with merging-into-main itself.
+// It existed to serialize merges across concurrently-running stories; local
+// stacked branches touch nothing shared, so there is nothing left to
+// serialize. Sequencing WITHIN a story still matters — subtask N+1 branches
+// off N — and that is the plain `for` loop in the level stage, not a lock.
 let halted = null   // escalation payload; stops all NEW dispatch
 
 // Stories run concurrently, so two can escalate in the same tick — the FIRST
@@ -948,23 +769,14 @@ function halt(payload) {
 }
 
 // ── per-subtask stage ────────────────────────────────────────────────────────
-// One dispatch, one PR, no merge. `stackBase` is this subtask's parent branch —
-// the previous subtask's, or the story's root for the first one.
+// One dispatch, one local branch, no merge. `stackBase` is this subtask's
+// parent branch — the previous subtask's, or the story's root for the first one.
 async function runSubtask(levelIndex, story, subtask, stackBase) {
   if (halted) return { subtask: subtask.id, skipped: 'halted' }
 
   // Branch is always the freshly-derived name, never a resumed PR's real head
   // ref — see subtaskBranch's comment for why that was deliberately dropped.
   const branch = subtaskBranch(subtask, branchPrefix)
-
-  // A PR already exists against the right base, so this subtask is done for this
-  // run — Detect verified the base, and isSubtaskDone accepts it. Nothing to
-  // merge, nothing to close: the issue stays open and the card stays wherever
-  // task.js left it, until a human merges the stack.
-  if (subtask.pr && typeof subtask.pr === 'object') {
-    return { subtask: subtask.id, story: story.id, pr: subtask.pr.number, branch,
-      base: stackBase, stacked: true, note: 'PR already open against its stack parent — nothing to redo' }
-  }
 
   let dispatched = null
   let thrown = null
@@ -975,8 +787,8 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     //
     // baseBranch here is the STACK PARENT, not the milestone base. task.js uses
     // it for all three of: the worktree cut point, Review's diff base, and the
-    // PR target — which is exactly what stacking needs, and why task.js required
-    // no change for this mode.
+    // branch this subtask stacks on — which is exactly what stacking needs, and
+    // why task.js required no change for this mode.
     //
     // task.js now takes a brd card id (`card`) and the branch this run already
     // derived (`branch`), rather than a GitHub issue number and its own
@@ -997,12 +809,12 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     const hint = message.includes(taskScript)
       ? ` — task.js was not readable at ${taskScript}; pass args.taskScript if these workflows live elsewhere on this machine`
       : ''
-    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: null, baseBranch: stackBase, trigger: 'blocked',
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, baseBranch: stackBase, trigger: 'blocked',
       attempts: [{ attempt: 0, resolved: false, detail: `task workflow threw: ${message}${hint}` }] }))
     return { subtask: subtask.id, escalated: true }
   }
 
-  if (!dispatched || dispatched.refused || dispatched.blocked || !dispatched.pr) {
+  if (!dispatched || dispatched.refused || dispatched.blocked) {
     // task.js's `blocked` values are distinct failures and the detail differs in
     // what a human must do about it — `implement` from the Plan-Hash gate in
     // particular carries a do-NOT-re-run warning, because a re-run would
@@ -1013,37 +825,21 @@ async function runSubtask(levelIndex, story, subtask, stackBase) {
     const why = dispatched
       ? (dispatched.refused
           ? `task.js refused the issue: ${dispatched.reason || 'no reason given'}`
-          : blocked
-            ? `task.js stopped at ${blocked}: ${dispatched.detail || dispatched.reason || 'no detail given'}`
-            : `task.js returned no PR: ${JSON.stringify(dispatched)}`)
+          : `task.js stopped at ${blocked}: ${dispatched.detail || dispatched.reason || 'no detail given'}`)
       : 'task.js returned nothing'
     const attempts = [{ attempt: 0, resolved: false, detail: why }]
-    if (dispatched && dispatched.existingPr) {
-      attempts.push({ attempt: 0, resolved: false, detail: `a PR (#${dispatched.existingPr}) already exists on branch ${branch} and is being driven by something other than this run` })
-    }
-    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: dispatched && dispatched.pr, baseBranch: stackBase, trigger, attempts }))
+    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, baseBranch: stackBase, trigger, attempts }))
     return { subtask: subtask.id, escalated: true }
   }
 
-  // Belt and braces with task.js's own check: a non-numeric PR reference would
-  // corrupt the stack geometry every later subtask is computed from. PRs
-  // themselves are still real GitHub PRs with numeric identifiers — only the
-  // subtask/story identity moved to card ids.
-  const prNumber = Number(dispatched.pr)
-  if (!Number.isInteger(prNumber) || prNumber <= 0) {
-    halt(escalation({ level: levelIndex, story: story.id, subtask: subtask.id, pr: null, baseBranch: stackBase, trigger: 'blocked',
-      attempts: [{ attempt: 0, resolved: false, detail: `PR reference was not a number (${typeof dispatched.pr}) — refusing to stack the next subtask on it` }] }))
-    return { subtask: subtask.id, escalated: true }
-  }
-
-  // task.js's own status write is best-effort so a PR that is already open and
-  // green is never sunk by it — but that failure must not vanish into a `done:
+  // task.js's own status write is best-effort so a card that already closed
+  // clean is never sunk by it — but that failure must not vanish into a `done:
   // true` run whose board never actually moved. Carry it through verbatim.
   if (dispatched.statusWritten === false) {
-    log(`subtask ${subtask.id}: PR #${prNumber} is open, but the card's status was NOT written — ${dispatched.statusWriteError || '(no detail)'}`)
+    log(`subtask ${subtask.id}: done, but the card's status was NOT written — ${dispatched.statusWriteError || '(no detail)'}`)
   }
 
-  return { subtask: subtask.id, story: story.id, pr: prNumber,
+  return { subtask: subtask.id, story: story.id,
     branch: dispatched.branch || branch, base: stackBase, stacked: true, plan: dispatched.plan,
     statusWritten: dispatched.statusWritten !== false,
     ...(dispatched.statusWriteError ? { statusWriteError: dispatched.statusWriteError } : {}) }
@@ -1072,7 +868,7 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
       const stackBase = bases.get(subtask.id) || baseBranch
       const subtaskResult = await runSubtask(levelIndex, story, subtask, stackBase)
       out.push(subtaskResult)
-      // Subtask N+1 branches off N's PUSHED branch, so N must have produced one.
+      // Subtask N+1 branches off N's local branch, so N must have produced one.
       // Nothing is merged — `stacked` is the success signal now, not `merged`.
       if (!subtaskResult || subtaskResult.stacked !== true) break
     }
@@ -1083,7 +879,7 @@ for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
   // dispatch on top of a level that never finished.
   if (levelResults.some(result => result === null || result === undefined) && !halted) {
     halt({
-      escalated: true, level: levelIndex, story: null, subtask: null, pr: null, trigger: 'blocked', baseBranch, attempts: [],
+      escalated: true, level: levelIndex, story: null, subtask: null, trigger: 'blocked', baseBranch, attempts: [],
       message: `orchestrator STOPPED: level ${levelIndex} had a story lane die (returned null from mapWithConcurrency) with no escalation payload set — treating as a hard halt.`,
     })
   }
@@ -1097,9 +893,10 @@ if (halted) return { repo, milestone, baseBranch, mode: 'stacked', ...halted, co
   ...(staleRollupErrors.length > 0 ? { statusWriteFailures: staleRollupErrors.length } : {}) }
 
 // A status write is best-effort per subtask (see runSubtask) so it never sinks
-// an open, green PR — but `done: true` must not read as "the board updated"
-// when it didn't. Count what silently failed and say so, rather than letting
-// a clean-looking run hide a board still at `todo`.
+// a subtask whose work already shipped successfully — but `done: true` must
+// not read as "the board updated" when it didn't. Count what silently failed
+// and say so, rather than letting a clean-looking run hide a board still at
+// `todo`.
 const unwrittenSubtasks = results.flatMap(level => (level.stories ?? []))
   .flatMap(story => (story && story.subtasks) || [])
   .filter(subtask => subtask && subtask.statusWritten === false)
@@ -1110,12 +907,88 @@ const unwrittenSubtasks = results.flatMap(level => (level.stories ?? []))
 // the failure came from.
 const totalStatusWriteFailures = unwrittenSubtasks.length + staleRollupErrors.length
 
+// ── Integrate — merge every story's tip into one local branch ───────────────
+// Reached only when `halted` was never set (the check above already returned
+// otherwise) — i.e. every level finished dispatch without an escalation.
+// That structural placement, not a separate condition, is the eligibility
+// gate: see the brief's note on why this is not unit-tested in isolation.
+phase('Integrate')
+const integrationBranch = `${branchPrefix}-integrate`
+const integrationWorktree = `${repoDir}/.claude/worktrees/${integrationBranch}`
+
+// Every story in the milestone, in dependency order — including one already
+// done before this run started. A chained story's tip already contains its
+// blocker's commits via git ancestry, so merging an already-merged-in tip is
+// a safe no-op; nothing here needs to distinguish "already done" from "just
+// finished this run".
+const integrateOrder = computeIntegrateLevels(census.stories).flat()
+
+async function attemptIntegrate(story) {
+  const tip = storyTip(story, storiesById, branchPrefix, baseBranch)
+  const integrateOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
+   bun ${scriptsDir}/integrate.mjs --repo-dir ${repoDir} --worktree ${integrationWorktree} --integration-branch ${integrationBranch} --base-branch ${baseBranch} --merge-tip ${tip} --compact
+
+It prints one line of JSON that this pipeline parses itself — do not reformat, summarize, or truncate it. A non-zero exit is a normal answer — it means a merge conflict. Report it and stop.`,
+    { label: `integrate:${story.id}`, phase: 'Integrate', model: 'haiku', ...triggerAgent, schema: {
+      type: 'object', required: ['stdout'],
+      properties: { stdout: { type: 'string' }, error: { type: 'string' } },
+    } })
+  if (!integrateOut) throw new Error('integrate agent died')
+  try {
+    return { story, tip, ...JSON.parse(printableOnly(String(integrateOut.stdout ?? ''))) }
+  } catch (err) {
+    throw new Error(`integrate.mjs returned output that is not JSON (${err.message})`)
+  }
+}
+
+// Resolve, then re-verify with a SEPARATE dispatch — the resolver does not
+// grade its own work, same discipline as Validate/Review being split from
+// Implement. A resolved-and-verified conflict advances to the NEXT story;
+// only a failed resolution or failed re-verification stops the walk.
+let integrateEscalation = null
+for (let i = 0; i < integrateOrder.length && !integrateEscalation; i++) {
+  const integrated = await attemptIntegrate(integrateOrder[i])
+  if (!integrated.conflict) continue
+
+  const resolveOut = await callAgent(`A merge conflict is in progress at ${integrationWorktree}, merging ${integrated.tip} — conflicting files: ${integrated.files.join(', ')}.
+
+Read the conflicting files (with their conflict markers) AND read both sides' real diffs — \`git -C ${integrationWorktree} diff HEAD...${integrated.tip}\` and the equivalent against whatever is already merged into the integration branch — rather than resolving from the markers alone. Resolve every conflict so the result is correct for BOTH stories' intent, not just one that happens to win visually. Stage every resolved file with \`git -C ${integrationWorktree} add <file>\` and finish with \`git -C ${integrationWorktree} commit --no-edit\`. Do not run any other git command.`,
+    { label: `integrate-resolve:${integrated.story.id}`, phase: 'Integrate', model: 'opus', ...triggerAgent, schema: {
+      type: 'object', required: ['resolved', 'summary'],
+      properties: { resolved: { type: 'boolean' }, summary: { type: 'string' } },
+    } })
+
+  const verifyOut = resolveOut && resolveOut.resolved
+    ? await callAgent(`Verify the merge resolution at ${integrationWorktree} — a DIFFERENT concern from whether it resolved: run this repo's full verification suite there and report pass/fail. Do not fix anything; report only.
+${verification.fullSuite.map(cmd => `   ${cmd}`).join('\n')}`,
+        { label: `integrate-verify:${integrated.story.id}`, phase: 'Integrate', model: 'sonnet', ...triggerAgent, schema: {
+          type: 'object', required: ['passed', 'detail'],
+          properties: { passed: { type: 'boolean' }, detail: { type: 'string' } },
+        } })
+    : null
+
+  if (!verifyOut || !verifyOut.passed) {
+    integrateEscalation = { story: integrated.story, tip: integrated.tip, files: integrated.files,
+      detail: !resolveOut || !resolveOut.resolved ? 'resolution failed' : 'resolution did not verify' }
+  }
+  // else: resolved and verified — the outer for-loop advances to i+1.
+}
+
+if (integrateEscalation) {
+  return { repo, milestone, baseBranch, mode: 'stacked', escalated: true, phase: 'Integrate',
+    trigger: 'conflict', completed: results,
+    message: `orchestrator STOPPED at Integrate: a merge conflict between story #${integrateEscalation.story.id}'s tip and the integration branch could not be resolved (${integrateEscalation.detail}). `
+      + `Every original story branch is untouched. The attempted resolution, if any, is on ${integrationBranch} at ${integrationWorktree} for a human to inspect or finish.`,
+    integrateConflict: { story: integrateEscalation.story.id, tip: integrateEscalation.tip, files: integrateEscalation.files } }
+}
+
 return { repo, milestone, baseBranch, mode: 'stacked', done: true, levels: levels.length, completed: results,
+  integrated: { branch: integrationBranch, worktree: integrationWorktree },
   ...(totalStatusWriteFailures > 0 ? { statusWriteFailures: totalStatusWriteFailures } : {}),
-  note: 'Nothing was merged. Each story is a stack of open PRs, each targeting the previous subtask\'s branch; '
-    + 'merge each stack bottom-up. Subtask cards already sit at "done" — done means the PR is open, not that it is merged.'
+  note: `Milestone integrated onto local branch "${integrationBranch}" — nothing was pushed and main/master was not touched. `
+    + `A human merges it: git merge ${integrationBranch}.`
     + (unwrittenSubtasks.length > 0
-        ? ` WARNING: ${unwrittenSubtasks.length} subtask(s) shipped a PR but the card status write failed — the board did not update for them; see each subtask's statusWriteError.`
+        ? ` WARNING: ${unwrittenSubtasks.length} subtask(s) shipped but the card status write failed — the board did not update for them; see each subtask's statusWriteError.`
         : '')
     + (staleRollupErrors.length > 0
         ? ` WARNING: ${staleRollupErrors.length} already-complete stor${staleRollupErrors.length === 1 ? 'y' : 'ies'} could not be rolled up — see the log for the rollup error(s).`

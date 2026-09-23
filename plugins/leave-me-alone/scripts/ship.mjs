@@ -1,23 +1,20 @@
 #!/usr/bin/env node
 // Deterministic replacement for task.js's Ship agent.
 //
-// Ship ran five-plus commands fenced in by prose: run every verification
-// command, check they were green, push, open the PR with --head passed
-// EXPLICITLY (omitting it once opened a PR from an unrelated branch under this
-// subtask's title), then move the card. All of that is mechanical.
+// Ship runs every verification command, checks they were green, then reports
+// pass/fail. It never pushes and never opens a PR — this workflow never has,
+// since the migration off GitHub; the card reaches `done` on a local commit.
 //
-//   bun scripts/ship.mjs --repo o/n --card a32af745 --title "feat: write rows" \
-//     --branch m12/task-write-rows-a32af745 --base m12/task-write-columns-91a2 \
-//     --worktree /abs/wt --verify "npm test" --compact
+//   bun scripts/ship.mjs --card a32af745 --branch m12/task-write-rows-a32af745 \
+//     --base m12/task-write-columns-91a2 --worktree /abs/wt --verify "npm test" --compact
 //
-// The PR body is DERIVED, not passed: it comes from the branch's own commits,
-// plus a reference to the brd card. The title is passed verbatim — the caller
-// (task.js) already has the card's title in hand, so there is nothing to
-// derive it from and no round trip to make.
+// The card is accepted only for the caller's own logging/bookkeeping; ship()
+// itself never reads or returns it. The title is no longer needed because we
+// don't open PRs anymore.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { ghError, jsonFrom, lastLine, plainText, readFlags, withRetries } from './gh.mjs'
+import { ghError, lastLine, plainText, readFlags } from './gh.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -35,43 +32,22 @@ export function parseArgs(argv) {
     const take = () => { if (inline !== undefined) return inline; i += 1; return argv[i] }
     if (flag === '--verify') out.verify.push(take())
     else if (flag === '--compact') out.compact = true
-    else if (flag === '--repo') out.repo = take()
     else if (flag === '--card') out.card = take()
     else if (flag === '--branch') out.branch = take()
     else if (flag === '--base') out.base = take()
     else if (flag === '--worktree') out.worktree = take()
-    else if (flag === '--title') out.title = take()
     else throw new Error(`ship: unknown argument "${argv[i]}"`)
   }
   for (const [key, test, msg] of [
-    ['repo', v => typeof v === 'string' && /^[^/\s]+\/[^/\s]+$/.test(v), '--repo owner/name'],
     ['card', v => typeof v === 'string' && v.length > 0, '--card <shortid>'],
-    ['title', v => typeof v === 'string' && v.length > 0, '--title <string>'],
     ['branch', v => typeof v === 'string' && v.length > 0, '--branch <name>'],
     ['base', v => typeof v === 'string' && v.length > 0, '--base <name>'],
     ['worktree', v => typeof v === 'string' && v.startsWith('/'), '--worktree <absolute path>'],
   ]) if (!test(out[key])) throw new Error(`ship needs ${msg}`)
-  // An empty suite makes every check below vacuous — the same stop task.js
-  // makes before it ever gets here, repeated because this script is also usable
-  // on its own.
   if (out.verify.filter(Boolean).length === 0) {
-    throw new Error('ship needs at least one --verify <command>; refusing to open a PR nothing verified')
+    throw new Error('ship needs at least one --verify <command>; refusing to mark a card done nothing verified')
   }
   return out
-}
-
-export function buildBody(commitLines, card) {
-  const commits = (commitLines ?? []).map(l => String(l).trim()).filter(Boolean)
-  return [
-    commits.length ? commits.map(line => `- ${line}`).join('\n') : '- (no commit subjects found)',
-    '',
-    // NOT "Closes" — merging a PR does not and cannot change a brd card, and
-    // the card is already `done` by the time this body is written, because
-    // done means the PR is open.
-    `brd card: ${card}`,
-    '',
-    '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
-  ].join('\n')
 }
 
 // ghError only reads err.stderr, which is right for gh/git (they always put
@@ -92,14 +68,14 @@ export function verifyError(err) {
 }
 
 export async function ship(options, run = runner, wait) {
-  const { repo, card, branch, base, worktree, verify } = options
-  const result = { passed: false, verified: [], pushed: false, url: '', number: null, detail: '' }
+  const { branch, worktree, verify } = options
+  const result = { passed: false, verified: [], detail: '' }
 
-  // Nothing uncommitted may ship: git push does not carry a dirty tree, so the
-  // PR would silently lack the work.
+  // Nothing uncommitted may ship: a dirty tree means the branch does not yet
+  // carry the work it claims to.
   const status = await run(['git', '-C', worktree, 'status', '--porcelain'])
   if (String(status.stdout).trim()) {
-    result.detail = plainText(`worktree is dirty, so the PR would not contain this work: ${status.stdout.trim()}`, 600)
+    result.detail = plainText(`worktree is dirty, so the branch would not contain this work: ${status.stdout.trim()}`, 600)
     return result
   }
 
@@ -110,45 +86,10 @@ export async function ship(options, run = runner, wait) {
     } catch (err) {
       result.verified.push({ command, ok: false, tail: plainText(verifyError(err)) })
       result.detail = plainText(`verification failed: ${command} — ${verifyError(err)}`, 600)
-      return result   // nothing is pushed after a red command
+      return result   // nothing is marked done after a red command
     }
   }
   result.passed = true
-
-  // Pushing the same commits twice is a no-op, so this retries freely.
-  await withRetries('ship: push', () => run(['git', '-C', worktree, 'push', '-u', 'origin', branch]), { wait })
-  result.pushed = true
-
-  const subjects = String(
-    (await run(['git', '-C', worktree, 'log', `origin/${base}..HEAD`, '--format=%s'])).stdout).split('\n')
-
-  // --head EXPLICITLY: without it gh infers the head branch from whatever is
-  // checked out in the current directory, and once opened a PR carrying five
-  // commits of unrelated work under this subtask's title.
-  // NOT retried like the reads above. `gh pr create` is a mutation: a lost
-  // response after a successful create means a blind retry opens a SECOND PR
-  // for the same subtask, and the orchestrator would then have two candidates
-  // for one branch. So on failure, ask GitHub what actually happened.
-  let url = ''
-  try {
-    url = lastLine((await run(['gh', 'pr', 'create', '--repo', repo, '--base', base, '--head', branch,
-      '--title', options.title, '--body', buildBody(subjects, card)])).stdout)
-  } catch (err) {
-    const existing = jsonFrom((await withRetries('ship: post-failure PR check',
-      () => run(['gh', 'api', `repos/${repo}/pulls?state=open&per_page=100`,
-        '--jq', `[.[] | select(.head.ref=="${branch}") | .html_url]`]), { wait })).stdout)
-    if (Array.isArray(existing) && existing.length > 0) {
-      url = String(existing[0])
-      result.detail = `pr create reported "${ghError(err)}", but a PR on ${branch} exists — using it rather than opening a second`
-    } else {
-      result.detail = `pr create failed and no PR exists on ${branch}: ${ghError(err)}`
-      return result
-    }
-  }
-  result.url = url
-  const match = result.url.match(/\/pull\/(\d+)\b/)
-  result.number = match ? Number(match[1]) : null
-  if (!result.number) result.detail = `pushed, but no usable PR URL came back: ${result.url.slice(0, 200)}`
   return result
 }
 
@@ -156,5 +97,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const options = parseArgs(process.argv.slice(2))
   const result = await ship(options)
   process.stdout.write(`${options.compact ? JSON.stringify(result) : JSON.stringify(result, null, 2)}\n`)
-  if (!result.passed || !result.number) process.exitCode = 1
+  if (!result.passed) process.exitCode = 1
 }

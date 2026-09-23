@@ -1,6 +1,6 @@
 export const meta = {
   name: 'task',
-  description: 'Drive ONE subtask card end-to-end in its own worktree/branch: explore, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification, and a PR. Repo-agnostic: repo and verification commands are arguments or discovered at runtime. Stops at PR — never merges.',
+  description: 'Drive ONE subtask card end-to-end in its own worktree/branch: explore, spec, TDD implementation plan, adversarial validation, strict-TDD implementation, review, full verification. Repo-agnostic: repo and verification commands are arguments or discovered at runtime. Nothing is pushed; the card reaches `done` once its work is verified and committed to its branch — never merges.',
   whenToUse: 'User asks to work a subtask card: "/task 251", "pick up #252", "run the task workflow on 253". Also invoked per subtask, sequentially within a story, by the orchestrator workflow.',
   phases: [
     { title: 'Explore', detail: 'card + parent story + repo docs; discover this repo\'s test/lint/typecheck commands; card status -> in_progress', model: 'sonnet' },
@@ -10,7 +10,7 @@ export const meta = {
     { title: 'Validate', detail: 'adversarial plan review against the spec, fixes folded into the plan file', model: 'sonnet' },
     { title: 'Implement', detail: 'worktree + strict TDD, granular commits', model: 'sonnet' },
     { title: 'Review', detail: 'branch diff review, test-integrity gate, lint; fixes committed here; unresolved blockers stop the run', model: 'opus' },
-    { title: 'Ship', detail: 'clean-tree check + full verification, then push and open the PR (no merge); card status -> done', model: 'haiku' },
+    { title: 'Ship', detail: 'clean-tree check + full verification; card status -> done once verified and committed (nothing pushed, no PR)', model: 'haiku' },
   ],
 }
 
@@ -56,8 +56,8 @@ function shellQuote(value) {
 }
 
 // An empty suite makes every downstream gate vacuous: Ship runs nothing and
-// reports passed=true, Review has no red/green to work against, and the PR
-// opens unverified. Observed on a run whose base branch documented no commands
+// reports passed=true, Review has no red/green to work against, and the card
+// reaches `done` unverified. Observed on a run whose base branch documented no commands
 // — the Ship agents happened to improvise and find the tests themselves, which
 // is luck, not design, and their prompt explicitly tells them NOT to substitute
 // commands. Fail loudly instead, with a deliberate opt-out for repos that
@@ -165,7 +165,7 @@ function reviewGate(review, branch, baseBranch) {
   if (porcelain.length > 0) {
     return {
       blocked: 'tests',
-      detail: `worktree still dirty after review, so the PR would not contain this work (nothing was pushed):\n${porcelain}`,
+      detail: `worktree still dirty after review, so this subtask's commit would not contain this work (nothing was pushed):\n${porcelain}`,
     }
   }
 
@@ -194,10 +194,10 @@ function reviewGate(review, branch, baseBranch) {
 }
 
 // A status write (rollup.mjs, via a trigger agent) is best-effort: its failure
-// must not sink a subtask whose PR is already open and green. But it must not
-// vanish silently either, or a run reports success while the board never
-// moved. Fold the collected errors (zero, one, or two — Explore's in_progress
-// write and Ship's done write) into what the caller returns.
+// must not sink a subtask whose work already shipped successfully. But it
+// must not vanish silently either, or a run reports success while the board
+// never moved. Fold the collected errors (zero, one, or two — Explore's
+// in_progress write and Ship's done write) into what the caller returns.
 function statusWriteOutcome(errors) {
   const list = errors ?? []
   return list.length === 0
@@ -235,7 +235,7 @@ if (typeof repoDir !== 'string' || !repoDir.startsWith('/')) {
 // would silently target the wrong integration branch.
 const baseBranch = opts.baseBranch
 if (typeof baseBranch !== 'string' || baseBranch.length === 0) {
-  throw new Error('task workflow needs args.baseBranch (the branch this subtask\'s PR will target)')
+  throw new Error('task workflow needs args.baseBranch (the branch this subtask stacks on)')
 }
 
 // Where the deterministic helpers live. Same wiring as the orchestrator's
@@ -277,8 +277,8 @@ const WORKTREE = `${repoDir}/.claude/worktrees/${BRANCH}`
 // executes, so it cannot see this — it took a live milestone to find.
 //
 // Plans and specs live in the superpowers folders INSIDE THE WORKTREE, with a
-// DETERMINISTIC filename, so each subtask's PR carries the spec and plan it was
-// built from and a reviewer can see all three together.
+// DETERMINISTIC filename, so each subtask's own commits carry the spec and plan
+// it was built from and a reviewer can see all three together.
 //
 // That is why the worktree is created before Spec rather than inside Implement:
 // the first stage that writes needs somewhere to write. It also makes the
@@ -325,21 +325,24 @@ const DRY = opts.dryRun === true
 
 // ── doneness is the CALLER's question, not this workflow's ──────────────────
 // This file assumes it was handed work that still needs doing, and it does not
-// check. Deciding whether this card is already merged, already has an open PR,
-// or targets the wrong base is orchestrator.js's job: its Detect step
-// suffix-matches every subtask's PR, drops any whose base is not this run's
-// baseBranch, and aborts outright when the API will not answer; runSubtask then
-// routes merged subtasks to bookkeeping and open-PR subtasks straight to merge,
-// so task.js is only ever invoked for work with no live PR.
+// check. Deciding whether this card is already done is orchestrator.js's job:
+// it reads brd's own `status` field directly (isSubtaskDone / isStoryClosed —
+// there is no external system whose state can diverge from brd's own any
+// more), and computeLevels drops any story with nothing remaining before this
+// workflow is ever dispatched for it — so task.js is only ever invoked for
+// work brd itself still calls not-done.
 //
-// An earlier version re-asked that same question here, as its own dispatch. It
-// could only ever answer "nothing found" under the orchestrator, and having two
-// files decide doneness meant two places to keep the base-branch rule correct —
-// the #1133 bug (PR #1150, head task-1133, base main, rediscovered as done for
-// many runs) had to be fixed in both. One owner, one rule.
+// An earlier version re-asked that same question here, as its own dispatch
+// against GitHub PR state. It could only ever answer "nothing found" under
+// the orchestrator, and having two files decide doneness against an external
+// system meant two places to keep a base-branch rule correct — the #1133 bug
+// (PR #1150, head task-1133, base main, rediscovered as done for many runs)
+// had to be fixed in both. That whole class of bug went away with the PR
+// dependency itself: one status field, one owner, one rule.
 //
 // The time gap between Detect and this run is covered where it actually
-// matters: Implement re-checks for a live PR on the branch before touching it.
+// matters: Implement re-checks the branch's own commits (via the Plan-Hash
+// trailer) before touching it, rather than trusting Detect's snapshot.
 
 // agent() can throw when the model returns without calling StructuredOutput —
 // a transient harness fault, not a real blocker. Retry exactly once with an
@@ -361,7 +364,7 @@ async function callAgent(prompt, agentOpts) {
 // Free-text stage returns get pasted verbatim into the NEXT stage's prompt. A
 // stage that goes off the rails returns pages of prose instead of a summary,
 // and an oversized/garbled prompt built from it is exactly what got
-// classifier-blocked and halted a milestone once (see the PR stage's own guard
+// classifier-blocked and halted a milestone once (see the Ship stage's own guard
 // at the bottom of this file). Cap every such interpolation — the untruncated
 // text is still in the journal, so nothing is actually lost for debugging.
 function clip(text, max, what) {
@@ -384,9 +387,9 @@ function printableOnly(text) {
 }
 
 // A status-write failure (brd missing from the trigger agent's PATH, a denied
-// permission prompt, …) must not sink a subtask whose PR is already open and
-// green — but it must not silently no-op either, or a run reports `done: true`
-// with a board still entirely at `todo`. So every rollup dispatch is
+// permission prompt, …) must not sink a subtask whose work already shipped
+// successfully — but it must not silently no-op either, or a run reports
+// `done: true` with a board still entirely at `todo`. So every rollup dispatch is
 // best-effort for CONTROL FLOW but feeds this list, which the final return
 // surfaces as `statusWritten`/`statusWriteError` for the caller to report.
 const statusWriteErrors = []
@@ -499,9 +502,9 @@ phase('Spec')
 // prompt, where it was a prose decision tree, into scripts/worktree.mjs.
 phase('Implement')
 const wtOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/worktree.mjs --repo ${repo} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} --repo-dir ${repoDir} --compact
+   bun ${scriptsDir}/worktree.mjs --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} --repo-dir ${repoDir} --compact
 
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means a live PR already owns this branch. Report it and stop.`,
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
   { label: `worktree:${id}`, phase: 'Implement', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {
@@ -519,17 +522,6 @@ try {
     detail: `worktree.mjs returned output that is not JSON (${err.message}). Nothing was created. First 200 characters: ${String(wtOut.stdout ?? '').slice(0, 200)}` }
 }
 
-// An OPEN PR means something else is driving this branch. The caller
-// established there was none when it queued this subtask; one appearing since
-// is a human's call, not this run's.
-if (worktreeState.openPr) {
-  return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
-    existingPr: worktreeState.openPr,
-    detail: `an open PR (#${worktreeState.openPr}) already exists on ${BRANCH} — nothing was created, reset or committed.` }
-}
-if (worktreeState.prLookupError) {
-  log(`worktree: could not confirm there is no open PR on ${BRANCH} (${worktreeState.prLookupError}) — proceeding, but Implement will not reset a branch it cannot vouch for`)
-}
 log(`worktree ${worktreeState.created ? 'created' : 'reused'} at ${WORKTREE} (branch ${worktreeState.branchExisted ? 'existed' : 'new'}, ${worktreeState.commitCount} commit(s) on top of ${baseBranch})`)
 
 const planCheck = await (async () => {
@@ -726,7 +718,7 @@ It currently has ${worktreeState.commitCount} commit(s) on top of \`origin/${bas
   - No match (or no commits at all): RESET with \`git -C ${WORKTREE} reset --hard origin/${baseBranch}\`. This branch is stale relative to the current plan. The spec and plan files are untracked at this point, so the reset leaves them in place — that is deliberate, they are this run's inputs.
 
 Your FIRST commit must be the spec and the plan themselves:
-\`git -C ${WORKTREE} add docs/superpowers && git -C ${WORKTREE} commit\` with a \`docs:\` subject. They ship with this subtask's PR so a reviewer sees the spec, the plan and the diff together, and so a resumed run can recover the plan from the branch even if the worktree is gone. Then start the TDD steps.
+\`git -C ${WORKTREE} add docs/superpowers && git -C ${WORKTREE} commit\` with a \`docs:\` subject. They land in this subtask's own commits so a reviewer sees the spec, the plan and the diff together, and so a resumed run can recover the plan from the branch even if the worktree is gone. Then start the TDD steps.
 
 Work ONLY inside ${WORKTREE}. Sync dependencies per this repo's own convention, then a baseline full-suite run (skip this if you just RESUMED and the suite was already green as of the last commit — re-run it anyway if unsure):
 ${verifyBlock}
@@ -740,11 +732,10 @@ Plan-Hash: $PLAN_HASH
 
 Do NOT push, do NOT open a PR.
 
-Return a structured result. This stage has THREE stop conditions, all above: an OPEN PR on \`${BRANCH}\`; a \`sha256sum\` that failed or gave an empty PLAN_HASH; a baseline suite already red before you changed anything. Reporting one of those in prose while claiming success is the single worst outcome here — the pipeline would review, verify and open a PR on top of a stop you were told to make.
+Return a structured result. This stage has TWO stop conditions, both above: a \`sha256sum\` that failed or gave an empty PLAN_HASH; a baseline suite already red before you changed anything. Reporting one of those in prose while claiming success is the single worst outcome here — the pipeline would review and verify on top of a stop you were told to make.
 
 - blocked: true if ANY stop condition fired, or anything else made implementation impossible. false only if you completed the TDD work.
-- blockedReason: when blocked, ONE line naming which condition fired plus the concrete detail (the PR number, the command that failed, the tests already red). Empty when blocked=false.
-- existingPr: ONLY when an open PR on \`${BRANCH}\` is what stopped you — its number. Omit otherwise.
+- blockedReason: when blocked, ONE line naming which condition fired plus the concrete detail (the command that failed, the tests already red). Empty when blocked=false.
 - planHash: the exact 8-character lowercase-hex PLAN_HASH you computed above and used in every commit trailer.
 - resumed: true if you continued from existing Plan-Hash commits; false if you started fresh (path (a), or after a RESET).
 - report: the normal implementation report — commits made (oneline), test count added, deviations from the plan with reasons. The reviewer reads this next, so keep it factual and scoped to what you changed. Empty when blocked=true.
@@ -754,7 +745,7 @@ Do not set blocked=true for a difficulty you worked through and solved.`,
     type: 'object', required: ['blocked', 'report'],
     properties: {
       blocked: { type: 'boolean' }, blockedReason: { type: 'string' },
-      existingPr: { type: 'integer' }, resumed: { type: 'boolean' },
+      resumed: { type: 'boolean' },
       planHash: { type: 'string' },
       report: { type: 'string' },
     },
@@ -762,15 +753,10 @@ Do not set blocked=true for a difficulty you worked through and solved.`,
 if (!impl) throw new Error('implement agent died')
 
 // Implement's stop conditions used to be prose in a free-text return, so
-// nothing downstream could see them: the pipeline went on to review, verify and
-// open a PR on top of a stop it had been explicitly told about. `existingPr` is
-// deliberately NOT called `pr` — a blocking PR belongs to whatever else is
-// driving this branch, and putting it in the field the orchestrator reads as
-// "this subtask's PR" is exactly the kind of confusion that costs a milestone.
+// nothing downstream could see them: the pipeline went on to review and
+// verify on top of a stop it had been explicitly told about.
 if (impl.blocked) {
-  const stoppedOnPr = Number.isInteger(impl.existingPr) && impl.existingPr > 0
   return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE, plan,
-    ...(stoppedOnPr ? { existingPr: impl.existingPr } : {}),
     detail: impl.blockedReason || 'implement stopped without naming a reason' }
 }
 
@@ -783,7 +769,7 @@ Check every new test file's path against this repo's own test-placement rule (ci
 
 Then the test-integrity gate, on the test portion of that same diff: no weakened or deleted assertions, no tautologies, no tests that merely mirror the implementation, and every new behavior has a test that would fail without its code. A violation here is a finding like any other — raise it, fix it, and if it genuinely cannot be fixed it is blocker-severity. Never weaken, skip, xfail, or delete a test to make anything pass.
 
-You are the only stage that reads this diff and the only one that writes: the stage after you runs the suite and reports, and is forbidden to fix anything. So everything that needs changing must be changed HERE, and everything you change must be COMMITTED here — uncommitted work is invisible to \`git push\`, would be absent from the PR, and will stop the run.
+You are the only stage that reads this diff and the only one that writes: the stage after you runs the suite and reports, and is forbidden to fix anything. So everything that needs changing must be changed HERE, and everything you change must be COMMITTED here — uncommitted work never lands on ${BRANCH} at all, and will stop the run.
 
 If you find any real findings, fix them yourself in the same pass: in ${WORKTREE}, on branch ${BRANCH} (TDD where behavior changes: failing test first), commit granularly, end commits with:
 Co-Authored-By: ${coauthor}
@@ -798,7 +784,7 @@ PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8); git -C ${WORKTREE} log origin/${ba
 
 Return:
 - findings: every finding you raised, severity-tagged, whether or not you went on to fix it (findings=[] if the diff was clean).
-- unresolvedBlockers: ONLY the blocker-severity findings still standing after your fix pass — a blocker you actually fixed, or correctly determined was wrong, does NOT belong here. This list stops the pipeline before the PR opens, so an empty list is a claim that nothing blocker-severity is left in the code.
+- unresolvedBlockers: ONLY the blocker-severity findings still standing after your fix pass — a blocker you actually fixed, or correctly determined was wrong, does NOT belong here. This list stops the pipeline before the card is marked done, so an empty list is a claim that nothing blocker-severity is left in the code.
 - fixSummary: what you fixed vs skipped and why (empty string if findings was empty).
 - porcelain: the FIRST command's output exactly as printed — empty string if it printed nothing.
 - commitCount: the SECOND command's number.
@@ -826,8 +812,8 @@ if (!review) {
 
 // Review both raises AND fixes, so a blocker in `findings` may well have been
 // resolved in the same pass — only what the reviewer says is STILL standing
-// gates the PR. Previously nothing read this at all: a blocker-severity
-// finding was reported and the PR opened anyway.
+// gates the card reaching done. Previously nothing read this at all: a
+// blocker-severity finding was reported and the PR opened anyway.
 const unresolvedBlockers = (review && review.unresolvedBlockers) || []
 if (unresolvedBlockers.length > 0) {
   return { card, blocked: 'review', branch: BRANCH, worktree: WORKTREE, plan,
@@ -854,17 +840,19 @@ if (gate && gate.blocked) {
   return { card, blocked: gate.blocked, branch: BRANCH, worktree: WORKTREE, plan, detail: gate.detail }
 }
 
-// ── 6. ship — verify, then push and open the PR (never merge) ───────────────
-// Verify and PR used to be separate dispatches with only a pass/fail gate
-// between them. Both are mechanical and adjacent, so they are one stage now.
-// The line this must not cross: this stage may PUBLISH what it measured, but
-// never REPAIR it — a stage that fixes what it is certifying cannot report on
-// it. Everything that needs changing is Review's job, upstream.
+// ── 6. ship — verify, then mark the card done (never pushes, never merges) ──
+// Verify and the PR-open step used to be separate dispatches with only a
+// pass/fail gate between them. Both are mechanical and adjacent, so they are
+// one stage now. The line this must not cross: this stage may PUBLISH what it
+// measured, but never REPAIR it — a stage that fixes what it is certifying
+// cannot report on it. Everything that needs changing is Review's job,
+// upstream.
 //
-// The cost of the merge, stated plainly: `if (!passed) return` used to make a
-// red suite STRUCTURALLY unable to reach the PR. That guarantee is now a prompt
-// instruction. A run that ever reports passed=false alongside a non-empty url
-// means this merge was wrong and the stages should be split back apart.
+// The cost of combining them, stated plainly: `if (!passed) return` used to
+// make a red suite STRUCTURALLY unable to reach a merge. That guarantee is
+// now a prompt instruction. A run that ever reports passed=false alongside
+// `done: true` means this combination was wrong and the stages should be
+// split back apart.
 phase('Ship')
 const verifyFlags = suiteCmds
   .concat(verification.typecheck ? [verification.typecheck] : [])
@@ -872,59 +860,17 @@ const verifyFlags = suiteCmds
   .map(command => `--verify ${JSON.stringify(command)}`)
   .join(' ')
 
-// ship.mjs now requires --title, and there is no module-scope place task.js
-// could have gotten it from — task.js's own identity is the card id, not its
-// title, and titles can change after Explore ran. Ship is a command-running
-// stage, so it reads the title fresh from brd rather than threading it
-// through every earlier stage's return value.
-const titleOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   cd ${repoDir} && brd show ${card}
-
-brd resolves its database by walking up from the CURRENT directory looking for a marker, so this must run from ${repoDir} — this workflow is repo-agnostic and the driving session may sit somewhere else entirely; without the \`cd\` this fails with ProjectNotFoundError.
-
-It prints one line of JSON (an envelope: {"ok":true,"data":{...}}) that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step.`,
-  { label: `card-title:${id}`, phase: 'Ship', model: 'haiku', effort: 'low', ...triggerAgent, schema: {
-    type: 'object', required: ['stdout'],
-    properties: {
-      stdout: { type: 'string', description: 'the command\'s stdout, byte for byte, unmodified' },
-      error: { type: 'string', description: 'the command\'s stderr, when it failed' },
-    },
-  } })
-if (!titleOut) throw new Error('card-title agent died')
-
-let cardTitle
-try {
-  const envelope = JSON.parse(printableOnly(String(titleOut.stdout ?? '')))
-  const rawTitle = envelope && envelope.ok === true && envelope.data && typeof envelope.data.title === 'string'
-    ? envelope.data.title
-    : ''
-  // shellQuote is correct at the SHELL level, but the quoted result still
-  // lands inside a single prompt line the agent runs verbatim — a title
-  // containing a newline would split that line into a second, unintended
-  // command. Collapse all whitespace runs to one space rather than trusting
-  // a card's title to be single-line.
-  cardTitle = rawTitle.replace(/\s+/g, ' ').trim()
-  if (!cardTitle) throw new Error('brd show did not return a usable data.title')
-} catch (err) {
-  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `could not read this card's title from \`brd show ${card}\` (${err.message}) — ship.mjs requires --title and there is nowhere else to get it. First 200 characters: ${String(titleOut.stdout ?? '').slice(0, 200)}` }
-}
-
 // Ship used to be five-plus commands fenced in by prose: run every verification
 // command, judge whether they were green, push, open the PR with --head passed
 // explicitly, move the card. Only the last of those needed a model, and even
-// that only because a Workflow script cannot run `gh`.
-//
-// The PR title and body are DERIVED inside the script, never passed on the
-// command line except for --title itself, which is shell-quoted here — long
-// text an agent has to type is a quoting accident waiting to happen, and it
-// was the last place a model could alter what ships.
+// that only because a Workflow script cannot run `gh`. Nothing pushes or opens
+// a PR any more, so ship.mjs no longer takes a repo or a title.
 const shipOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
-   bun ${scriptsDir}/ship.mjs --repo ${repo} --card ${card} --title ${shellQuote(cardTitle)} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
+   bun ${scriptsDir}/ship.mjs --card ${card} --branch ${BRANCH} --base ${baseBranch} --worktree ${WORKTREE} ${verifyFlags} --compact
 
-This command runs the FULL verification suite before it pushes anything, which can take several minutes on a large repo — the Bash tool's own default timeout (2 minutes) is too short for it. You MUST call the Bash tool for this command with an explicit timeout of 600000 (its 10-minute maximum). Do not omit that parameter and do not rely on the default.
+This command runs the FULL verification suite before anything is marked done, which can take several minutes on a large repo — the Bash tool's own default timeout (2 minutes) is too short for it. You MUST call the Bash tool for this command with an explicit timeout of 600000 (its 10-minute maximum). Do not omit that parameter and do not rely on the default.
 
-It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed or no PR was opened. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.`,
+It prints one line of JSON that the pipeline parses itself, so reformatting, pretty-printing, summarizing or truncating it breaks a deterministic step. A non-zero exit is a normal answer — it means verification failed. Report it and stop; do NOT retry, do NOT fix anything, and do NOT run any other command to work around it.`,
   { label: `ship:${id}`, phase: 'Ship', model: 'haiku', ...triggerAgent, schema: {
     type: 'object', required: ['stdout'],
     properties: {
@@ -940,8 +886,8 @@ try {
 } catch (err) {
   // Parsed HERE so a mangled transcription fails at the boundary rather than
   // arriving as a plausible-looking success.
-  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: `ship.mjs returned output that is not JSON (${err.message}). The branch may or may not have been pushed — check before re-running. First 200 characters: ${String(shipOut.stdout ?? '').slice(0, 200)}` }
+  return { card, blocked: 'ship', branch: BRANCH, worktree: WORKTREE, plan,
+    detail: `ship.mjs returned output that is not JSON (${err.message}). Check the worktree's git status before re-running. First 200 characters: ${String(shipOut.stdout ?? '').slice(0, 200)}` }
 }
 
 
@@ -953,19 +899,12 @@ if (!ship.passed) {
   return { card, blocked: 'tests', branch: BRANCH, worktree: WORKTREE, plan, detail: ship.detail }
 }
 
-// ship.mjs already parsed the URL and refused to push after a red command, so
-// these read its fields rather than re-deriving anything.
-const prNumber = Number(ship.number)
-if (!Number.isInteger(prNumber) || prNumber <= 0) {
-  return { card, blocked: 'pr', branch: BRANCH, worktree: WORKTREE, plan,
-    detail: ship.detail || `verification passed but no usable PR number came back (url: ${String(ship.url ?? '').slice(0, 120)}). The branch ${ship.pushed ? 'WAS' : 'may not have been'} pushed — check before re-running.` }
-}
-
-// A PR is open — per the spec, that is what "done" means: a run never merges,
-// so it cannot observe anything later than "shipped", and "in_review" has no
-// occupant in this model. Deterministic, via rollup.mjs's own ancestry walk,
-// not a prompt asking a model to build GraphQL and reason out a parent rollup
-// itself. Best-effort: its failure must not change anything this stage returns.
+// Verification passed — per the spec, that is what "done" means: a run
+// never merges or pushes, so it cannot observe anything later than
+// "verified", and "in_review" has no occupant in this model. Deterministic,
+// via rollup.mjs's own ancestry walk, not a prompt asking a model to build
+// GraphQL and reason out a parent rollup itself. Best-effort: its failure
+// must not change anything this stage returns.
 const rollupOut = await callAgent(`Run this command and return its stdout EXACTLY as printed:
    bun ${scriptsDir}/rollup.mjs --card ${card} --status done --repo-dir ${repoDir} --compact
 
@@ -987,6 +926,6 @@ if (!rollupOut) {
   statusWriteErrors.push(msg)
 }
 
-return { card, pr: prNumber, branch: BRANCH, worktree: WORKTREE, plan,
+return { card, branch: BRANCH, worktree: WORKTREE, plan,
   tests: (ship.verified || []).map(v => `${v.ok ? 'PASS' : 'FAIL'} ${v.command}`).join('\n'),
   ...statusWriteOutcome(statusWriteErrors) }

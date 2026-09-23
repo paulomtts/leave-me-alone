@@ -18,12 +18,10 @@
 // genuinely model-shaped task in the stage. Configure it once via
 // `args.verification` instead, or let the agent fall back to discovering it.
 
-import { ghRunner, gitRunner, jsonFrom, lastLine, parseNdjson, withRetries, readFlags } from './gh.mjs'
+import { gitRunner, readFlags, withRetries } from './gh.mjs'
 import { brd, brdRunner } from './brd.mjs'
 import { findMilestone, flattenMilestone } from './census.mjs'
 import { shortId } from './naming.mjs'
-
-export { jsonFrom, lastLine, parseNdjson } from './gh.mjs'
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
@@ -58,17 +56,17 @@ export function parseArgs(argv) {
 // worktree vanished mid-run".
 //
 // Hoisting the fetch is safe because a stack parent needs no fetch: ship.mjs
-// pushes with `git push -u origin <branch>`, which updates this checkout's own
-// refs/remotes/origin/<branch> as a side effect. Only the milestone base comes
-// from the network, and freezing it here is a feature — every story in the run
-// then builds on the same base rather than on whatever landed mid-run.
+// no longer pushes at all — every subtask's parent is another LOCAL branch in
+// this same checkout, already up to date the moment it was created. Only the
+// milestone base itself needs the network, and freezing it here with the one
+// fetch this function performs is a feature — every story in the run then
+// builds on the same base rather than on whatever landed mid-run.
 export async function prepareCheckout(repoDir, git = gitRunner, wait) {
   if (!repoDir) return false
-  // Retried like the PR listing is, and for the same reason: this is a network
-  // call, and it is the FIRST thing a run does. An HTTP2 framing flake here
-  // killed a whole milestone at Detect — before a single subtask was
-  // dispatched — while the identical class of failure on the PR listing was
-  // already being absorbed three attempts deep.
+  // Retried the same way a now-removed PR listing used to be, and for the
+  // same reason: this is a network call, and it is the FIRST thing a run
+  // does. An HTTP2 framing flake here killed a whole milestone at Detect —
+  // before a single subtask was dispatched.
   await withRetries('detect: git fetch', () => git(['-C', repoDir, 'fetch', 'origin']), { wait })
   // Local, so a single attempt is right: a failure here is a real problem with
   // the checkout, not the network, and retrying would just hide it.
@@ -76,54 +74,20 @@ export async function prepareCheckout(repoDir, git = gitRunner, wait) {
   return true
 }
 
-// Deliberately LOOSE — anything whose branch name contains any subtask's short
-// id. The orchestrator matches exactly and separately looks for near misses, so
-// over-reporting here is free and under-reporting is not.
-//
-// Takes already-resolved SHORT ids, not card ids: the caller resolves those
-// with shortId() before the PR-listing try/catch, so a malformed card id
-// aborts the run instead of being caught there and reported as prLookupFailed.
-export function filterPullRequests(pulls, subtaskShortIds) {
-  const ids = [...new Set(subtaskShortIds ?? [])]
-  return (pulls ?? []).filter(pull => {
-    const ref = String((pull && pull.ref) ?? '')
-    return ids.some(id => ref.includes(id))
-  })
-}
-
-export async function detect({ repo, milestone, repoDir, run = ghRunner, runBrd = brdRunner, git = gitRunner, wait }) {
+export async function detect({ repo, milestone, repoDir, runBrd = brdRunner, git = gitRunner, wait }) {
   const prepared = await prepareCheckout(repoDir, git, wait)
 
-  // One local call replaces a milestone lookup, a story list, and two API calls
-  // per story. NOT wrapped in withRetries: brd is local, so a failure is real.
+  // One local call replaces a milestone lookup, a story list, and what used
+  // to be two API calls per story. NOT wrapped in withRetries: brd is local,
+  // so a failure is real.
   const roots = await brd(['tree'], { cwd: repoDir, run: runBrd })
   const { milestoneTitle, stories } = flattenMilestone(findMilestone(roots, milestone))
 
-  // Resolved BEFORE the try: shortId throws on a malformed card id, and that is a
-  // data-integrity bug, not a network condition. Inside the try it would be caught
-  // and reported as prLookupFailed — the same "a failed read looks like no data"
-  // collapse this module exists to avoid.
-  const subtaskShortIds = stories.flatMap(story => story.subtasks.map(sub => shortId(sub.id)))
+  // Validate all card IDs are well-formed before returning. A malformed card id
+  // is a data-integrity bug, not a network condition.
+  stories.flatMap(story => story.subtasks.map(sub => shortId(sub.id)))
 
-  // REST, not `gh pr list`: the latter goes through GraphQL, which returned
-  // empty results for genuinely-merged PRs during the 2026-08-17 incident.
-  let pullRequests = []
-  let prLookupFailed = false
-  try {
-    const raw = await withRetries('detect: pull request listing', () => run([
-      'api', `repos/${repo}/pulls?state=all&per_page=100`, '--paginate',
-      '--jq', '.[] | {number, url: .html_url, state, merged_at, ref: .head.ref, base: .base.ref}',
-    ]), { wait })
-    const all = parseNdjson(raw)
-    pullRequests = filterPullRequests(all, subtaskShortIds)
-  } catch (err) {
-    // NOT an empty list. "The API did not answer" and "there are no PRs" must
-    // stay distinguishable, or merged work gets re-implemented.
-    prLookupFailed = true
-    process.stderr.write(`${err.message}\n`)
-  }
-
-  return { milestoneTitle, stories, pullRequests, prLookupFailed, prepared }
+  return { milestoneTitle, stories, prepared }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

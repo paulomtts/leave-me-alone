@@ -8,7 +8,7 @@ Personal Claude Code plugin marketplace.
 |---|---|---|
 | **bun** | every helper script runs under it — the workflows literally invoke `bun <script>.mjs` | the run stops at its first trigger step |
 | **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
-| **gh**, authenticated | opening/checking/merging PRs | fails at the first PR step, not at launch — there is no board-id resolution step anymore |
+| **gh**, authenticated | needed only if a human plans to push/open PRs or for `setup-report`'s CI check | DRIVE runs never call it — work stays on local branches; a human merges the Integrate branch themselves |
 | **git** | worktrees, branches, stacked bases | — |
 | **brd**, initialized (`brd init`) | the local kanban board: stories, subtasks, `blockedBy` | fails at Detect |
 
