@@ -17,8 +17,8 @@ import { loadPure } from './load-pure.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate, shortId, stemOf, shellQuote, statusWriteOutcome } = await loadPure(join(HERE, 'task.js'), [
-  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate', 'shortId', 'stemOf', 'shellQuote', 'statusWriteOutcome',
+const { verificationGate, reviewGate, isPlanHash, planHashMismatch, explorationOutputGate, shortId, stemOf, shellQuote, statusWriteOutcome, exploreSchema } = await loadPure(join(HERE, 'task.js'), [
+  'verificationGate', 'reviewGate', 'isPlanHash', 'planHashMismatch', 'explorationOutputGate', 'shortId', 'stemOf', 'shellQuote', 'statusWriteOutcome', 'exploreSchema',
 ])
 
 const BRANCH = 'task-42'
@@ -184,6 +184,33 @@ test('when the caller provided verification, explore must return it EXACTLY unch
 test('a missing or non-array fullSuite is caught, not thrown on', () => {
   assert.ok(explorationOutputGate({ summary: realSummary, verification: {} }, null))
   assert.ok(explorationOutputGate({ summary: realSummary }, null))
+})
+
+// ── exploreSchema ────────────────────────────────────────────────────────────
+// A live failure across two unrelated repos/runs: the Explore agent's
+// StructuredOutput call hit "must have required property 'verification'" and
+// exhausted its retry cap (5 failed calls), always on a fresh run's first
+// Explore call. Root cause: explorePrompt's own steps 1-2 tell a refusing
+// model to set refused=true and "stop here (skip everything below)" — which
+// includes step 5, the only place verification gets discovered — while the
+// schema unconditionally required verification at the root. A model correctly
+// following its own prompt had no schema-satisfying move on refusal.
+
+test('the schema does not require verification at the root — a refusal has no way to supply it', () => {
+  assert.deepEqual(exploreSchema().required, ['refused', 'summary'])
+})
+
+test('refused+summary alone (no verification) is schema-shaped for a refusal, as the prompt instructs', () => {
+  const schema = exploreSchema()
+  const refusal = { refused: true, reason: 'card is a milestone, not a subtask', summary: 'root card, no parent_id' }
+  for (const key of schema.required) {
+    assert.ok(Object.prototype.hasOwnProperty.call(refusal, key), `refusal is missing required field ${key}`)
+  }
+})
+
+test('verification, when present, still requires fullSuite — only its presence is optional, not its shape', () => {
+  const schema = exploreSchema()
+  assert.deepEqual(schema.properties.verification.required, ['fullSuite'])
 })
 
 // ── isPlanHash / planHashMismatch ────────────────────────────────────────────
