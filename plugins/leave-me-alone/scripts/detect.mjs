@@ -61,13 +61,26 @@ export function parseArgs(argv) {
 // milestone base itself needs the network, and freezing it here with the one
 // fetch this function performs is a feature — every story in the run then
 // builds on the same base rather than on whatever landed mid-run.
+//
+// A fully local repo (no remote at all — the normal shape for a solo,
+// not-yet-pushed project under this same local-only DRIVE) has nothing for
+// that fetch to reach. `git fetch origin` there fails outright with `'origin'
+// does not appear to be a git repository`, which used to kill the run before
+// a single subtask was dispatched — for a repo that was never going to touch
+// the network anyway. So the fetch itself is conditional on an `origin`
+// remote actually being configured; a repo with none just skips straight to
+// the (always-local, always-safe) prune.
 export async function prepareCheckout(repoDir, git = gitRunner, wait) {
   if (!repoDir) return false
-  // Retried the same way a now-removed PR listing used to be, and for the
-  // same reason: this is a network call, and it is the FIRST thing a run
-  // does. An HTTP2 framing flake here killed a whole milestone at Detect —
-  // before a single subtask was dispatched.
-  await withRetries('detect: git fetch', () => git(['-C', repoDir, 'fetch', 'origin']), { wait })
+  const remotes = (await git(['-C', repoDir, 'remote']))
+    .split('\n').map(line => line.trim()).filter(Boolean)
+  if (remotes.includes('origin')) {
+    // Retried the same way a now-removed PR listing used to be, and for the
+    // same reason: this is a network call, and it is the FIRST thing a run
+    // does. An HTTP2 framing flake here killed a whole milestone at Detect —
+    // before a single subtask was dispatched.
+    await withRetries('detect: git fetch', () => git(['-C', repoDir, 'fetch', 'origin']), { wait })
+  }
   // Local, so a single attempt is right: a failure here is a real problem with
   // the checkout, not the network, and retrying would just hide it.
   await git(['-C', repoDir, 'worktree', 'prune'])

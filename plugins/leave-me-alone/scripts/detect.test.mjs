@@ -137,9 +137,30 @@ test('the shared checkout is refreshed ONCE, here, not inside every subtask', as
   const log = []
   const got = await detect({
     repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
-    runBrd: fakeBrd(), git: async (args) => { log.push(args.join(' ')); return '' } })
+    runBrd: fakeBrd(),
+    git: async (args) => {
+      log.push(args.join(' '))
+      return args.includes('remote') ? 'origin\n' : ''
+    } })
   assert.equal(got.prepared, true)
-  assert.deepEqual(log, ['-C /abs/repo fetch origin', '-C /abs/repo worktree prune'])
+  assert.deepEqual(log, [
+    '-C /abs/repo remote',
+    '-C /abs/repo fetch origin',
+    '-C /abs/repo worktree prune',
+  ])
+})
+
+test('a fully local repo (no origin remote) skips the fetch but still prunes', async () => {
+  // A fully local repo (no remote at all) has nothing for `git fetch origin`
+  // to reach — that used to fail the whole run before a single subtask was
+  // dispatched. The prune must still run; it is always local and safe.
+  const log = []
+  const got = await detect({
+    repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
+    runBrd: fakeBrd(),
+    git: async (args) => { log.push(args.join(' ')); return '' } })
+  assert.equal(got.prepared, true)
+  assert.deepEqual(log, ['-C /abs/repo remote', '-C /abs/repo worktree prune'])
 })
 
 test('the fetch happens BEFORE the census, not after', async () => {
@@ -173,6 +194,7 @@ test('a flaky fetch is retried — it is the first network call of the run', asy
   // subtask was dispatched.
   let attempts = 0
   const git = async (args) => {
+    if (args.includes('remote')) return 'origin\n'
     if (args.includes('fetch')) { attempts += 1; if (attempts < 3) throw new Error('HTTP2 framing layer') }
     return ''
   }
@@ -184,7 +206,11 @@ test('a flaky fetch is retried — it is the first network call of the run', asy
 })
 
 test('a fetch that never recovers still fails the run', async () => {
-  const git = async (args) => { if (args.includes('fetch')) throw new Error('no network'); return '' }
+  const git = async (args) => {
+    if (args.includes('remote')) return 'origin\n'
+    if (args.includes('fetch')) throw new Error('no network')
+    return ''
+  }
   await assert.rejects(() => detect({
     repo: 'you/thing', milestone: 'Sprint one', repoDir: '/abs/repo',
     runBrd: fakeBrd(), git, wait: () => Promise.resolve() }), /no network/)
