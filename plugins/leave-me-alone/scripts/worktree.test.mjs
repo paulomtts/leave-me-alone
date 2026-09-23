@@ -82,6 +82,32 @@ test('a base that IS on the remote (the milestone baseBranch) still uses origin/
   assert.deepEqual(addCall.slice(-1), ['origin/master'], 'a real remote base must still use origin/<base>')
 })
 
+test('the result reports the ref it actually cut from, so callers never guess origin/<base>', async () => {
+  const noRemoteRef = async args => {
+    if (args.includes('rev-parse') && args.includes('origin/story-a-tip')) {
+      const err = new Error('fatal: bad revision'); err.code = 1; throw err
+    }
+    if (args.includes('rev-list')) return '0\n'
+    return ''
+  }
+  const local = await prepare({ branch: 'm1/task-b', base: 'story-a-tip', worktree: '/wt', repoDir: '/repo' }, noRemoteRef)
+  assert.equal(local.baseRef, 'story-a-tip')
+
+  const remote = await prepare({ branch: 'm1/task-a', base: 'master', worktree: '/wt', repoDir: '/repo' },
+    async args => (args.includes('rev-list') ? '0\n' : args.includes('rev-parse') ? 'abc123\n' : ''))
+  assert.equal(remote.baseRef, 'origin/master')
+
+  // Reported even when the worktree already exists and nothing is cut.
+  const reused = await prepare({ branch: 'm1/task-b', base: 'story-a-tip', worktree: '/wt', repoDir: '/repo' },
+    async args => {
+      if (args.includes('rev-parse') && args.includes('origin/story-a-tip')) throw new Error('bad revision')
+      if (args.includes('worktree') && args.includes('list')) return 'worktree /wt\n'
+      if (args.includes('rev-list')) return '0\n'
+      return ''
+    })
+  assert.equal(reused.baseRef, 'story-a-tip')
+})
+
 test('an existing worktree is left completely alone', async () => {
   const log = []
   const got = await prepare(opts(), gitFake([

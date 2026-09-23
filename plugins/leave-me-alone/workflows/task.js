@@ -541,7 +541,18 @@ try {
     detail: `worktree.mjs returned output that is not JSON (${err.message}). Nothing was created. First 200 characters: ${String(wtOut.stdout ?? '').slice(0, 200)}` }
 }
 
-log(`worktree ${worktreeState.created ? 'created' : 'reused'} at ${WORKTREE} (branch ${worktreeState.branchExisted ? 'existed' : 'new'}, ${worktreeState.commitCount} commit(s) on top of ${baseBranch})`)
+// The ref worktree.mjs actually cut from: origin/<base> when that resolves, the
+// bare local branch otherwise (a remote-less repo, or a stacked subtask whose
+// base is another subtask's local branch). Every prompt below names THIS, never
+// a guessed `origin/<base>` — on a remote-less repo that ref does not exist, so
+// the commit-range commands fail and Review reports "0 tagged commits".
+const baseRef = worktreeState.baseRef
+if (typeof baseRef !== 'string' || baseRef.length === 0) {
+  return { card, blocked: 'implement', branch: BRANCH, worktree: WORKTREE,
+    detail: `worktree.mjs did not report the base ref it cut from (baseRef: ${JSON.stringify(baseRef)}), so the commit-range checks cannot be built. Is scripts/worktree.mjs older than workflows/task.js? Nothing was pushed.` }
+}
+
+log(`worktree ${worktreeState.created ? 'created' : 'reused'} at ${WORKTREE} (branch ${worktreeState.branchExisted ? 'existed' : 'new'}, ${worktreeState.commitCount} commit(s) on top of ${baseRef})`)
 
 const planCheck = await (async () => {
   // Find `*-<shortid>.md` and grep it for one marker: `ls` and `grep`, no
@@ -644,7 +655,7 @@ Rules:
 - Run that skill's own Self-Review checklist before returning (spec coverage, placeholder scan, type consistency) and fix what it finds inline.
 - Every test step must land in the tier its spec entry named (per the test-placement rule in the exploration findings) — the file path in each RED step should already reflect that tier's own directory convention (check sibling files in that tier first, don't invent one).
 - Prepend the spec verbatim to the top of the saved file, then the plan.
-- Branch will be ${BRANCH}, worktree ${WORKTREE} (fresh, cut from origin/${baseBranch} — the plan must NOT assume any other subtask's code already exists on this branch).
+- Branch will be ${BRANCH}, worktree ${WORKTREE} (fresh, cut from ${baseRef} — the plan must NOT assume any other subtask's code already exists on this branch).
 - Verification commands for this repo:
 ${verifyBlock}
 - Save the plan to EXACTLY \`${PLAN_PATH}\` — create the directory if needed, and OVERWRITE the file if it exists. Do not add a date prefix and do not choose a different directory: a resumed run looks for this exact path, and a plan saved anywhere else is invisible to it. No hard-wrapped prose.
@@ -729,12 +740,12 @@ First, compute the resume key ONCE and reuse that exact value everywhere below �
 \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\`
 If that command fails or \`$PLAN_HASH\` comes back empty, STOP and report it; never proceed with an empty hash. Do NOT modify \`${plan}\`'s content at any point in this workflow — its exact bytes are what the hash is derived from, for this run and for every future resume. If ticking off plan checkboxes as you go is a habit, resist it here: it changes the hash and orphans every commit you already made.
 
-The worktree at \`${WORKTREE}\` ALREADY EXISTS on branch \`${BRANCH}\`, cut from \`origin/${baseBranch}\`, and it already contains this subtask's spec and plan (untracked). Do NOT create it, and do NOT run \`git fetch\`, \`git worktree prune\` or anything else against \`${repoDir}\` — other subtasks are running against that same checkout, and a prune there deletes their worktrees.
+The worktree at \`${WORKTREE}\` ALREADY EXISTS on branch \`${BRANCH}\`, cut from \`${baseRef}\`, and it already contains this subtask's spec and plan (untracked). Do NOT create it, and do NOT run \`git fetch\`, \`git worktree prune\` or anything else against \`${repoDir}\` — other subtasks are running against that same checkout, and a prune there deletes their worktrees.
 
-It currently has ${worktreeState.commitCount} commit(s) on top of \`origin/${baseBranch}\`. Decide RESUME vs RESET before writing anything:
-  - Check for a matching trailer, scoped to this branch's own commits: \`git -C ${WORKTREE} log origin/${baseBranch}..HEAD --grep="^Plan-Hash: $PLAN_HASH" --format=%H\`.
-  - Any match: RESUME. Those commits implement the plan you were just given (a killed earlier run, not stale debris). Do NOT reset. Read \`git -C ${WORKTREE} log --oneline origin/${baseBranch}..HEAD\` against the plan's step list and continue STRICT TDD from the next uncompleted step.
-  - No match (or no commits at all): RESET with \`git -C ${WORKTREE} reset --hard origin/${baseBranch}\`. This branch is stale relative to the current plan. The spec and plan files are untracked at this point, so the reset leaves them in place — that is deliberate, they are this run's inputs.
+It currently has ${worktreeState.commitCount} commit(s) on top of \`${baseRef}\`. Decide RESUME vs RESET before writing anything:
+  - Check for a matching trailer, scoped to this branch's own commits: \`git -C ${WORKTREE} log ${baseRef}..HEAD --grep="^Plan-Hash: $PLAN_HASH" --format=%H\`.
+  - Any match: RESUME. Those commits implement the plan you were just given (a killed earlier run, not stale debris). Do NOT reset. Read \`git -C ${WORKTREE} log --oneline ${baseRef}..HEAD\` against the plan's step list and continue STRICT TDD from the next uncompleted step.
+  - No match (or no commits at all): RESET with \`git -C ${WORKTREE} reset --hard ${baseRef}\`. This branch is stale relative to the current plan. The spec and plan files are untracked at this point, so the reset leaves them in place — that is deliberate, they are this run's inputs.
 
 Your FIRST commit must be the spec and the plan themselves:
 \`git -C ${WORKTREE} add docs/superpowers && git -C ${WORKTREE} commit\` with a \`docs:\` subject. They land in this subtask's own commits so a reviewer sees the spec, the plan and the diff together, and so a resumed run can recover the plan from the branch even if the worktree is gone. Then start the TDD steps.
@@ -781,7 +792,7 @@ if (impl.blocked) {
 
 // ── 5. review + fixes ────────────────────────────────────────────────────────
 phase('Review')
-const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff origin/${baseBranch}...HEAD\`. Context: ${repo} subtask card ${id}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
+const review = await callAgent(`Review the branch diff in ${WORKTREE}: \`git diff ${baseRef}...HEAD\`. Context: ${repo} subtask card ${id}; plan at ${plan}; this repo's own architecture/standards docs (cited in the plan). Implementer's report:
 ${clip(impl.report, 12000, 'implementer report')}
 
 Check every new test file's path against this repo's own test-placement rule (cited in the plan/exploration findings) — a test sitting in the wrong tier is a finding, same severity class as a wrong-tier test would earn in this repo's own review discipline. One line per finding, severity-tagged (blocker/major/minor), no praise, no scope creep. Verify each finding against the actual code before reporting.
@@ -797,8 +808,8 @@ Also run this repo's own lint/format commands and commit any fixes they require,
 FINALLY, once you have finished committing, run these three commands and report their output verbatim. Do not interpret them, do not act on them, and do not change anything in response to them — they are read by the pipeline itself, which decides what they mean:
 \`\`\`
 git -C ${WORKTREE} status --porcelain
-git -C ${WORKTREE} rev-list --count origin/${baseBranch}..HEAD
-PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8); git -C ${WORKTREE} log origin/${baseBranch}..HEAD --format=%B | grep -c "^Plan-Hash: $PLAN_HASH"
+git -C ${WORKTREE} rev-list --count ${baseRef}..HEAD
+PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8); git -C ${WORKTREE} log ${baseRef}..HEAD --format=%B | grep -c "^Plan-Hash: $PLAN_HASH"
 \`\`\`
 
 Return:

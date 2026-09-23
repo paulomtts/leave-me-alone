@@ -348,6 +348,26 @@ test('both rollup dispatch sites feed statusWriteErrors — a failure does not v
     'the final return does not fold the collected status-write errors into what the caller sees')
 })
 
+// A live run on a remote-less repo stopped at Review: the commit-range commands
+// were built as `origin/<baseBranch>..HEAD`, that ref does not exist, so
+// `git log ... | grep -c` printed 0 and the Plan-Hash gate read three correctly
+// tagged commits as untagged. The base ref must come from worktree.mjs, which is
+// the one place that knows what it cut from.
+test('commit-range prompts name the ref worktree.mjs reported, never a guessed origin/<baseBranch>', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /origin\/\$\{baseBranch\}/,
+    'a prompt still guesses origin/<baseBranch>; use ${baseRef} from worktreeState')
+  assert.match(source, /const baseRef = worktreeState\.baseRef/)
+  for (const range of ['rev-list --count ${baseRef}..HEAD', 'log ${baseRef}..HEAD --format=%B', 'diff ${baseRef}...HEAD']) {
+    assert.ok(source.includes(range), `expected a prompt using: ${range}`)
+  }
+})
+
+test('a worktree.mjs that reports no baseRef stops the subtask instead of building "undefined..HEAD" prompts', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  assert.match(source, /typeof baseRef !== 'string' \|\| baseRef\.length === 0/)
+})
+
 test('ship.mjs is given the full card id, not the short id — a short id cannot be pasted into brd show', () => {
   const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
   assert.match(source, /ship\.mjs --card \$\{card\}/)
