@@ -204,6 +204,32 @@ function statusWriteOutcome(errors) {
     ? { statusWritten: true }
     : { statusWritten: false, statusWriteError: list.join(' | ') }
 }
+
+// The Explore stage's StructuredOutput schema. `verification` is deliberately
+// NOT in root `required`: the explorePrompt's own steps 1-2 can set
+// refused=true and say "stop here (skip everything below)" — which includes
+// step 5, the only place verification gets discovered. Requiring it
+// unconditionally left a refusing model no schema-satisfying move (fabricate
+// a field its own instructions told it to skip, or keep omitting it and burn
+// the StructuredOutput retry cap) — observed live as a hard "must have
+// required property 'verification'" failure, always on a fresh run's first
+// Explore call, across two unrelated repos. The non-refused path still gets
+// verification checked, just in JS rather than at the tool-call layer: see
+// explorationOutputGate, the #1296 guard, which already treats a missing or
+// implausible verification.fullSuite as degenerate output and retries once
+// before blocking.
+function exploreSchema() {
+  return {
+    type: 'object', required: ['refused', 'summary'],
+    properties: {
+      refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
+      verification: { type: 'object', required: ['fullSuite'], properties: {
+        fullSuite: { type: 'array', items: { type: 'string' } },
+        typecheck: { type: 'string' }, lint: { type: 'array', items: { type: 'string' } },
+      } },
+    },
+  }
+}
 // PURE:END
 
 // ── args ─────────────────────────────────────────────────────────────────────
@@ -410,17 +436,10 @@ const explorePrompt = `Explore ${repo} subtask card ${id} in ${repoDir} and repo
 ${verificationStep}
 6. Find this repo's own test-tier PLACEMENT rules — do NOT assume a taxonomy. Its testing standards doc usually says which tier owns what kind of test (e.g. "unit owns pure combinations, integration owns paths, e2e owns wiring, conformance owns real-vs-fake equivalence" is one repo's version — another repo's tiers and rules will differ). Cite the doc path and summarize its placement rule in one or two lines inside your summary — every later stage that writes a test needs this to place it correctly, not default to a habitual tier out of habit.
 
-Return: what card ${id} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands.`
-const exploreOpts = { label: `explore:${id}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: {
-  type: 'object', required: ['refused', 'summary', 'verification'],
-  properties: {
-    refused: { type: 'boolean' }, reason: { type: 'string' }, summary: { type: 'string' },
-    verification: { type: 'object', required: ['fullSuite'], properties: {
-      fullSuite: { type: 'array', items: { type: 'string' } },
-      typecheck: { type: 'string' }, lint: { type: 'array', items: { type: 'string' } },
-    } },
-  },
-} }
+Return: what card ${id} must deliver, exact constraints from the docs (invariants, types, conventions the subtask must obey) INCLUDING the test-placement rule from step 6, relevant file:line references, what sibling subtasks own (so this one doesn't drift into them), and the verification commands. If you refused at step 1 or 2, omit verification entirely rather than inventing or padding it — refused:true and summary are the only fields that apply.`
+// See exploreSchema()'s own comment (in the PURE region above) for why
+// verification is not in root `required`.
+const exploreOpts = { label: `explore:${id}`, phase: 'Explore', model: 'sonnet', agentType: 'leave-me-alone:repo-reader', schema: exploreSchema() }
 
 let explore = await callAgent(explorePrompt, exploreOpts)
 if (!explore || explore.refused) return { card, refused: true, reason: explore ? explore.reason : 'explore agent died' }
