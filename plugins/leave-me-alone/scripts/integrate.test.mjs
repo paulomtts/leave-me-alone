@@ -14,12 +14,28 @@ test('a fresh integration branch is created off origin/<base-branch>', async () 
     calls.push(args)
     if (args.includes('worktree') && args.includes('list')) return ''
     if (args.includes('for-each-ref')) return ''
+    if (args.includes('remote')) return 'origin\n'
     if (args.includes('rev-parse') && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 1; throw e }
     return ''
   }
   await attempt({ repoDir: '/r', worktree: '/w', integrationBranch: 'm12-integrate', baseBranch: 'master', mergeTip: 'm12/story-a-tip' }, git)
   const addCall = calls.find(c => c[2] === 'worktree' && c[3] === 'add')
   assert.deepEqual(addCall, ['-C', '/r', 'worktree', 'add', '/w', '-b', 'm12-integrate', 'origin/master'])
+})
+
+test('a fully local repo (no origin remote) cuts the integration branch off the local base branch', async () => {
+  const calls = []
+  const git = async args => {
+    calls.push(args)
+    if (args.includes('worktree') && args.includes('list')) return ''
+    if (args.includes('for-each-ref')) return ''
+    if (args.includes('remote')) return ''
+    if (args.includes('rev-parse') && args.includes('MERGE_HEAD')) { const e = new Error('not found'); e.code = 1; throw e }
+    return ''
+  }
+  await attempt({ repoDir: '/r', worktree: '/w', integrationBranch: 'm12-integrate', baseBranch: 'master', mergeTip: 'm12/story-a-tip' }, git)
+  const addCall = calls.find(c => c[2] === 'worktree' && c[3] === 'add')
+  assert.deepEqual(addCall, ['-C', '/r', 'worktree', 'add', '/w', '-b', 'm12-integrate', 'master'])
 })
 
 test('an existing integration branch is reused, not recreated', async () => {

@@ -59,8 +59,17 @@ export async function attempt(options, git = gitRunner) {
       // Branch exists but worktree was removed; reuse the existing branch
       await git(['-C', repoDir, 'worktree', 'add', worktree, integrationBranch])
     } else {
-      // Fresh branch creation off origin/<base-branch>
-      await git(['-C', repoDir, 'worktree', 'add', worktree, '-b', integrationBranch, `origin/${baseBranch}`])
+      // Fresh branch creation off origin/<base-branch> when this repo has a
+      // remote — but a fully local repo (no remote at all, the normal shape
+      // for a solo, not-yet-pushed project under local-only DRIVE) has no
+      // `origin/<base-branch>` ref to cut from. `git worktree add ... -b ...
+      // origin/master` there fails outright with `fatal: invalid reference`,
+      // so cut from the local `<base-branch>` directly when there is no
+      // `origin` remote configured.
+      const remotes = (await git(['-C', repoDir, 'remote']))
+        .split('\n').map(line => line.trim()).filter(Boolean)
+      const startPoint = remotes.includes('origin') ? `origin/${baseBranch}` : baseBranch
+      await git(['-C', repoDir, 'worktree', 'add', worktree, '-b', integrationBranch, startPoint])
     }
     result.created = true
   }
