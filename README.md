@@ -55,6 +55,7 @@ Push changes to this repo, then in Claude Code:
 - `dispatch` — /dispatch, launch a subagent pinned to a specific model
 - `explain` — /explain, plain-language explanation + ASCII architecture diagram
 - `qa` — /qa, stress-test one component/screen area: plan interactions from its actual code, drive them in Chrome, report findings + a recommendation
+- `tree` — /tree, draw an ASCII containment/hierarchy tree of a class/module/domain-model's nesting
 - `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
 - `setup-milestone` — turns a spec into a `brd` milestone card with story and subtask cards
 - `setup-report` — renders an in-flight-work progress dashboard as an Artifact
