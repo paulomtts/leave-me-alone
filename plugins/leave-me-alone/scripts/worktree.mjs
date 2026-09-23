@@ -65,6 +65,10 @@ export async function prepare(options, git = gitRunner, wait) {
     await git(['-C', repoDir, 'rev-parse', '--verify', '--quiet', `origin/${base}`])
     resolvedBase = `origin/${base}`
   } catch { /* no such remote ref — use the local branch directly */ }
+  // Reported so callers name the same ref this script actually cut from,
+  // instead of guessing `origin/<base>` (which does not exist on a remote-less
+  // repo, or for a stacked subtask's local base).
+  result.baseRef = resolvedBase
 
   if (!result.worktreeExisted) {
     const args = result.branchExisted
