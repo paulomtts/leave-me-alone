@@ -368,6 +368,24 @@ test('a worktree.mjs that reports no baseRef stops the subtask instead of buildi
   assert.match(source, /typeof baseRef !== 'string' \|\| baseRef\.length === 0/)
 })
 
+// Review is the only stage that writes after Implement, and reviewGate stops the
+// run when any commit on the branch lacks the Plan-Hash trailer (a later resume
+// would read an untagged commit as stale debris and hard-reset it). Two live runs
+// stopped there on the reviewer's own fix commits: the Review prompt asked for
+// Co-Authored-By only, so any subtask where Review found something to fix
+// escalated. The reviewer has to be told what the implementer is told.
+test('the review prompt tells the reviewer to tag every commit it makes with the Plan-Hash', () => {
+  const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
+  const start = source.indexOf("phase('Review')")
+  const end = source.indexOf('FINALLY, once you have finished committing', start)
+  assert.ok(start !== -1 && end > start, 'could not locate the Review prompt')
+  const reviewPrompt = source.slice(start, end)
+  assert.match(reviewPrompt, /Plan-Hash: \$PLAN_HASH/,
+    'the Review prompt does not ask for a Plan-Hash trailer')
+  assert.match(reviewPrompt, /PLAN_HASH=\$\(sha256sum "\$\{plan\}" \| cut -c1-8\)/,
+    'the Review prompt does not say how to compute the hash the other commits carry')
+})
+
 test('ship.mjs is given the full card id, not the short id — a short id cannot be pasted into brd show', () => {
   const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
   assert.match(source, /ship\.mjs --card \$\{card\}/)
