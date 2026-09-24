@@ -801,9 +801,13 @@ Then the test-integrity gate, on the test portion of that same diff: no weakened
 
 You are the only stage that reads this diff and the only one that writes: the stage after you runs the suite and reports, and is forbidden to fix anything. So everything that needs changing must be changed HERE, and everything you change must be COMMITTED here — uncommitted work never lands on ${BRANCH} at all, and will stop the run.
 
-If you find any real findings, fix them yourself in the same pass: in ${WORKTREE}, on branch ${BRANCH} (TDD where behavior changes: failing test first), commit granularly, end commits with:
+If you find any real findings, fix them yourself in the same pass: in ${WORKTREE}, on branch ${BRANCH} (TDD where behavior changes: failing test first), commit granularly, and end EVERY commit you make — fixes and lint/format fixes alike — with both trailers:
 Co-Authored-By: ${coauthor}
-Also run this repo's own lint/format commands and commit any fixes they require, so the tree is clean when you finish. Skip any finding that turns out to be wrong on closer inspection — note why in fixSummary instead of "fixing" it.
+Plan-Hash: $PLAN_HASH
+
+Compute PLAN_HASH once, before your first commit: \`PLAN_HASH=$(sha256sum "${plan}" | cut -c1-8)\` — the same value every commit already on this branch carries. The stage after you counts the commits carrying it and STOPS the run if any commit on the branch lacks it, so a single untagged fix commit sinks the whole subtask.
+
+Also run this repo's own lint/format commands and commit any fixes they require (tagged the same way), so the tree is clean when you finish. Skip any finding that turns out to be wrong on closer inspection — note why in fixSummary instead of "fixing" it.
 
 FINALLY, once you have finished committing, run these three commands and report their output verbatim. Do not interpret them, do not act on them, and do not change anything in response to them — they are read by the pipeline itself, which decides what they mean:
 \`\`\`
