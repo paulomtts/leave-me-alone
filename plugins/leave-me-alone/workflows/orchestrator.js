@@ -81,8 +81,16 @@ function printableOnly(text) {
 // Reads `status` — the field flattenMilestone() (census.mjs) actually emits.
 // There is no `state` anywhere in the census; a field nothing emits is worse
 // than no check at all.
+// `merged` is a human's step after `done`: the work has landed, so it is
+// finished all the same and must never be re-dispatched. (`canceled` cards
+// never reach here — the census drops them.)
+function isFinished(card) {
+  const status = String(card.status ?? '').toLowerCase()
+  return status === 'done' || status === 'merged'
+}
+
 function isSubtaskDone(subtask) {
-  return String(subtask.status ?? '').toLowerCase() === 'done'
+  return isFinished(subtask)
 }
 
 // A story marked done is finished, full stop — never re-dispatch its subtasks.
@@ -91,7 +99,7 @@ function isSubtaskDone(subtask) {
 // The story's single status field can't be corrupted piecemeal, so it is the
 // safer gate; a story closed by mistake is reopened by hand.
 function isStoryClosed(story) {
-  return String(story.status ?? '').toLowerCase() === 'done'
+  return isFinished(story)
 }
 
 // The census arrives already ordered by its blocked_by chain — no re-sorting

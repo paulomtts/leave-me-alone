@@ -160,3 +160,29 @@ test('depth guard: a corrupted parent chain throws rather than hanging', { timeo
     /exceeded maximum ancestry depth/
   )
 })
+
+test('canceled children are out of play: they neither block nor advance the parent', () => {
+  assert.equal(rollupStatus([kid('done'), kid('canceled')]), 'done')
+  assert.equal(rollupStatus([kid('todo'), kid('canceled')]), 'todo')
+  assert.equal(rollupStatus([kid('in_progress'), kid('canceled')]), 'in_progress')
+})
+
+test('every child canceled means canceled', () => {
+  assert.equal(rollupStatus([kid('canceled'), kid('canceled')]), 'canceled')
+})
+
+test('merged children: all merged is merged, merged mixed with done is done, merged with open work is in progress', () => {
+  assert.equal(rollupStatus([kid('merged'), kid('merged')]), 'merged')
+  assert.equal(rollupStatus([kid('merged'), kid('canceled')]), 'merged')
+  assert.equal(rollupStatus([kid('merged'), kid('done')]), 'done')
+  assert.equal(rollupStatus([kid('merged'), kid('todo')]), 'in_progress')
+})
+
+test('the CLI refuses to write merged or canceled', () => {
+  for (const status of ['merged', 'canceled', 'bogus']) {
+    assert.throws(
+      () => parseArgs(['--card', SUB, '--status', status, '--repo-dir', '/abs/repo']),
+      /--status must be one of todo\|in_progress\|done/,
+    )
+  }
+})
