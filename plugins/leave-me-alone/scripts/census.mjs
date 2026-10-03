@@ -97,13 +97,25 @@ export function findMilestone(roots, needle) {
   throw new Error(`ambiguous milestone "${wanted}" — matches: ${matches.map(m => m.title).join(', ')}`)
 }
 
+// Canceled work is out of play: it has no branch to stack on and nothing to
+// run, so it is dropped here, along with any blocked_by edge pointing at it.
+const isCanceled = card => card.status === 'canceled'
+
 export function flattenMilestone(root) {
-  const stories = orderSiblings(root.children ?? []).map(story => ({
+  const canceledIds = new Set()
+  const collect = card => {
+    if (isCanceled(card)) canceledIds.add(card.id)
+    for (const child of card.children ?? []) collect(child)
+  }
+  collect(root)
+  const live = cards => (cards ?? []).filter(card => !isCanceled(card))
+
+  const stories = orderSiblings(live(root.children)).map(story => ({
     id: story.id,
     title: story.title,
     status: storedStatus(story.status),
-    blockedBy: story.blocked_by ?? [],
-    subtasks: orderSiblings(story.children ?? []).map(subtask => ({
+    blockedBy: (story.blocked_by ?? []).filter(id => !canceledIds.has(id)),
+    subtasks: orderSiblings(live(story.children)).map(subtask => ({
       id: subtask.id,
       title: subtask.title,
       status: storedStatus(subtask.status),

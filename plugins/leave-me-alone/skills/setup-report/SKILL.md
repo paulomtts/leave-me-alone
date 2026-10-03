@@ -79,6 +79,10 @@ means **PR open with CI green and mergeable, not merged into main** — the orch
 merges, so the table's "done" pill and the diagram's filled pip both mean "ready for human
 review," never "landed."
 
+brd also has `merged` (a human landed the work) and `canceled` (dropped). Neither is a fourth
+state to draw: a `canceled` unit is left out of the diagram and the counts, and a `merged` one
+renders as done.
+
 **Determining "in progress" when there's no PR yet is the part that's easy to get wrong.**
 `task.js` implements each subtask in a local worktree and only pushes a branch and opens a PR
 once the subtask's own verification gate passes — so a subtask that's mid-implementation is

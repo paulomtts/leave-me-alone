@@ -17,13 +17,26 @@ export function storedStatus(status) {
 
 // By PROGRESS, not by the least-advanced sibling: one done child among
 // unstarted ones means the parent is under way, not unstarted.
+//
+// `canceled` children are out of play: they neither hold the parent back nor
+// push it forward. A parent whose children are ALL canceled is itself
+// canceled. `merged` is "done, and landed", so a parent is `merged` only when
+// every live child is, and `done` when the live children are a mix of the two.
 export function rollupStatus(children) {
   const statuses = (children ?? []).map(child => storedStatus(child && child.status))
   if (statuses.length === 0) return null
-  if (statuses.every(status => status === 'todo')) return 'todo'
-  if (statuses.every(status => status === 'done')) return 'done'
+  const live = statuses.filter(status => status !== 'canceled')
+  if (live.length === 0) return 'canceled'
+  if (live.every(status => status === 'todo')) return 'todo'
+  if (live.every(status => status === 'merged')) return 'merged'
+  if (live.every(status => status === 'done' || status === 'merged')) return 'done'
   return 'in_progress'
 }
+
+// What a workflow may WRITE to a card. `merged` is the human's step after
+// integrating and `canceled` is their call, so neither is ever set from here;
+// parents can still roll up to them (see rollupStatus).
+export const WRITABLE_STATUSES = ['todo', 'in_progress', 'done']
 
 export function parseArgs(argv) {
   const flags = readFlags(argv, {
@@ -41,6 +54,9 @@ export function parseArgs(argv) {
   // than surfacing it as a CLI error three frames away.
   if (out.status === 'blocked') {
     throw new Error('rollup: "blocked" is derived from the dependency graph and is never stored')
+  }
+  if (!WRITABLE_STATUSES.includes(out.status)) {
+    throw new Error(`rollup: --status must be one of ${WRITABLE_STATUSES.join('|')}, got "${out.status}"`)
   }
   if (typeof out.cwd !== 'string' || !out.cwd.startsWith('/')) {
     throw new Error('rollup needs --repo-dir <absolute path>')
