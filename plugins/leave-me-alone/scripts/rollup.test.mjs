@@ -167,6 +167,18 @@ test('canceled children are out of play: they neither block nor advance the pare
   assert.equal(rollupStatus([kid('in_progress'), kid('canceled')]), 'in_progress')
 })
 
+test('archived children are out of play exactly like canceled ones', () => {
+  assert.equal(rollupStatus([kid('done'), kid('archived')]), 'done')
+  assert.equal(rollupStatus([kid('todo'), kid('archived')]), 'todo')
+  assert.equal(rollupStatus([kid('in_progress'), kid('archived')]), 'in_progress')
+  assert.equal(rollupStatus([kid('merged'), kid('archived')]), 'merged')
+})
+
+test('a parent whose children are all out of play rolls up to canceled, archived or not', () => {
+  assert.equal(rollupStatus([kid('archived'), kid('archived')]), 'canceled')
+  assert.equal(rollupStatus([kid('archived'), kid('canceled')]), 'canceled')
+})
+
 test('every child canceled means canceled', () => {
   assert.equal(rollupStatus([kid('canceled'), kid('canceled')]), 'canceled')
 })
@@ -178,8 +190,8 @@ test('merged children: all merged is merged, merged mixed with done is done, mer
   assert.equal(rollupStatus([kid('merged'), kid('todo')]), 'in_progress')
 })
 
-test('the CLI refuses to write merged or canceled', () => {
-  for (const status of ['merged', 'canceled', 'bogus']) {
+test('the CLI refuses to write merged, canceled or archived', () => {
+  for (const status of ['merged', 'canceled', 'archived', 'bogus']) {
     assert.throws(
       () => parseArgs(['--card', SUB, '--status', status, '--repo-dir', '/abs/repo']),
       /--status must be one of todo\|in_progress\|done/,

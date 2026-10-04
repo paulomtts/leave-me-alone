@@ -1,6 +1,8 @@
 // Reshaping `brd tree` into the flat census the orchestrator's graph code
 // already expects. Pure functions only: no CLI, no I/O.
 
+import { isOutOfPlay } from './rollup.mjs'
+
 // Execution order for one card's children.
 //
 // Order used to be parsed out of an ordinal prefix in the title. It now comes
@@ -97,24 +99,23 @@ export function findMilestone(roots, needle) {
   throw new Error(`ambiguous milestone "${wanted}" — matches: ${matches.map(m => m.title).join(', ')}`)
 }
 
-// Canceled work is out of play: it has no branch to stack on and nothing to
+// Canceled and archived work is out of play: it has no branch to stack on and nothing to
 // run, so it is dropped here, along with any blocked_by edge pointing at it.
-const isCanceled = card => card.status === 'canceled'
 
 export function flattenMilestone(root) {
-  const canceledIds = new Set()
+  const outOfPlayIds = new Set()
   const collect = card => {
-    if (isCanceled(card)) canceledIds.add(card.id)
+    if (isOutOfPlay(card)) outOfPlayIds.add(card.id)
     for (const child of card.children ?? []) collect(child)
   }
   collect(root)
-  const live = cards => (cards ?? []).filter(card => !isCanceled(card))
+  const live = cards => (cards ?? []).filter(card => !isOutOfPlay(card))
 
   const stories = orderSiblings(live(root.children)).map(story => ({
     id: story.id,
     title: story.title,
     status: storedStatus(story.status),
-    blockedBy: (story.blocked_by ?? []).filter(id => !canceledIds.has(id)),
+    blockedBy: (story.blocked_by ?? []).filter(id => !outOfPlayIds.has(id)),
     subtasks: orderSiblings(live(story.children)).map(subtask => ({
       id: subtask.id,
       title: subtask.title,
