@@ -82,7 +82,7 @@ function printableOnly(text) {
 // There is no `state` anywhere in the census; a field nothing emits is worse
 // than no check at all.
 // `merged` is a human's step after `done`: the work has landed, so it is
-// finished all the same and must never be re-dispatched. (`canceled` cards
+// finished all the same and must never be re-dispatched. (`canceled` and `archived` cards
 // never reach here — the census drops them.)
 function isFinished(card) {
   const status = String(card.status ?? '').toLowerCase()

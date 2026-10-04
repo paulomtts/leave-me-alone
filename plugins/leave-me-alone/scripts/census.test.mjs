@@ -144,6 +144,21 @@ test('canceled stories and subtasks are dropped, and so are blocked_by edges to 
   assert.deepEqual(census.stories[0].blockedBy, [ID(7)])
 })
 
+test('archived stories and subtasks are dropped like canceled ones, and so are blocked_by edges to them', () => {
+  const tree = node(1, 'M', {
+    children: [
+      node(2, 'Story: archived', { status: 'archived', children: [node(4, 'x')] }),
+      node(8, 'Story: canceled', { status: 'canceled' }),
+      node(3, 'Story: kept', { blocked_by: [ID(2), ID(8), ID(7)],
+        children: [node(5, 'archived sub', { status: 'archived' }), node(6, 'live sub')] }),
+    ],
+  })
+  const census = flattenMilestone(tree)
+  assert.deepEqual(census.stories.map(s => s.title), ['Story: kept'])
+  assert.deepEqual(census.stories[0].subtasks.map(s => s.title), ['live sub'])
+  assert.deepEqual(census.stories[0].blockedBy, [ID(7)])
+})
+
 test('merged is passed through untouched', () => {
   const tree = node(1, 'M', { children: [node(2, 'S', { status: 'merged', children: [node(3, 't', { status: 'merged' })] })] })
   const census = flattenMilestone(tree)

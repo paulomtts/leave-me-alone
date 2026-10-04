@@ -392,7 +392,7 @@ test('ship.mjs is given the full card id, not the short id — a short id cannot
   assert.doesNotMatch(source, /ship\.mjs --card \$\{id\}/)
 })
 
-test('the explore step refuses a card that is already merged or canceled', () => {
+test('the explore step refuses a card that is already merged, canceled or archived', () => {
   const source = readFileSync(new URL('./task.js', import.meta.url), 'utf8')
-  assert.match(source, /status is \\`merged\\` or \\`canceled\\`, the card is closed: set refused=true/)
+  assert.match(source, /status is \\`merged\\`, \\`canceled\\` or \\`archived\\`, the card is closed: set refused=true/)
 })

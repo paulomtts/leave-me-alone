@@ -18,15 +18,20 @@ export function storedStatus(status) {
 // By PROGRESS, not by the least-advanced sibling: one done child among
 // unstarted ones means the parent is under way, not unstarted.
 //
-// `canceled` children are out of play: they neither hold the parent back nor
-// push it forward. A parent whose children are ALL canceled is itself
-// canceled. `merged` is "done, and landed", so a parent is `merged` only when
+// Statuses that take a card out of play: `canceled` (dropped) and `archived`
+// are treated identically everywhere (roll-up, census, dispatch).
+export const OUT_OF_PLAY_STATUSES = new Set(['canceled', 'archived'])
+export const isOutOfPlay = card => OUT_OF_PLAY_STATUSES.has(card && card.status)
+
+// `canceled`/`archived` children are out of play: they neither hold the parent
+// back nor push it forward. A parent whose children are ALL out of play is
+// itself out of play: `archived` if every child is archived, else `canceled`. `merged` is "done, and landed", so a parent is `merged` only when
 // every live child is, and `done` when the live children are a mix of the two.
 export function rollupStatus(children) {
   const statuses = (children ?? []).map(child => storedStatus(child && child.status))
   if (statuses.length === 0) return null
-  const live = statuses.filter(status => status !== 'canceled')
-  if (live.length === 0) return 'canceled'
+  const live = statuses.filter(status => !OUT_OF_PLAY_STATUSES.has(status))
+  if (live.length === 0) return statuses.every(status => status === 'archived') ? 'archived' : 'canceled'
   if (live.every(status => status === 'todo')) return 'todo'
   if (live.every(status => status === 'merged')) return 'merged'
   if (live.every(status => status === 'done' || status === 'merged')) return 'done'
@@ -34,7 +39,7 @@ export function rollupStatus(children) {
 }
 
 // What a workflow may WRITE to a card. `merged` is the human's step after
-// integrating and `canceled` is their call, so neither is ever set from here;
+// integrating and `canceled`/`archived` are their call, so none is ever set from here;
 // parents can still roll up to them (see rollupStatus).
 export const WRITABLE_STATUSES = ['todo', 'in_progress', 'done']
 
