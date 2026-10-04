@@ -174,8 +174,8 @@ test('archived children are out of play exactly like canceled ones', () => {
   assert.equal(rollupStatus([kid('merged'), kid('archived')]), 'merged')
 })
 
-test('every child archived means archived; a mix of canceled and archived means canceled', () => {
-  assert.equal(rollupStatus([kid('archived'), kid('archived')]), 'archived')
+test('a parent whose children are all out of play rolls up to canceled, archived or not', () => {
+  assert.equal(rollupStatus([kid('archived'), kid('archived')]), 'canceled')
   assert.equal(rollupStatus([kid('archived'), kid('canceled')]), 'canceled')
 })
 
