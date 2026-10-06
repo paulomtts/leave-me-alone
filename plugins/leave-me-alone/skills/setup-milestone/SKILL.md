@@ -106,8 +106,6 @@ Put the thing others rest on first.
 
 **Same-level stories run in parallel lanes**, as separate stacks off the same base. Overlapping files are allowed. Nothing fails during the run — a conflict surfaces at Integrate, not mid-run, and is resolved there. Put a real dependency edge between two stories only when one needs the other's code, never just because they touch the same files.
 
-**Subtasks that do not depend on each other should be separate stories, not a chain.** A story's subtasks always stack (each branch builds on the previous one), so chaining independent work serializes it for no reason. The cost of splitting: each story is its own stack off the same base, so it gets its own branch chain and its own Integrate merge.
-
 ### Worked example
 
 Spec slice: *"the workflow checker should be consumable by other tooling, and its flags documented."*
