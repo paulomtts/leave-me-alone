@@ -340,7 +340,7 @@ test('setup-milestone keeps the judgment that is the actual product', () => {
   const source = read('setup-milestone')
   // Cheap canaries for the sections a mechanical rewrite would strip.
   assert.match(source, /one subtask = one green PR/i)
-  assert.match(source, /file-disjoint/i)
+  assert.match(source, /parallel lanes/i)
   assert.match(source, /Subtasks that ship no behavior/i)
 })
 ```
