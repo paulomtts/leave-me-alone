@@ -61,6 +61,19 @@ Docs, config, scaffolding and pure-refactor cards are legitimate and must NOT be
 
 The common failure is a docs card written from the spec instead of the code, describing an interface that got built differently. Its body should name the files to read.
 
+### What `blocked_by` means
+
+`blocked_by` (milestone→milestone, story→story, subtask→subtask) means ONE thing: **B cannot start until A's output exists** — code, files, or an interface B builds on or imports. Per edge, ask: *what exactly does B need from A that does not exist without A?* If there is no concrete answer, do not record the edge.
+
+It is NOT for:
+- **Conflict avoidance.** Overlapping files are a merge-time concern, resolved at Integrate — not a reason to serialize.
+- **Priority or ordering preference.** That is the queue's concern: the order in which milestones are launched. `brd` has no priority or ordering field (`brd next` is oldest-first), so there is nowhere on the board to put it.
+- **Limiting machine load.** Concurrency is a launch-time cap (e.g. `am run --max-concurrent`), not a graph shape.
+
+**Milestones:** in `am run --board`, a milestone blocked by another starts from its blocker's integrate branch, so a milestone edge also means "starts from their code". Independent milestones run from the base branch.
+
+An unneeded edge costs real parallelism and shifts bases; a missing one is caught by the dry run's `base` column.
+
 ### Order is stack order, and it must be reproducible
 
 Every branch name and every base is **derived**, not discovered:
@@ -91,9 +104,7 @@ optional decoration now — nothing parses them.
 
 Put the thing others rest on first.
 
-**Keep stories in the same level file-disjoint.** Stories with no dependency between them run in parallel, as separate stacks off the same base. If two of them edit the same files, nothing fails during the run — the conflict lands on whoever merges the stacks. Either give them disjoint footprints, or make one `blockedBy` the other so they stack instead.
-
-Estimating footprint before implementing is guesswork; you do not need precision, only overlap. Name the two or three files each story clearly owns. If two stories name the same file, treat them as overlapping and chain them.
+**Same-level stories run in parallel lanes**, as separate stacks off the same base. Overlapping files are allowed. Nothing fails during the run — a conflict surfaces at Integrate, not mid-run, and is resolved there. Put a real dependency edge between two stories only when one needs the other's code, never just because they touch the same files.
 
 ### Worked example
 
@@ -112,7 +123,7 @@ story 3a4b5c6d  Document the checker's flags                        root: task-c
 
 Why it cuts this way:
 
-- **e5f6a7b8 before c9d0e1f2** — both touch the same argument parsing. Stacking means c9d0e1f2 builds on e5f6a7b8's parser instead of racing it. Two parallel stories here would conflict at merge time.
+- **e5f6a7b8 before c9d0e1f2** — c9d0e1f2 extends the argument parser that e5f6a7b8 introduces, so it needs that output; stacking makes the dependency real.
 - **e5f6a7b8 and c9d0e1f2 are separate**, not one "add both flags" card, because each is independently green and independently reviewable. The split costs one extra branch and buys two tight diffs.
 - **7d8e9f0a is its own story, not a third subtask of a1b2c3d4**, because it is a different kind of work with a different footprint (`README`, not `scripts/`). As a story blocked by a1b2c3d4 it roots on `task-c9d0e1f2`, so its worktree contains both finished flags — it can document what was actually built.
 - **7d8e9f0a has no tests, and that is right.** Judged by the behavior-subtask rule it would look "too small" and get folded in; judged as docs, it is correctly sized.
@@ -153,12 +164,12 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
    ```bash
    brd block <BLOCKED_STORY_ID> --by <BLOCKER_STORY_ID>
    ```
-   Derive the edges from the spec's own slice order, then **write down the DAG you intended** — the next step checks the board against it.
+   Derive the edges from what each story needs from another (apply the per-edge test in "What `blocked_by` means"), then **write down the DAG you intended** — the next step checks the board against it.
 6. **Verify** — read the tree back and compare it to what you intended:
    ```bash
    brd tree <milestone id>
    ```
-   Check: the milestone shows every story and subtask you meant to create, each story's subtasks are chained in the right order, and each story's `blocked_by` matches the DAG you wrote down in step 5. **If more than one story has no blockers, stop and say so** — a real milestone has one or two genuine roots, so a flat list of unblocked stories usually means an edge was never written, not that the work is parallel. **If any story shows two or more blockers, fix it now** — the orchestrator will refuse it.
+   Check: the milestone shows every story and subtask you meant to create, each story's subtasks are chained in the right order, and each story's `blocked_by` matches the DAG you wrote down in step 5. **If more than one story has no blockers, stop and check each against the DAG you wrote down** — a flat list of unblocked stories often means an edge was never written; it is fine only when each root truly needs nothing from the others. **If any story shows two or more blockers, fix it now** — the orchestrator will refuse it.
 7. **Dry run** — the real pre-flight, writes nothing:
    ```
    Workflow({ name: "orchestrator" }, args: {

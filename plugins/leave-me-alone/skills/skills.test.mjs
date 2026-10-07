@@ -96,7 +96,11 @@ test('setup-milestone keeps the judgment that is the actual product', () => {
   const source = read('setup-milestone')
   // Cheap canaries for the sections a mechanical rewrite would strip.
   assert.match(source, /one subtask = one green (?:PR|local branch)/i)
-  assert.match(source, /file-disjoint/i)
+  assert.match(source, /parallel lanes/i)
+  assert.match(source, /conflict surfaces at Integrate/i)
+  assert.match(source, /does not exist without A/i, 'per-edge blocked_by test')
+  assert.match(source, /NOT for:/)
+  assert.doesNotMatch(source, /file-disjoint/i)
   assert.match(source, /Subtasks that ship no behavior/i)
 })
 
