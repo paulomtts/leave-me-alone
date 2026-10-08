@@ -53,13 +53,12 @@ Push changes to this repo, then in Claude Code:
 - `brief` — /brief, fast recap of conversation/task state
 - `build` — rebuild worktree containers, dodging port conflicts
 - `dispatch` — /dispatch, launch a subagent pinned to a specific model
-- `explain` — /explain, plain-language explanation + ASCII architecture diagram
-- `qa` — /qa, stress-test one component/screen area: plan interactions from its actual code, drive them in Chrome, report findings + a recommendation
+- `explain` — /explain, business-view mental model (who / what / why it matters) with ASCII flowcharts and sequence diagrams; `--technical` for the code-architecture view
 - `tree` — /tree, draw an ASCII containment/hierarchy tree of a class/module/domain-model's nesting
 - `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
 - `setup-milestone` — turns a spec into a `brd` milestone card with story and subtask cards
 - `setup-report` — renders an in-flight-work progress dashboard as an Artifact
-- `smoke` — /smoke, rebuild + drive the app in Chrome to smoke-test recent work
+- `smoke` — /smoke, drive the app in Chrome: rebuild + smoke-test recent work (delivered mode), or stress-test one component/screen area from its actual code with a findings report + recommendation (component mode)
 
 ## Auto-allow hook
 

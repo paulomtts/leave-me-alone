@@ -1,59 +1,111 @@
 ---
 name: explain
-description: Explain a piece of code, a module, a concept, a system, or how something works — in plain beginner-friendly words plus an ASCII diagram showing how it fits into the surrounding architecture. Use whenever the user invokes /explain, or asks "explain X", "what does X do", "how does X work", "help me understand X", "walk me through X", "what is this", or is reviewing/onboarding to unfamiliar code and wants a fast mental model rather than an exhaustive write-up. The whole point is high signal per word: a one-line gist, a picture of where it sits, and a few tight notes — not a wall of text.
+description: Explain a feature, flow, concept, system, or piece of code as a business mental model — who is involved, what happens, why it matters — using ASCII flowcharts (boxes with labeled arrows) and sequence diagrams, in words a product person can follow. Use whenever the user invokes /explain, or asks "explain X", "what does X do", "how does X work", "help me understand X", "walk me through X", "what is this", or is onboarding to something unfamiliar and wants a fast mental model. Business view by default; pass `--technical` for the code-architecture view. The whole point is high signal per word: a short lead, a picture, a few tight notes — not a wall of text.
 ---
 
 # Explain
 
-Your job is to give someone a **correct mental model fast**. They're a beginner to *this thing* (not necessarily to programming), and they want to understand it and see where it fits — without reading a page of prose. Optimize for information delivered per word read.
+Give someone a **correct mental model fast**. By default the reader is a product person: they care about who is involved, what happens, and what it means for the business — not how it is built. Optimize for information delivered per word read.
+
+If the arguments contain `--technical`, use [Technical view](#technical-view) instead. Only the flag switches views; wording like "architecture" in the request does not.
 
 ## First, look — don't guess
 
-Before explaining anything in a codebase, read the actual thing (the file, the function, the module's neighbors). A confident wrong explanation is worse than useless because the reader can't tell it's wrong. If `/explain` is invoked with no clear target, ask one short question to pin down what they mean, then proceed. If the target is a general concept rather than code, skip straight to the explanation.
+Before explaining anything in a codebase, read the actual thing (the file, the function, the module's neighbors). A confident wrong explanation is worse than useless because the reader can't tell it's wrong. Code is evidence for the business model, not the subject: read it, then describe what it does in business terms. If `/explain` is invoked with no clear target, ask one short question to pin down what they mean, then proceed. If the target is a general concept rather than code, skip straight to the explanation.
 
-A target passed as `@path/to/file` is relative to the **repo/project root**, not your current working directory. Resolve it to an absolute path before reading — `@_shared/actions.py` in a project rooted at `/home/me/proj/app/core` means `/home/me/proj/app/core/_shared/actions.py`. If a read fails, find the file first (e.g. by basename) rather than guessing at relative paths.
+A target passed as `@path/to/file` is relative to the **repo/project root**, not your current working directory. Resolve it to an absolute path before reading. If a read fails, find the file first (e.g. by basename) rather than guessing at relative paths.
 
 ## The shape of a good answer
 
-Three parts, in this order. Keep the whole thing short — usually it fits on one screen.
+Keep the whole thing short — it should fit on one screen.
 
-**1. The gist** — one or two sentences, plain words, no jargon you haven't earned. Lead with what it *is* and *why it exists*, not how it's built. Use a concrete analogy when it genuinely clarifies; skip it when it doesn't.
+**1. The lead** — three short lines, always in this order:
 
-**2. A diagram** — show where this thing sits and how data/control flows through it. This is the part most explanations skip and the part that makes things *click*, because "how it fits" is exactly what a beginner can't see yet. Pick the form that matches what you're explaining:
+- **Who** — the actors (customer, admin, partner, the system acting on someone's behalf).
+- **What** — the outcome, in one sentence of plain words.
+- **Why it matters** — the business value or the cost of it going wrong.
 
-- **Box-and-arrow flow** for static structure — what calls what, what depends on what, how layers stack. Best default for "what is this module / how does it fit."
-- **Sequence diagram** for behavior over time — a request flowing through steps, who talks to whom in what order. Best for "what happens when X."
+**2. Diagrams** — pick the form that fits; use one or both.
 
-If a diagram wouldn't add anything (e.g. explaining a single pure function or a plain definition), don't force one — say so implicitly by just omitting it. But for anything with structure, moving parts, or a place in a larger system, draw it. When a diagram needs more care than a few boxes, lean on the `ascii-diagrams` skill for layout technique.
+- **Flowchart** for how things relate or where the flow branches. Business nouns go in boxes; the verb goes on the arrow.
+- **Sequence diagram** for who does what, in order, over time. One column per actor.
 
-**3. A few notes** — 2 to 4 tight bullets covering only what the gist and diagram didn't already convey: a key responsibility, a non-obvious detail, a common gotcha, or the one thing they'd trip on. Stop when you've said what matters. Resist the urge to be complete — completeness is the enemy here.
+Skip a diagram only when it would add nothing (a single definition, a one-step action). For anything with several actors or steps, draw it.
+
+Always draw the **failure branches** next to the happy path — refund, declined payment, approval denied, item out of stock. Show each as one labeled branch off the main flow, not a full sub-flow. If it needs more than a branch, say so in the notes.
+
+**3. A few notes** — 2 to 4 bullets covering only what the lead and diagrams didn't: a business rule, an exception that costs money or trust, who is affected and how. Stop when you've said what matters. Completeness is the enemy here.
+
+## Vocabulary
+
+Use business nouns and verbs. Words a product person already knows (login, payment, notification, order) are fine. Leave out implementation words: API, endpoint, queue, schema, cache, class and function names, file paths. When code is the target, translate what it does into actors, things and outcomes: `OrderService.create` becomes "the customer places an order".
+
+## Diagram conventions
+
+Boxes hold nouns; arrows carry verbs. Keep labels short and read left-to-right or top-to-bottom.
+
+Flowchart, with a failure branch:
+
+```
+ ┌──────────┐  places   ┌─────────┐  is charged  ┌─────────┐  ships to  ┌──────────┐
+ │ Customer │ ────────► │  Order  │ ───────────► │ Payment │ ─────────► │ Customer │
+ └──────────┘           └─────────┘              └────┬────┘            └──────────┘
+                                                      │ declined
+                                                      ▼
+                                              ┌───────────────┐
+                                              │ Order on hold │ ──notifies──► Customer
+                                              └───────────────┘
+```
+
+Sequence diagram, with a failure branch:
+
+```
+ Customer          Store            Payments         Warehouse
+    │ places order   │                 │                 │
+    │───────────────►│ charges         │                 │
+    │                │────────────────►│                 │
+    │                │   approved      │                 │
+    │                │◄────────────────│ ships order     │
+    │                │─────────────────────────────────►│
+    │ confirmation   │                 │                 │
+    │◄───────────────│                 │                 │
+    │                │                 │                 │
+    │    ✗ if declined: Store holds the order and asks the customer to retry
+```
 
 ## Worked example
 
-For a request like *"explain the conversation controller"*:
+For a request like *"explain checkout"*:
 
-> **The controller is the front door to the conversation module.** Routes don't touch domain logic directly — they call the controller, which validates input, picks the right service, and hands back a result. It's the thin seam between the web layer and the business rules.
+> **Who:** a customer buying from the store; the payment provider and the warehouse act on the order.
+> **What:** turns a basket into a paid order that gets shipped.
+> **Why it matters:** this is where revenue is actually captured — a failure here is a lost sale.
 >
 > ```
->   web route
->      │  calls controller.start_message(...)
->      ▼
->  ┌─────────────┐   picks service   ┌──────────────┐
->  │ controller  │ ────────────────► │  messaging   │  (business logic)
->  └─────────────┘                   └──────┬───────┘
->      ▲                                    │ uses ports
->      │ returns Result                     ▼
->   web route                          repo / agent / clock
+>  ┌──────────┐ fills  ┌────────┐ pays for ┌─────────┐ triggers ┌──────────┐
+>  │ Customer │ ─────► │ Basket │ ───────► │  Order  │ ───────► │ Shipment │
+>  └──────────┘        └────────┘          └────┬────┘          └──────────┘
+>                                               │ payment declined
+>                                               ▼
+>                                       ┌───────────────┐
+>                                       │ Order on hold │ ──asks retry──► Customer
+>                                       └───────────────┘
 > ```
 >
-> - It owns *wiring*, not *rules* — no business logic lives here, just dispatch.
-> - Everything it returns is a `Result`-style value, so callers handle success/failure uniformly.
-> - The services it calls reach the outside world only through ports (repo, agent, clock), which is why this stays easy to test.
+> - Stock is reserved when the order is placed, not when it ships, so a held order still ties up inventory.
+> - A declined payment never cancels the order automatically; the customer has 24 hours to retry.
+> - Customers get an email at each step: placed, held, shipped.
 
-Notice the proportions: a couple sentences, a diagram doing real work, three bullets. That's the target density.
+Notice the proportions: a three-line lead, a diagram doing real work with its failure branch, three bullets.
+
+## Technical view
+
+Used only with `--technical`. Same short shape, aimed at an engineer new to this code.
+
+1. **The gist** — one or two sentences: what it *is* and *why it exists*, not how it's built. Use a concrete analogy only when it clarifies.
+2. **A diagram** — box-and-arrow for static structure (what calls what, how layers stack), sequence diagram for behavior over time (a request flowing through steps). Omit it for a single pure function or a plain definition.
+3. **2–4 notes** — a key responsibility, a non-obvious detail, a gotcha. Code, file and class names are welcome here.
 
 ## Tone and length
 
-Warm and direct, like a senior dev sketching on a whiteboard for a new teammate. No preamble ("Sure! Let me explain…"), no restating the question, no summary at the end. The reader asked because they want to *understand quickly* — every sentence that isn't pulling its weight is costing them. When in doubt, cut.
-
-Scale to the target: a one-liner function gets two sentences and maybe no diagram; a whole subsystem gets the gist, a diagram, and a few bullets — but still not more than a screen. If they want to go deeper, they'll ask.
+Warm and direct, like someone sketching on a whiteboard for a new teammate. No preamble ("Sure! Let me explain…"), no restating the question, no summary at the end. Every sentence that isn't pulling its weight costs the reader time. When in doubt, cut. Scale to the target: a small thing gets a lead and maybe no diagram; a whole subsystem still gets no more than one screen. If they want to go deeper, they'll ask.
