@@ -52,7 +52,7 @@ Push changes to this repo, then in Claude Code:
 - `bench-prompt` — benchmark a prompt change with a repeated synthetic-input harness
 - `brief` — /brief, fast recap of conversation/task state
 - `build` — rebuild worktree containers, dodging port conflicts
-- `dispatch` — /dispatch, launch a subagent pinned to a specific model
+- `dispatch` — /dispatch, launch a subagent (Sonnet by default, or a model you name) to investigate and fix something
 - `explain` — /explain, business-view mental model (who / what / why it matters) with ASCII flowcharts and sequence diagrams; `--technical` for the code-architecture view
 - `tree` — /tree, draw an ASCII containment/hierarchy tree of a class/module/domain-model's nesting
 - `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
