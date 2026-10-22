@@ -53,6 +53,7 @@ Push changes to this repo, then in Claude Code:
 - `brief` — /brief, fast recap of conversation/task state
 - `build` — rebuild worktree containers, dodging port conflicts
 - `dispatch` — /dispatch, launch a subagent (Sonnet by default, or a model you name) to investigate and fix something
+- `interview` — /interview, ask the open questions in context via the option-picker UI, each explained simply with a recommended option
 - `explain` — /explain, business-view mental model (who / what / why it matters) with ASCII flowcharts and sequence diagrams; `--technical` for the code-architecture view
 - `tree` — /tree, draw an ASCII containment/hierarchy tree of a class/module/domain-model's nesting
 - `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
