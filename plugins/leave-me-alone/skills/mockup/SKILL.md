@@ -22,6 +22,9 @@ Tag every claim **verified** (read in source) or **inferred**. If you did not re
 
 One file, one page, English unless told otherwise. Load `artifact-design` first, then publish with the Artifact tool, updating the same URL on every later pass.
 
+**Start from the project's template when it has one.** If `docs/artifacts/_mockup-template.html` exists in the repo, the page MUST be built from it: copy it to `docs/artifacts/<feature>-mockup.html`, replace the blocks marked `TEMPLATE: replace`, fill its sections in its order, and keep its page chrome unchanged (the sticky top bar with the two toggles and the theme control, the Contents sidebar built from `<section data-nav>`, the NEW/MOVED classes, the build-note pin markup and its script). Do not invent a second layout. Only when that file does not exist, build the page from the fallback structure below.
+
+- **Page chrome** (fallback only): a sticky top bar with the title and the toggles from sections 3 and 4, and a Contents sidebar listing every section with scroll-spy, collapsing into a drawer on narrow screens.
 - **Hero**: the main surface at its real size (a drawer is its real width, in its real surrounding, over a dimmed neighbour), with the states side by side. Interactive where cheap: disclosures, toggles, an expand animation, a replay button. Respect reduced motion.
 - **Cards**: lettered, each a caption plus a stage showing one state, one dialog or one list. The caption says what the card proves.
 - **Decisions** and **Open questions** notes at the top. A decision records who made it; a guess is labelled a guess.
