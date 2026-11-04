@@ -22,21 +22,43 @@ Tag every claim **verified** (read in source) or **inferred**. If you did not re
 
 One file, one page, English unless told otherwise. Load `artifact-design` first, then publish with the Artifact tool, updating the same URL on every later pass.
 
+**Start from the project's template when it has one.** If `docs/artifacts/_mockup-template.html` exists in the repo, the page MUST be built from it: copy it to `docs/artifacts/<feature>-mockup.html`, replace the blocks marked `TEMPLATE: replace`, fill its sections in its order, and keep its page chrome unchanged (the sticky top bar with the two toggles and the theme control, the Contents sidebar built from `<section data-nav>`, the marker and badge classes, each section's `data-allow` list, the build-note pin markup and its script). Do not invent a second layout. Only when that file does not exist, build the page from the fallback structure below.
+
+The template's section order: Intent, Read first (where the code differs from the brief), Decisions (D1…), Open questions (Q1…), Not drawn, Alternatives (optional), Hero, lettered cards (a Today/After pair where a surface changes), Rules (optional, R1… with today, proposed rule, severity, source and the cards that show it), Build summary, Fidelity notes, Revisions, Badge reference.
+
+- **Page chrome** (fallback only): a sticky top bar with the title and the toggles from sections 3 and 4, and a Contents sidebar listing every section with scroll-spy, collapsing into a drawer on narrow screens.
 - **Hero**: the main surface at its real size (a drawer is its real width, in its real surrounding, over a dimmed neighbour), with the states side by side. Interactive where cheap: disclosures, toggles, an expand animation, a replay button. Respect reduced motion.
 - **Cards**: lettered, each a caption plus a stage showing one state, one dialog or one list. The caption says what the card proves.
 - **Decisions** and **Open questions** notes at the top. A decision records who made it; a guess is labelled a guess.
 - **Fidelity notes** at the bottom: for each surface, the source files it mirrors, what is existing and what is new, every deliberate deviation with its reason, and everything you could not verify.
 - **Build summary**: a table of every new component the build needs (proposed name, what it composes, where it lives per the taxonomy) and every existing one reused.
 
+## Badges
+
+Badges are a closed vocabulary; use no other. Each section allows only the badges in its row. App badges drawn inside a stage are copies of real UI and fall outside this list. The project template enforces it: `data-allow` on each section prints the allowed set under the heading and outlines any other badge in red, with a console warning.
+
+| Badge | Means | Allowed in |
+|---|---|---|
+| NEW · MOVED · CHANGED marker | not in the app yet · exists in a new place · exists, behaviour changes | on drawn elements inside a stage: Hero, cards |
+| Owner · Guess | the owner decided · the author's guess | Decisions |
+| Open · Answered | unanswered · answered, answer kept beside it | Open questions |
+| Recommended | the option the author recommends | Open questions, Alternatives |
+| Verified · Inferred | read in source · reasoned, not read | Read first, Rules, Fidelity notes |
+| High · Medium · Low | harm the rule gap does | Rules |
+| Builtin · Primitive · Existing · Extend · New · Unsure | component kind to build with | build notes, Build summary |
+| Draft N · Rendered · Not rendered | draft number or date, whether the page was rendered | top bar |
+
+Intent, Not drawn and Revisions carry no badges.
+
 ## 3. Mark new against existing
 
-A "Highlight new elements" toggle, on by default. NEW is a visible outline plus a small tag; MOVED (an existing element in a new place) gets a second colour. Anything without a marker is existing behaviour, so the reader can trust the unmarked parts as a reference.
+A "Highlight new elements" toggle, on by default. NEW is a visible outline plus a small tag; MOVED (an existing element in a new place) and CHANGED (an existing element whose behaviour changes) each get their own colour. Anything without a marker is existing behaviour, so the reader can trust the unmarked parts as a reference.
 
 ## 4. Build notes
 
 A "Show build notes" toggle, off by default, remembered in `localStorage` inside try/catch. When on, numbered pins sit on the parts of the draft with leader lines to notes in a side margin; under about 1000px the notes become a numbered list below each card and the lines drop.
 
-Each note has: a kind tag (**BUILTIN** from the UI framework, **PRIMITIVE** from the app, **EXISTING** reused as-is, **NEW**), the component name, its source path, and one line on how to use it (variant, props, slot). Cover every new or moved element and the existing part it mounts into. Verify every name and path by reading the source; never guess. Where it is unclear write **UNSURE** and say what you checked. Prefer a builtin, then an app primitive, and propose a new component only when neither fits, as the standards say.
+Each note has: a kind tag (**BUILTIN** from the UI framework, **PRIMITIVE** from the app, **EXISTING** reused as-is, **EXTEND** an existing component that gains a prop or variant, **NEW**), the component name, its source path, and one line on how to use it (variant, props, slot). Cover every new or moved element and the existing part it mounts into. Verify every name and path by reading the source; never guess. Where it is unclear write **UNSURE** and say what you checked. Prefer a builtin, then an app primitive, and propose a new component only when neither fits, as the standards say.
 
 ## 5. Working method
 
