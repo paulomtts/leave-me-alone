@@ -54,6 +54,7 @@ Push changes to this repo, then in Claude Code:
 - `bedtime` — /bedtime, unattended overnight mode: watch `am` runs, fix escalations by judgement call, resume, and leave a morning report; never asks questions
 - `build` — rebuild worktree containers, dodging port conflicts
 - `dispatch` — /dispatch, launch a subagent (Sonnet by default, or a model you name) to investigate and fix something
+- `d` — /d, alias for /dispatch
 - `interview` — /interview, ask the open questions in context via the option-picker UI, each explained simply with a recommended option
 - `explain` — /explain, business-view mental model (who / what / why it matters) with ASCII flowcharts and sequence diagrams; `--technical` for the code-architecture view
 - `walkthrough` — /walkthrough, build a click-through artifact of a flow's screens and branches from the real code: path tabs, a mock stage, and a step card saying what the user sees and what happens behind the scenes
