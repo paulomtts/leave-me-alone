@@ -1,40 +1,43 @@
 ---
 name: progress
-description: Use when the user invokes /progress (or /p), or asks "how far along are we", "what's done and what's left", "show progress" — prints a compact progress report of the things to do in this session.
+description: Use when the user invokes /progress (or /p), or asks "how far along are we", "what's done and what's left", "show progress" — prints a compact, scannable progress report of the things to do in this session.
 ---
 
 # Progress
 
-Print where the session's to-do work stands, in the shape below. Terminal text only: no artifact, no tools needed beyond reading the session's task list (TodoWrite/task list) and what the conversation already established.
+Print where the session's to-do work stands, as one compact block. Terminal text only: no artifact. Read the session's task list first, then what the conversation established.
 
 ## Shape
 
+Put the report in a code block so columns align.
+
 ```
-<one sentence: where things stand right now>
+<One sentence: where things stand right now.>
 
-<Goal name>
-[█████████████░░░░░░░]  ~65%
+Release 0.1.0   [█████████████░░░░░░░]  3.3 of 5 items · ~65%
 
-<Item 1>   [██████████] done, <evidence: on main, CI green, committed…>
-<Item 2>   [█████░░░░░] in progress, <what is done / what is left>
-<Item 3>   [░░░░░░░░░░] not started
-<Item 4>   [░░░░░░░░░░] waits on <blocker>
+ ✓  Release preparation        done: on main, CI green
+ ✓  Audit round 6 + fix pass   done: on main, CI green
+ ●  xarch review, steps 1-4    [█░░░░░░░░░] step 1 of 4, nothing committed
+ ○  xarch review, steps 5-10   [░░░░░░░░░░] not started
+ ⏸  Tag 0.1.0, GitHub release  [░░░░░░░░░░] waits on: the review, PyPI account
 
-<One line saying how the percentage was reached, e.g. "The 65% is my rough estimate, not a measurement.">
+Next: finish review step 1.
 
-- <at most 3 bullets: the non-obvious state of in-flight items, and anything waiting on the user>
+- <≤3 bullets: non-obvious state of in-flight items, risks, anything that needs the user>
 ```
 
 ## Rules
 
-1. **Source of truth:** the session's task list first; if empty, the work items the conversation has established. Never invent items.
-2. **Bars:** 10 cells per item (`█` done, `░` remaining), the overall bar 20 cells. Align item names in a column.
-3. **Per item:** a short status after the bar, with evidence for "done" (committed, merged, tests green) — not just the word.
-4. **Overall percentage:** items done divided by total, adjusted for partial items. Always say whether it is a count or an estimate; never pass an estimate off as a measurement.
-5. **Blocked items:** say what they wait on.
-6. **Last bullet:** surface anything that needs the user (a decision, an approval); if nothing does, say "nothing needs your input".
-7. If there are no to-dos in the session, say so in one line instead of drawing empty bars.
+1. **Source of truth:** the task list; if empty, work the conversation clearly established. Never invent items. No to-dos at all: one line saying so, no bars.
+2. **Glyphs:** `✓` done · `●` in progress · `○` not started · `⏸` blocked (say on what) · `✗` failed or abandoned (say why). Failed and blocked items are never hidden.
+3. **Bars:** 10 cells per item, 20 for the overall bar (`█` done, `░` left). Finished items skip the bar and show `done:` plus evidence (committed, merged, tests green), not just the word.
+4. **The number is derived, not felt:** done = 1, in progress = the fraction you can justify from steps completed, others = 0. Overall = their mean. Show it as "X of N items" beside the percent; use `~` and say "estimate" when any fraction was judged rather than counted. If items are clearly unequal in size, say you weighted them and how.
+5. **Many items:** with more than 7, collapse the done ones into one line ("✓ 6 done: …names") and list only the rest. With several goals, one overall bar per goal, with their items beneath.
+6. **Order:** done first, then in progress, blocked, not started — so the frontier sits in the middle of the block.
+7. **Next:** one line, the single next action and who takes it (me, a subagent, you).
+8. **Bullets:** the last bullet surfaces anything that needs the user (a decision, approval, credential); if nothing does, say "nothing needs your input".
 
 ## Anti-pattern
 
-Narrating history. Report state, not a log of what happened.
+Narrating history, or padding. Report state, not a log of what happened; if a line doesn't change the reader's picture of what's left, cut it.
