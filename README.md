@@ -55,6 +55,8 @@ Push changes to this repo, then in Claude Code:
 - `build` — rebuild worktree containers, dodging port conflicts
 - `dispatch` — /dispatch, launch a subagent (Sonnet by default, or a model you name) to investigate and fix something
 - `d` — /d, alias for /dispatch
+- `progress` — /progress, print the session's to-do progress as bars with a rough overall percentage
+- `p` — /p, alias for /progress
 - `interview` — /interview, ask the open questions in context via the option-picker UI, each explained simply with a recommended option
 - `explain` — /explain, business-view mental model (who / what / why it matters) with ASCII flowcharts and sequence diagrams; `--technical` for the code-architecture view
 - `walkthrough` — /walkthrough, build a click-through artifact of a flow's screens and branches from the real code: path tabs, a mock stage, and a step card saying what the user sees and what happens behind the scenes
