@@ -1,11 +1,25 @@
 ---
 name: mockup
-description: Use when the user invokes /mockup, or asks to draft, mock up or sketch a NEW or changed UI feature as an artifact that must match the existing app and tell the builder what to build it with — "draft this screen", "mock it up faithfully", "annotate which components to use", "show what is new vs what exists". The draft is built from the real source, marks what is new, and carries build notes that name the real components.
+description: Use when the user invokes /mockup, or asks to draft, mock up or sketch a NEW or changed UI feature as an artifact that must match the existing app and tell the builder what to build it with — "draft this screen", "mock it up faithfully", "annotate which components to use", "show what is new vs what exists". The draft is built from the real source, marks what is new, and carries build notes that name the real components. Pass `--backend` (synonym `--brainstorm`) to also propose how the feature is built on the backend (modules, domain, persistence, routes, access, tests per tier, alternatives) before drafting.
 ---
 
 # mockup
 
 Draft a new feature as one HTML artifact that a builder can read instead of the spec. Three promises: every part that exists today looks and reads exactly like the app, every new part is visibly marked, and every part names the existing component to build it with. A draft that is only plausible is worse than none, because the builder will copy its mistakes.
+
+## Optional: propose the backend first
+
+If the arguments contain `--backend` (or its synonym `--brainstorm`), remove it; the rest is the feature description, as without it. Without the flag, skip this section.
+
+With it, after reading the real surfaces (section 1) and before drafting, propose how the feature is built on the backend:
+
+1. Read the repo's own rules first when it has them (CLAUDE.md and the standards it routes to: module layering, system rules, adapter wiring, persistence, testing) and follow them.
+2. Propose, ring by ring: the bounded contexts or modules touched; domain entities, values and ports; application services and controllers with their Result types; driven adapters and persistence (tables, repos, whether a migration is needed, described, never written); web routes and wiring; access, tenancy and audit; background workers, events and notifications; the feature flag; settings and secrets; i18n; and the tests per tier the repo defines.
+3. Name the real files and classes to extend, each path verified by reading it; mark what you could not verify **UNSURE**.
+4. For each non-obvious choice, weigh the alternatives with their trade-offs and recommend one. Flag the risks.
+5. Ask the owner only about a backend choice the code and rules cannot settle, the `leave-me-alone:interview` way: `AskUserQuestion`, plain language, the recommended option first. When running unattended or in the background, never ask or block: record it as a **Guess** Decision taking the recommended option, plus an **Open** question naming that option **Recommended**.
+
+Put the result in the existing slots, never a new section or badge: the Build summary gains a backend table beside the component table (module, ring, file or class, kind tag, what changes); Decisions (D1…, **Owner** when answered, **Guess** otherwise); Open questions (Q1…, the risks among them); Alternatives (each choice weighed, the chosen one **Recommended**); Fidelity notes (which backend paths were verified, which inferred). Without the project template, put Alternatives after Open questions.
 
 ## 1. Read the real thing first
 
@@ -22,11 +36,11 @@ Tag every claim **verified** (read in source) or **inferred**. If you did not re
 
 One file, one page, English unless told otherwise. Load `artifact-design` first, then publish with the Artifact tool, updating the same URL on every later pass.
 
-**Start from the project's template when it has one.** If `docs/artifacts/_mockup-template.html` exists in the repo, the page MUST be built from it: copy it to `docs/artifacts/<feature>-mockup.html`, replace the blocks marked `TEMPLATE: replace`, fill its sections in its order, and keep its page chrome unchanged (the sticky top bar with the two toggles and the theme control, the Contents sidebar built from `<section data-nav>`, the marker and badge classes, each section's `data-allow` list, the build-note pin markup and its script). Do not invent a second layout. Only when that file does not exist, build the page from the fallback structure below.
+**Start from the project's template when it has one.** If `docs/artifacts/_mockup-template.html` exists in the repo, the page MUST be built from it: copy it to `docs/artifacts/<feature>-mockup.html`, replace the blocks marked `TEMPLATE: replace`, fill its sections in its order, and keep its page chrome unchanged (the sticky top bar with the two toggles and the theme control, the Contents sidebar built from `<section data-nav>` and the top-bar button that collapses it, the marker and badge classes, each section's `data-allow` list, the build-note pin markup and its script). Do not invent a second layout. Only when that file does not exist, build the page from the fallback structure below.
 
 The template's section order: Intent, Read first (where the code differs from the brief), Decisions (D1…), Open questions (Q1…), Not drawn, Alternatives (optional), Hero, lettered cards (a Today/After pair where a surface changes), Rules (optional, R1… with today, proposed rule, severity, source and the cards that show it), Build summary, Fidelity notes, Revisions, Badge reference.
 
-- **Page chrome** (fallback only): a sticky top bar with the title and the toggles from sections 3 and 4, and a Contents sidebar listing every section with scroll-spy, collapsing into a drawer on narrow screens.
+- **Page chrome** (fallback only): a sticky top bar with the title and the toggles from sections 3 and 4, and a Contents sidebar listing every section with scroll-spy, collapsible from a top-bar button on wide screens (the choice remembered per viewer in `localStorage` inside try/catch, expanded by default) and a drawer on narrow ones.
 - **Hero**: the main surface at its real size (a drawer is its real width, in its real surrounding, over a dimmed neighbour), with the states side by side. Interactive where cheap: disclosures, toggles, an expand animation, a replay button. Respect reduced motion.
 - **Cards**: lettered, each a caption plus a stage showing one state, one dialog or one list. The caption says what the card proves.
 - **Decisions** and **Open questions** notes at the top. A decision records who made it; a guess is labelled a guess.
@@ -70,4 +84,4 @@ Each note has: a kind tag (**BUILTIN** from the UI framework, **PRIMITIVE** from
 
 ## 6. Report
 
-Lead with the URL. Then, in order: where the real app differed from what you were told (the part to read first), what is new versus existing in three lines, the UNSURE notes, and the open questions the page now lists.
+Lead with the URL. Then, in order: where the real app differed from what you were told (the part to read first), what is new versus existing in three lines, the UNSURE notes, and the open questions the page now lists. After `--backend`, also the backend proposal in a few lines (modules touched, migration or not, new routes), the alternatives considered (the recommended one first), the decisions made, each marked owner or guess, and the risks.

@@ -59,7 +59,7 @@ Push changes to this repo, then in Claude Code:
 - `interview` — /interview, ask the open questions in context via the option-picker UI, each explained simply with a recommended option
 - `explain` — /explain, business-view mental model (who / what / why it matters) with ASCII flowcharts and sequence diagrams; `--technical` for the code-architecture view
 - `walkthrough` — /walkthrough, build a click-through artifact of a flow's screens and branches from the real code: path tabs, a mock stage, and a step card saying what the user sees and what happens behind the scenes
-- `mockup` — /mockup, draft a new or changed UI feature as an artifact that matches the existing app: built from the real source, new elements marked, and build notes naming the real components (builtins, primitives) to build each part with
+- `mockup` — /mockup, draft a new or changed UI feature as an artifact that matches the existing app: built from the real source, new elements marked, and build notes naming the real components (builtins, primitives) to build each part with; `--backend` (synonym `--brainstorm`) to also propose the backend build (modules, persistence, routes, access, tests, alternatives)
 - `tree` — /tree, draw an ASCII containment/hierarchy tree of a class/module/domain-model's nesting
 - `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
 - `setup-milestone` — turns a spec into a `brd` milestone card with story and subtask cards
