@@ -1,11 +1,11 @@
 ---
-name: bedtime
-description: Keep `am` (agent-manager) runs moving unattended while the developer sleeps. Watches the run event stream, and on every escalation diagnoses it, makes a judgement call to fix it, and resumes the run, never stopping to ask a question. Use when the user says "/bedtime", "I'm going to sleep", "I'm heading to bed", "keep the runs going overnight", or asks you to babysit/shepherd `am` runs while they are away.
+name: afk
+description: Keep `am` (agent-manager) runs moving unattended while the developer is away from the keyboard and cannot make decisions. Watches the run event stream, and on every escalation diagnoses it, makes a judgement call to fix it, and resumes the run, never stopping to ask a question. Use when the user says "/afk", "I'm going AFK", "I'm stepping away", "I'll be away from my computer", "I'm heading to bed", "keep the runs going while I'm gone", or asks you to babysit/shepherd `am` runs while they are away.
 ---
 
-# bedtime
+# afk
 
-The developer has gone to sleep and cannot answer until morning. Your job is to keep `am` runs moving, unblock escalations yourself, and leave a clear report for the morning.
+The developer is away from the computer and cannot answer or make decisions until they are back. The work has to keep going without them: keep `am` runs moving, unblock escalations yourself, and leave a clear report for when they return.
 
 ## Ground rules
 
@@ -18,7 +18,7 @@ The developer has gone to sleep and cannot answer until morning. Your job is to 
 
 1. Find the runs to shepherd: those the user named, or else this repo's active ones (`am runs --pretty`, `am status <run-id> --pretty`).
 2. Determine the repo's `--verify` gate commands (from the original `am run`, the run's recorded suite via `am status`, the repo's docs or CI config). `am resume` needs `--verify` every time.
-3. Create the morning report file at `~/.claude/bedtime/<repo-name>-<YYYY-MM-DD>.md` and append to it as you go (see "Morning report").
+3. Create the report file at `~/.claude/afk/<repo-name>-<YYYY-MM-DD>.md` and append to it as you go (see "Report").
 4. Handle any run that is **already** escalated: `am events --escalations --project <repo> --pretty`.
 
 ## 2. Watch
@@ -48,7 +48,7 @@ Filter its JSON lines to events that need action: a run going `escalated`, `done
 
    Always pass `--verify` on every resume: a resume without it records an empty suite, and a later `--verify` does not repair it. If a run was already started without `--verify`, the fix is `am reset <run-id>` plus a fresh `am run --milestone ... --verify ...` (progress on branches is kept; check what the run will redo first).
 4. **Verify the relaunch took.** Confirm the run left `escalated` (`am status`) and the stream shows progress before moving on.
-5. **Log it** in the morning report: run, card, what broke, root cause, what you changed, what you decided and why.
+5. **Log it** in the report: run, card, what broke, root cause, what you changed, what you decided and why.
 
 ## Parking
 
@@ -61,11 +61,11 @@ To park: leave the run escalated (or `am pause`/`am cancel` if it is still burni
 
 ## Finishing
 
-Keep watching until every shepherded run is `done` or parked. Then stop the monitor and finish with the morning report.
+Keep watching until every shepherded run is `done` or parked. Then stop the monitor and finish with the report.
 
-## Morning report
+## Report
 
-Keep `~/.claude/bedtime/<repo-name>-<YYYY-MM-DD>.md` up to date as events happen, so it is accurate even if the session dies. Sections, in this order:
+Keep `~/.claude/afk/<repo-name>-<YYYY-MM-DD>.md` up to date as events happen, so it is accurate even if the session dies. Sections, in this order:
 
 1. **Status**: one line per run: done / running / parked.
 2. **Needs you**: parked escalations, each with the cause, what you tried, and the decision for the developer (recommended option first).
@@ -76,7 +76,7 @@ End your final message with a short version of "Needs you" and the report path.
 
 ## Common mistakes
 
-- Asking the developer anything. They are asleep; decide, record, move on.
+- Asking the developer anything. They are away; decide, record, move on.
 - Polling `am runs` in a loop instead of the `am watch --all --follow --from-now` stream.
 - Resuming without `--verify`.
 - Making a run pass by loosening the gate instead of fixing the cause.
