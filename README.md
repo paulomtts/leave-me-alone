@@ -52,7 +52,7 @@ Push changes to this repo, then in Claude Code:
 - `bench-prompt` — benchmark a prompt change with a repeated synthetic-input harness
 - `brief` — /brief, fast recap of conversation/task state, with a progress bar over the session's to-dos
 - `b` — /b, alias for /brief
-- `bedtime` — /bedtime, unattended overnight mode: watch `am` runs, fix escalations by judgement call, resume, and leave a morning report; never asks questions
+- `afk` — /afk, unattended away-from-keyboard mode for when you cannot make decisions: watch `am` runs, fix escalations by judgement call, resume, and leave a report for when you are back; never asks questions
 - `build` — rebuild worktree containers, dodging port conflicts
 - `dispatch` — /dispatch, launch a subagent (Sonnet by default, or a model you name) to investigate and fix something
 - `d` — /d, alias for /dispatch
