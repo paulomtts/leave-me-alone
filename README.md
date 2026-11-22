@@ -54,6 +54,7 @@ Push changes to this repo, then in Claude Code:
 - `b` — /b, alias for /brief
 - `afk` — /afk, unattended away-from-keyboard mode for when you cannot make decisions: watch `am` runs, fix escalations by judgement call, resume, and leave a report for when you are back; never asks questions
 - `build` — rebuild worktree containers, dodging port conflicts
+- `ship` — /ship, take a change all the way: commit, push, open a PR, watch CI (fixing failures), squash-merge, and cut a GitHub release; `--reinstall` also updates the locally installed plugin
 - `dispatch` — /dispatch, launch a subagent (Sonnet by default, or a model you name) to investigate and fix something
 - `d` — /d, alias for /dispatch
 - `interview` — /interview, ask the open questions in context via the option-picker UI, each explained simply with a recommended option
