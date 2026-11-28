@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PreToolUse hook for Bash: auto-allows the command patterns leave-me-alone's skills
-# (containers, milestone, github-project-setup, smoke, orchestrator/task workflows)
+# (build, smoke, ship, setup-milestone, afk)
 # routinely need, so the auto-mode classifier doesn't re-litigate them every session.
 #
 # Anything not matched below falls through untouched (no JSON emitted) so normal
@@ -18,7 +18,7 @@ cmd="$(jq -r '.tool_input.command // empty' <<<"$input")"
 # does that. Every rule below is written to carry that tail restriction
 # itself; this guard only rules out the separate multi-line case, where an
 # unrelated line could ride along on a matching one in either order. No
-# legitimate command these workflows emit spans lines, so refuse the whole
+# command these rules are meant to cover spans lines, so refuse the whole
 # class here rather than making every present and future rule remember this.
 case "$cmd" in *$'\n'*) exit 0 ;; esac
 
@@ -56,7 +56,7 @@ fi
 # `brd delete` is deliberately NOT in the list. It satisfies that same "local
 # board only" test, and it is still different in kind: it is IRREVERSIBLE, and
 # `--cascade` takes a milestone's whole subtree with it. Nothing writes a board
-# snapshot automatically (see setup-report), so there is no file to restore
+# snapshot automatically, so there is no file to restore
 # from afterwards. The asymmetry that decides every other rule in this file
 # decides this one too, just in the other direction — a prompt costs one
 # keystroke, a wrongly-allowed cascade costs the board.
@@ -66,10 +66,10 @@ fi
 # growing a destructive verb cannot silently widen a permission already
 # granted. The cost is editing this line when brd gains a benign subcommand.
 #
-# The `cd <dir> && ` prefix is matched explicitly because task.js's trigger
-# steps pin brd's working directory that way (brd resolves its project by
-# walking up from the cwd), and every pattern in this file is ^-anchored — a
-# bare `brd` rule would never match the commands that actually run.
+# The `cd <dir> && ` prefix is matched explicitly because brd resolves its
+# project by walking up from the cwd, so callers pin the directory that way,
+# and every pattern in this file is ^-anchored — a bare `brd` rule would never
+# match those commands.
 #
 # The prefix is deliberately narrow: no `;`, `&`, `|`, `$`, backtick, parens,
 # `<` or `>` inside the path or the trailing arguments, so it cannot become a

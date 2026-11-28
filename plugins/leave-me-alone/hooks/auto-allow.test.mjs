@@ -120,9 +120,9 @@ test('brd delete is NOT auto-allowed, and a new subcommand defers by default', (
   assert.equal(decide('brd not-a-real-subcommand'), null)
 })
 
-test('brd is allowed when the working directory is pinned, which is how task.js calls it', () => {
+test('brd is allowed when the working directory is pinned, which is how callers outside the repo run it', () => {
   // Every pattern in this hook is ^-anchored, so this form needs explicit
-  // support — without it the commands the workflows actually run never match.
+  // support — without it pinned commands never match.
   assert.equal(decide('cd /abs/repo && brd show a32af745-15ef-45cd-b52c-64c19ae82c17'), 'allow')
   assert.equal(decide('cd /abs/repo && brd tree'), 'allow')
 })
@@ -156,7 +156,7 @@ test('a multi-line command is never allowed, whatever it contains', () => {
 })
 
 test('a legitimate brd command is still allowed', () => {
-  // The rule must stay useful — these are what the workflows actually run.
+  // The rule must stay useful — these are the commands it exists for.
   assert.equal(decide('brd tree'), 'allow')
   assert.equal(decide('cd /abs/repo && brd show a32af745-15ef-45cd-b52c-64c19ae82c17'), 'allow')
   assert.equal(decide('brd update abc --status done'), 'allow')

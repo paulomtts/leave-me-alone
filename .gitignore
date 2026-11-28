@@ -1,3 +1,2 @@
-# Worktrees the task workflow creates. They are full checkouts of this same
-# repo — never repo content.
+# Local Claude Code state, including worktrees — never repo content.
 .claude/

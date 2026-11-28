@@ -4,33 +4,17 @@ Personal Claude Code plugin marketplace.
 
 ## Requirements
 
-| | why | if missing |
-|---|---|---|
-| **bun** | every helper script runs under it — the workflows literally invoke `bun <script>.mjs` | the run stops at its first trigger step |
-| **superpowers** plugin | `superpowers:writing-plans` defines the plan format that Implement and Review both assume | **the run stops.** Plan reports whether it actually invoked the skill, and a plan written from memory is refused rather than treated as equivalent |
-| **gh**, authenticated | needed only if a human plans to push/open PRs or for `setup-report`'s CI check | DRIVE runs never call it — work stays on local branches; a human merges the Integrate branch themselves |
-| **git** | worktrees, branches, stacked bases | — |
-| **brd**, initialized (`brd init`) | the local kanban board: stories, subtasks, `blockedBy` | fails at Detect |
+| | needed by |
+|---|---|
+| **git** | `ship`, `build` |
+| **gh**, authenticated | `ship` |
+| **brd**, initialized (`brd init`) | `setup-milestone` |
+| **am** (agent-manager) | `afk`, and running the milestones `setup-milestone` creates |
+| **jq** | the auto-allow hook |
+| **superpowers** plugin | `setup-milestone` assumes a spec produced by `superpowers:brainstorming`; nothing enforces it |
 
-Claude Code has no plugin dependency mechanism — no `dependencies` key exists in any `plugin.json`
-or `marketplace.json`, including Anthropic's own — so the plugin cannot pull superpowers in for you.
-Instead its SessionStart hook **warns** when `bun` or the `writing-plans` skill is missing, with the
-command to fix it. That is a pointer, not a guarantee: the exact check is Plan reporting whether it
-actually invoked the skill, which stops the run when it did not.
-
-**Node is not needed to run a milestone**, only to run this repo's own test suite — and it must be
-`node --test`, not `bun test`: the tests are written against `node:test`, which bun's runner cannot
-execute. Run it as **`npm test`**; `package.json` exists only to carry that command (the repo has no
-npm dependencies and is not published). Keep it there rather than only in this prose: a run's Detect
-step reads the manifest to learn how to verify a subtask, and a suite it cannot find is a suite
-subtasks refuse to run without.
-
-Softer couplings, which degrade rather than stop: the `code-worker` agent is told to reach for
-`superpowers:test-driven-development` and `superpowers:systematic-debugging`, and `setup-milestone`
-assumes a spec produced by `superpowers:brainstorming`. Nothing enforces either.
-
-Verified against superpowers 6.0.3 and 6.3.0 — the `docs/superpowers/{plans,specs}/` layout and the
-spec/plan reviewer templates are unchanged across that bump.
+Run this repo's test suite with **`npm test`** (`node --test`; there are no npm dependencies and
+nothing is published).
 
 ## Install
 
@@ -62,9 +46,7 @@ Push changes to this repo, then in Claude Code:
 - `walkthrough` — /walkthrough, build a click-through artifact of a flow's screens and branches from the real code: path tabs, a mock stage, and a step card saying what the user sees and what happens behind the scenes
 - `mockup` — /mockup, draft a new or changed UI feature as an artifact that matches the existing app: built from the real source, new elements marked, and build notes naming the real components (builtins, primitives) to build each part with; `--backend` (synonym `--brainstorm`) to also propose the backend build (modules, persistence, routes, access, tests, alternatives)
 - `tree` — /tree, draw an ASCII containment/hierarchy tree of a class/module/domain-model's nesting
-- `setup-project` — preps a repo's `brd` board (running `brd init` if needed) for the orchestrator/task workflows
-- `setup-milestone` — turns a spec into a `brd` milestone card with story and subtask cards
-- `setup-report` — renders an in-flight-work progress dashboard as an Artifact
+- `setup-milestone` — turns a spec into a `brd` milestone card with story and subtask cards, ready for `am` to run
 - `smoke` — /smoke, drive the app in Chrome: rebuild + smoke-test recent work (delivered mode), or stress-test one component/screen area from its actual code with a findings report + recommendation (component mode)
 
 ## Auto-allow hook
