@@ -1,17 +1,17 @@
 ---
 name: setup-milestone
-description: Use when turning an agreed spec into a milestone with story cards and granular subtask cards — "create a milestone", "set up a milestone for X", "break this spec/milestone/step into stories and subtasks", "add subtasks to the board" — on repos tracked with `brd` that the orchestrator/task workflows drive.
+description: Use when turning an agreed spec into a milestone with story cards and granular subtask cards — "create a milestone", "set up a milestone for X", "break this spec/milestone/step into stories and subtasks", "add subtasks to the board" — on repos tracked with `brd` that `am` (agent-manager) drives.
 ---
 
 # Turning a spec into a milestone of stories and subtasks
 
 Milestone = a top-level `brd` card (no parent). Story = a card parented to the milestone
 (`--parent <milestone id>`). Subtask = a card parented to a story (`--parent <story id>`) — a real
-card the workflows can dispatch, verify, and commit to its local branch, never a body checklist. `brd`'s hierarchy
+card `am` can dispatch, verify, and commit to its local branch, never a body checklist. `brd`'s hierarchy
 IS the board: there is no label or view to get wrong, but a card created with the wrong `--parent` is
 just as invisible to the story it should belong to.
 
-The breakdown IS the product here. The workflows are only as good as the cards you hand them: a well-cut subtask gets a tight plan, a small diff, and a review that can actually gate it. An over-cut one gets a vague plan and a review that rubber-stamps a sprawling diff.
+The breakdown IS the product here. `am` is only as good as the cards you hand them: a well-cut subtask gets a tight plan, a small diff, and a review that can actually gate it. An over-cut one gets a vague plan and a review that rubber-stamps a sprawling diff.
 
 ## Start from a spec, not from the milestone
 
@@ -88,7 +88,7 @@ in one checkout without becoming an unreadable pile. It is not what makes them u
 (the first 8 hex characters of the card's UUID) already does that, and matching keys on that short id
 alone, so editing a card's title after its branch is created never orphans the branch.
 
-So the ordering you give subtasks *is* the stack geometry. The workflow re-derives it from scratch on every run and looks for each branch at exactly that address — nothing is remembered between runs.
+So the ordering you give subtasks *is* the stack geometry. `am` re-derives it from scratch on every run and looks for each branch at exactly that address — nothing is remembered between runs.
 
 Two consequences, both load-bearing:
 
@@ -128,7 +128,7 @@ Why it cuts this way:
 - **7d8e9f0a is its own story, not a third subtask of a1b2c3d4**, because it is a different kind of work with a different footprint (`README`, not `scripts/`). As a story blocked by a1b2c3d4 it roots on `task-c9d0e1f2`, so its worktree contains both finished flags — it can document what was actually built.
 - **7d8e9f0a has no tests, and that is right.** Judged by the behavior-subtask rule it would look "too small" and get folded in; judged as docs, it is correctly sized.
 
-What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root at `main` and document flags its worktree cannot see), or giving 3a4b5c6d a second blocker (the run refuses to root a stack on two parents).
+What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root at `main` and document flags its worktree cannot see), or giving 3a4b5c6d a second blocker it does not need (its root becomes a merge of both tips, for a dependency that isn't real).
 
 ## Sequence
 
@@ -160,7 +160,7 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
    ```
 5. **Story dependencies** — set `blockedBy` edges between stories with `brd block`. **Not optional**, and *not* the same thing as parenting: parenting is milestone→story→subtask, this is story→story.
 
-   **At most ONE blocker per story.** The orchestrator roots a story's stack on its blocker's tip branch, and it can only root on one parent — a story with two blockers stops the run with an error rather than guessing. If the spec really needs two, either merge the blockers first, or chain them (A ← B ← C) so each has a single parent.
+   **A story with two or more blockers** is rooted on a merged base: `am` merges the blockers' tips into one branch and verifies it before the story starts. That is allowed, but each extra edge is another merge that can conflict, so record only the real ones.
    ```bash
    brd block <BLOCKED_STORY_ID> --by <BLOCKER_STORY_ID>
    ```
@@ -169,24 +169,12 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
    ```bash
    brd tree <milestone id>
    ```
-   Check: the milestone shows every story and subtask you meant to create, each story's subtasks are chained in the right order, and each story's `blocked_by` matches the DAG you wrote down in step 5. **If more than one story has no blockers, stop and check each against the DAG you wrote down** — a flat list of unblocked stories often means an edge was never written; it is fine only when each root truly needs nothing from the others. **If any story shows two or more blockers, fix it now** — the orchestrator will refuse it.
+   Check: the milestone shows every story and subtask you meant to create, each story's subtasks are chained in the right order, and each story's `blocked_by` matches the DAG you wrote down in step 5. **If more than one story has no blockers, stop and check each against the DAG you wrote down** — a flat list of unblocked stories often means an edge was never written; it is fine only when each root truly needs nothing from the others. For any story with two or more blockers, confirm it needs code from each.
 7. **Dry run** — the real pre-flight, writes nothing:
+   ```bash
+   am run --milestone "<brd card id or title substring>" --branch-prefix m12 --dry-run --pretty
    ```
-   Workflow({ name: "orchestrator" }, args: {
-     repo, repoDir, milestone: "<brd card id or title substring>", baseBranch, nonce: "<now>", dryRun: true,
-     taskScript: "/abs/path/to/leave-me-alone/workflows/task.js",
-     detectScript: "/abs/path/to/leave-me-alone/scripts/detect.mjs",
-     branchPrefix: "m12"
-   })
-   ```
-   `taskScript` and `detectScript` are always required — absolute paths, no default, since this repo
-   can be checked out anywhere. `branchPrefix` is required here too because `milestone` is a card
-   id/title substring rather than a positive integer, so there is no safe default to derive one
-   from (a title could produce an invalid git ref). Addressing the milestone by a plain positive
-   integer instead (`milestone: 12`) is the one case where `branchPrefix` can be omitted — it then
-   defaults to `m12`.
-
-   No `project` argument — `brd` resolves everything by walking the repo directory, per `setup-project`. Check the `base` column: each subtask should build on the previous subtask's branch, and each story's first subtask should build on its blocker's tip (or the base, if unblocked). If that column is wrong, the breakdown is wrong — fix the board, not the workflow.
+   `--branch-prefix` is required, and must stay the same for the milestone's whole life. Run it from the repo, or pass `--repo-dir`. Check each subtask's `base`: it should be the previous subtask's branch, and each story's first subtask should build on its blocker's tip, its merged base (two or more blockers), or the base branch if unblocked. If that is wrong, the breakdown is wrong — fix the board.
 
 ## Gotchas
 
@@ -195,14 +183,13 @@ What would make this breakdown wrong: putting 7d8e9f0a in level 0 (it would root
 | Writing scope while breaking down | Breakdown reads a spec; it does not author one. Run `superpowers:brainstorming` first. |
 | Body checklists "for visibility" | Double-tracking; `brd tree` already renders progress from the real card hierarchy. Omit. |
 | Creating a milestone that already exists under a slightly different title | Check Rule zero's `brd tree` first — near-duplicate milestones split tracking. Reuse the existing one. |
-| Assuming `--parent` implies execution order | It doesn't. Parenting is milestone→story→subtask containment; the orchestrator orders *stories*, and a story's *subtasks*, by `blocked_by` only. A tree can render perfectly while every `blocked_by` list is empty. |
-| Treating empty `blockedBy` as harmless | The orchestrator cannot tell "no deps recorded" from "genuinely independent" — both are `[]`. It places every story at level 0 and dispatches them all at once, against a base none of them has built on. |
-| Giving a story two blockers | Stops the run: a stack can only root on one parent branch. Chain them instead. |
+| Assuming `--parent` implies execution order | It doesn't. Parenting is milestone→story→subtask containment; `am` orders *stories*, and a story's *subtasks*, by `blocked_by` only. A tree can render perfectly while every `blocked_by` list is empty. |
+| Treating empty `blockedBy` as harmless | `am` cannot tell "no deps recorded" from "genuinely independent" — both are `[]`. It places every story at level 0 and dispatches them all at once, against a base none of them has built on. |
+| Giving a story a blocker it does not need | It costs parallelism, and a second one adds a merge into the story's base that can conflict. |
 | A subtask that leaves the suite red until the next one lands | Every subtask is verified alone. That split is invalid — move the boundary or merge the two halves. |
 | Folding in a docs/config/refactor card because "it has no tests" | That rule is for behavior-changing subtasks only. Judge these on their own terms — see "Subtasks that ship no behavior". |
 | A docs card written from the spec | It must read the actual implementation, which means it has to sit *after* that work in the stack. Name the files to read in its body. |
-| Expecting the run to merge anything | It does not. Each story becomes a stack of committed local branches. A subtask's card reaches `done` when it is verified and committed to its local branch — nothing is pushed. The orchestrator's Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves. |
+| Expecting the run to merge anything | It does not. Each story becomes a stack of committed local branches. A subtask's card reaches `done` when it is verified and committed to its local branch — nothing is pushed. `am`'s Integrate phase merges all stories into one local branch; a human then runs `git merge <that branch>` into `main`/`master` themselves. |
 | Subtasks not chained with `--blocked-by` | Order falls back to creation order, which re-attaching a child can change. The stack geometry is derived from that order, so it can shift between runs. Always chain a story's subtasks. |
 | Reordering subtasks after their branches exist | The bases are derived from order, so reordering re-points them and the existing branches sit on the wrong parent. Fix by re-stacking by hand or don't reorder. |
 | Changing `branchPrefix` between runs of the same milestone | Branch names are derived from it, so the run looks for branches at a new address. Nothing detects work done under the old prefix — it reads as unstarted and gets re-dispatched onto a fresh branch. Only a re-run with the original prefix avoids this; `branchPrefix` must stay constant for a milestone's whole lifetime. |
-| Fixing the edges, then resuming the orchestrator run | Detect's result is cached on its prompt; a resume replays the stale empty snapshot. Relaunch as a NEW run with a fresh `nonce`. |

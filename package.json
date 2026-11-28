@@ -4,6 +4,6 @@
   "private": true,
   "description": "Test manifest for this plugin repo. The plugin itself ships no JS dependencies and is not published to npm — this file exists so the repo states its own verification command in a place tools can read, rather than only in README prose.",
   "scripts": {
-    "test": "node --test plugins/leave-me-alone/scripts/ plugins/leave-me-alone/workflows/ plugins/leave-me-alone/hooks/ plugins/leave-me-alone/skills/"
+    "test": "node --test plugins/leave-me-alone/hooks/ plugins/leave-me-alone/skills/"
   }
 }
